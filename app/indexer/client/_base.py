@@ -136,7 +136,7 @@ class _IIndexClient(metaclass=ABCMeta):
                     page_url = DomUtils.tag_value(item, "comments", default="")
 
                     # 做种数
-                    seeders = 0
+                    seeders = -1
                     # 下载数
                     peers = 0
                     # 是否免费
@@ -152,7 +152,7 @@ class _IIndexClient(metaclass=ABCMeta):
                     for torznab_attr in torznab_attrs:
                         name = torznab_attr.getAttribute('name')
                         value = torznab_attr.getAttribute('value')
-                        if name == "seeders":
+                        if name == "seeders" and value is not None and int(value) > 0:
                             seeders = value
                         if name == "peers":
                             peers = value
