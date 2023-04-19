@@ -1185,7 +1185,7 @@ class WebAction:
             os.system("git clean -dffx")
             # 升级
             branch = "dev" if os.environ.get(
-                "NASTOOL_VERSION") == "dev" else "master"
+                "NASTOOL_VERSION") == "dev" else "main"
             os.system(f"git fetch --depth 1 origin {branch}")
             os.system(f"git reset --hard origin/{branch}")
             os.system("git submodule update --init --recursive")
