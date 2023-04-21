@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - master
+      - main
     paths:
       - version.py
       - docker/Dockerfile
@@ -17,7 +17,7 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@master
+        uses: actions/checkout@main
 
       -
         name: Release version
