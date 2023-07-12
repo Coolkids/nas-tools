@@ -1,3 +1,4 @@
+from functools import lru_cache
 import cn2an
 
 from app.media import Media, Bangumi, DouBan
@@ -155,3 +156,17 @@ class WebUtils:
                     tmp_info.title = "%s 第%s集" % (tmp_info.title, meta_info.begin_episode)
                 medias.append(tmp_info)
         return medias
+
+    @staticmethod
+    @lru_cache(maxsize=128)
+    def request_cache(url):
+        """
+        带缓存的请求
+        """
+        if url.find('douban'):
+            ret = RequestUtils(referer="https://movie.douban.com").get_res(url)
+        else:
+            ret = RequestUtils().get_res(url)
+        if ret:
+            return ret.content
+        return None
