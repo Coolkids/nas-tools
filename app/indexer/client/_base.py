@@ -9,6 +9,8 @@ from app.media import Media
 from app.media.meta import MetaInfo
 from app.utils import DomUtils, RequestUtils, StringUtils, ExceptionUtils
 from app.utils.types import MediaType, SearchType
+from config import Config
+from bencode import bdecode
 
 
 class _IIndexClient(metaclass=ABCMeta):
@@ -147,6 +149,8 @@ class _IIndexClient(metaclass=ABCMeta):
                     uploadvolumefactor = 1.0
                     # imdbid
                     imdbid = ""
+                    # infohash
+                    infohash = ""
 
                     torznab_attrs = item.getElementsByTagName("torznab:attr")
                     for torznab_attr in torznab_attrs:
@@ -164,6 +168,34 @@ class _IIndexClient(metaclass=ABCMeta):
                             uploadvolumefactor = value
                         if name == "imdbid":
                             imdbid = value
+                        if name == "infohash":
+                            infohash = value
+
+                    if enclosure.startswith("http"):
+                        req = RequestUtils(
+                            proxies=Config().get_proxies() if False else None
+                        ).get_res(url=enclosure, allow_redirects=False)
+                        if req and req.status_code == 200:
+                            if not req.content:
+                                magnet_links = "magnet:?xt=urn:btih:" + infohash.lower()
+                                log.info(
+                                    f"【{indexer}】{title}:{enclosure} 未下载到种子数据 转换使用磁力链 磁力链:{magnet_links}")
+                                enclosure = magnet_links
+                            # 解析内容格式
+                            if req.text and not str(req.text).startswith("magnet:"):
+                                try:
+                                    bdecode(req.content)
+                                except Exception as err:
+                                    magnet_links = "magnet:?xt=urn:btih:" + infohash.lower()
+                                    log.info(
+                                        f"【{indexer}】{title}:{enclosure} 种子数据有误 转换使用磁力链 磁力链:{magnet_links}")
+                                    enclosure = magnet_links
+                        else:
+                            magnet_links = "magnet:?xt=urn:btih:" + infohash.lower()
+                            log.info(
+                                f"【{indexer}】{title}:{enclosure} 下载种子失败 转换使用磁力链 磁力链:{magnet_links}")
+                            enclosure = magnet_links
+
 
                     tmp_dict = {'indexer_id': indexer_id,
                                 'indexer': indexer,
