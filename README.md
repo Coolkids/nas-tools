@@ -9,7 +9,7 @@
 [![Platform](https://img.shields.io/badge/platform-amd64/arm64-pink?style=plastic)](https://hub.docker.com/r/jxxghp/nas-tools)
 
 
-Docker：https://hub.docker.com/repository/docker/jxxghp/nas-tools
+Docker：https://hub.docker.com/r/coolkid903/nas-tools
 
 TG频道：https://t.me/nastool
 
@@ -64,7 +64,7 @@ nohup python3 run.py &
 ### 3、Windows
 下载exe文件，双击运行即可，会自动生成配置文件目录
 
-https://github.com/jxxghp/nas-tools/releases
+https://github.com/Coolkids/nas-tools/releases
 
 ### 4、群晖套件
 添加矿神群晖SPK套件源直接安装：
