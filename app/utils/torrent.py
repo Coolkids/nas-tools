@@ -1,11 +1,14 @@
 import os.path
 import re
 import datetime
+import log
+
 from urllib.parse import quote, unquote
 
 from bencode import bdecode
 
 from app.utils.http_utils import RequestUtils
+from app.utils.path_utils import PathUtils
 from config import Config
 
 # Trackers列表
@@ -205,7 +208,13 @@ class Torrent:
             return ""
         disposition = req.headers.get('content-disposition') or ""
         file_name = re.findall(r"filename=\"?(.+)\"?", disposition)
-        if file_name:
+        file_name_utf8 = re.findall(r"filename\*=UTF-8''(.*?)(?:;|$)", disposition)
+
+        if file_name_utf8:
+            file_name = unquote(str(file_name_utf8[0].encode('UTF-8').decode()).split(";")[0].strip())
+            if file_name.endswith('"'):
+                file_name = file_name[:-1]
+        elif file_name:
             file_name = unquote(str(file_name[0].encode('ISO-8859-1').decode()).split(";")[0].strip())
             if file_name.endswith('"'):
                 file_name = file_name[:-1]
@@ -213,6 +222,12 @@ class Torrent:
             file_name = unquote(url.split("/")[-1])
         else:
             file_name = str(datetime.datetime.now())
+
+        if not PathUtils.is_valid_filename(file_name):
+            log.info("【Torrent】从下载请求中获取种子文件名:%s 非法，替换文件名。" % file_name)
+            file_name = PathUtils.sanitize_filename(file_name)
+            log.info("【Torrent】替换后文件名:%s" % file_name)
+
         return file_name
 
     @staticmethod

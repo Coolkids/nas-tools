@@ -1,5 +1,5 @@
 import os
-
+import re
 
 class PathUtils:
 
@@ -153,3 +153,19 @@ class PathUtils:
         for lv in range(0, level):
             path = os.path.dirname(path)
         return path
+
+    @staticmethod
+    def is_valid_filename(filename):
+        # 文件名合法性的正则表达式
+        valid_characters = r'^[a-zA-Z0-9_\-\.]+$'
+
+        # 使用正则表达式检查文件名是否合法
+        if re.match(valid_characters, filename):
+            return True
+        else:
+            return False
+
+    @staticmethod
+    def sanitize_filename(filename):
+        # 替换不合法字符为下划线
+        return re.sub(r'[^\w\.\-]', '_', filename)

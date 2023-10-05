@@ -115,58 +115,58 @@ const navbar_list = [
       <svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icon-tabler-search" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"></path><circle cx="10" cy="10" r="7"></circle><line x1="21" y1="21" x2="15" y2="15"></line></svg>
     `,
   },
-  {
-    name: "站点管理",
-    list: [
-      {
-        name: "站点维护",
-        page: "site",
-        icon: html`
-          <svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icon-tabler-server-2" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"></path><rect x="3" y="4" width="18" height="8" rx="3"></rect><rect x="3" y="12" width="18" height="8" rx="3"></rect><line x1="7" y1="8" x2="7" y2="8.01"></line><line x1="7" y1="16" x2="7" y2="16.01"></line><path d="M11 8h6"></path><path d="M11 16h6"></path></svg>
-        `,
-      },
-      {
-        name: "数据统计",
-        page: "statistics",
-        icon: html`
-          <!-- https://tabler-icons.io/static/tabler-icons/icons-png/chart-pie.png -->
-          <svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icon-tabler-chart-pie" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
-             <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
-             <path d="M10 3.2a9 9 0 1 0 10.8 10.8a1 1 0 0 0 -1 -1h-6.8a2 2 0 0 1 -2 -2v-7a.9 .9 0 0 0 -1 -.8"></path>
-             <path d="M15 3.5a9 9 0 0 1 5.5 5.5h-4.5a1 1 0 0 1 -1 -1v-4.5"></path>
-          </svg>
-        `,
-      },
-      {
-        name: "刷流任务",
-        page: "brushtask",
-        icon: html`
-          <!-- https://tabler-icons.io/static/tabler-icons/icons-png/checklist.png -->
-          <svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icon-tabler-checklist" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
-            <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
-            <path d="M9.615 20h-2.615a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v8"></path>
-            <path d="M14 19l2 2l4 -4"></path>
-            <path d="M9 8h4"></path>
-            <path d="M9 12h2"></path>
-          </svg>
-        `,
-      },
-      {
-        name: "站点资源",
-        page: "sitelist",
-        icon: html`
-          <!-- https://tabler-icons.io/static/tabler-icons/icons-png/cloud-computing.png -->
-          <svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icon-tabler-cloud-computing" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
-            <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
-            <path d="M6.657 16c-2.572 0 -4.657 -2.007 -4.657 -4.483c0 -2.475 2.085 -4.482 4.657 -4.482c.393 -1.762 1.794 -3.2 3.675 -3.773c1.88 -.572 3.956 -.193 5.444 1c1.488 1.19 2.162 3.007 1.77 4.769h.99c1.913 0 3.464 1.56 3.464 3.486c0 1.927 -1.551 3.487 -3.465 3.487h-11.878"></path>
-            <path d="M12 16v5"></path>
-            <path d="M16 16v4a1 1 0 0 0 1 1h4"></path>
-            <path d="M8 16v4a1 1 0 0 1 -1 1h-4"></path>
-          </svg>
-        `,
-      },
-    ],
-  },
+  // {
+  //   name: "站点管理",
+  //   list: [
+  //     {
+  //       name: "站点维护",
+  //       page: "site",
+  //       icon: html`
+  //         <svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icon-tabler-server-2" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"></path><rect x="3" y="4" width="18" height="8" rx="3"></rect><rect x="3" y="12" width="18" height="8" rx="3"></rect><line x1="7" y1="8" x2="7" y2="8.01"></line><line x1="7" y1="16" x2="7" y2="16.01"></line><path d="M11 8h6"></path><path d="M11 16h6"></path></svg>
+  //       `,
+  //     },
+  //     {
+  //       name: "数据统计",
+  //       page: "statistics",
+  //       icon: html`
+  //         <!-- https://tabler-icons.io/static/tabler-icons/icons-png/chart-pie.png -->
+  //         <svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icon-tabler-chart-pie" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  //            <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
+  //            <path d="M10 3.2a9 9 0 1 0 10.8 10.8a1 1 0 0 0 -1 -1h-6.8a2 2 0 0 1 -2 -2v-7a.9 .9 0 0 0 -1 -.8"></path>
+  //            <path d="M15 3.5a9 9 0 0 1 5.5 5.5h-4.5a1 1 0 0 1 -1 -1v-4.5"></path>
+  //         </svg>
+  //       `,
+  //     },
+  //     {
+  //       name: "刷流任务",
+  //       page: "brushtask",
+  //       icon: html`
+  //         <!-- https://tabler-icons.io/static/tabler-icons/icons-png/checklist.png -->
+  //         <svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icon-tabler-checklist" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  //           <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
+  //           <path d="M9.615 20h-2.615a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v8"></path>
+  //           <path d="M14 19l2 2l4 -4"></path>
+  //           <path d="M9 8h4"></path>
+  //           <path d="M9 12h2"></path>
+  //         </svg>
+  //       `,
+  //     },
+  //     {
+  //       name: "站点资源",
+  //       page: "sitelist",
+  //       icon: html`
+  //         <!-- https://tabler-icons.io/static/tabler-icons/icons-png/cloud-computing.png -->
+  //         <svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icon-tabler-cloud-computing" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  //           <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
+  //           <path d="M6.657 16c-2.572 0 -4.657 -2.007 -4.657 -4.483c0 -2.475 2.085 -4.482 4.657 -4.482c.393 -1.762 1.794 -3.2 3.675 -3.773c1.88 -.572 3.956 -.193 5.444 1c1.488 1.19 2.162 3.007 1.77 4.769h.99c1.913 0 3.464 1.56 3.464 3.486c0 1.927 -1.551 3.487 -3.465 3.487h-11.878"></path>
+  //           <path d="M12 16v5"></path>
+  //           <path d="M16 16v4a1 1 0 0 0 1 1h4"></path>
+  //           <path d="M8 16v4a1 1 0 0 1 -1 1h-4"></path>
+  //         </svg>
+  //       `,
+  //     },
+  //   ],
+  // },
   {
     name: "订阅管理",
     list: [
