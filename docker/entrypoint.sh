@@ -19,7 +19,7 @@ if [ "${NASTOOL_AUTO_UPDATE}" = "true" ]; then
     if [ "${NASTOOL_VERSION}" == "dev" ]; then
       branch="dev"
     else
-      branch="master"
+      branch="main"
     fi
     git clean -dffx
     git fetch --depth 1 origin ${branch}
