@@ -190,6 +190,11 @@ class _IIndexClient(metaclass=ABCMeta):
                                     log.info(
                                         f"【{indexer}】{title}:{enclosure} 种子数据有误 转换使用磁力链 磁力链:{magnet_links}")
                                     enclosure = magnet_links
+                        if req and (req.status_code == 301 or req.status_code == 302):
+                            magnet_links = req.headers.get('Location')
+                            log.info(
+                                f"【{indexer}】{title}:{enclosure} 下载地址跳转 磁力链:{magnet_links}")
+                            enclosure = magnet_links
                         else:
                             magnet_links = "magnet:?xt=urn:btih:" + infohash.lower()
                             log.info(
