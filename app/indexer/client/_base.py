@@ -97,7 +97,7 @@ class _IIndexClient(metaclass=ABCMeta):
         if not url:
             return []
         try:
-            ret = RequestUtils(timeout=10).get_res(url)
+            ret = RequestUtils(timeout=30).get_res(url)
         except Exception as e2:
             ExceptionUtils.exception_traceback(e2)
             return []
@@ -173,7 +173,7 @@ class _IIndexClient(metaclass=ABCMeta):
 
                     if enclosure.startswith("http"):
                         req = RequestUtils(
-                            proxies=Config().get_proxies() if False else None
+                            timeout=60
                         ).get_res(url=enclosure, allow_redirects=False)
                         if req and req.status_code == 200:
                             if not req.content:
@@ -190,16 +190,20 @@ class _IIndexClient(metaclass=ABCMeta):
                                     log.info(
                                         f"【{indexer}】{title}:{enclosure} 种子数据有误 转换使用磁力链 磁力链:{magnet_links}")
                                     enclosure = magnet_links
-                        if req and (req.status_code == 301 or req.status_code == 302):
+                        elif req and (req.status_code == 301 or req.status_code == 302):
                             magnet_links = req.headers.get('Location')
                             log.info(
                                 f"【{indexer}】{title}:{enclosure} 下载地址跳转 磁力链:{magnet_links}")
                             enclosure = magnet_links
-                        else:
+                        elif infohash.lower() != "":
                             magnet_links = "magnet:?xt=urn:btih:" + infohash.lower()
                             log.info(
                                 f"【{indexer}】{title}:{enclosure} 下载种子失败 转换使用磁力链 磁力链:{magnet_links}")
                             enclosure = magnet_links
+                        else:
+                            log.info(
+                                f"【{indexer}】{title}:{enclosure} 下载种子失败 未获取到种子数据"
+                            )
 
 
                     tmp_dict = {'indexer_id': indexer_id,
