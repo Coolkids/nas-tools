@@ -47,7 +47,7 @@ class Prowlarr(_IIndexClient):
         获取配置的prowlarr indexer
         :return: indexer 信息 [(indexerId, indexerName, url)]
         """
-        indexer_query_url = f"{self.host}api/v1/indexerstats?apikey={self.api_key}"
+        indexer_query_url = f"{self.host}api/v1/indexer?apikey={self.api_key}"
         try:
             ret = RequestUtils().get_res(indexer_query_url)
         except Exception as e2:
@@ -55,10 +55,10 @@ class Prowlarr(_IIndexClient):
             return []
         if not ret:
             return []
-        indexers = ret.json().get("indexers", [])
-        return [IndexerConf({"id": v["indexerId"],
-                             "name": v["indexerName"],
-                             "domain": f'{self.host}{v["indexerId"]}/api',
+        indexers = ret.json()
+        return [IndexerConf({"id": v["id"],
+                             "name": v["name"],
+                             "domain": f'{self.host}{v["id"]}/api',
                              "builtin": False})
                 for v in indexers]
 
