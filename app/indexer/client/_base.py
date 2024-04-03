@@ -178,8 +178,6 @@ class _IIndexClient(metaclass=ABCMeta):
                         if req and req.status_code == 200:
                             if not req.content:
                                 magnet_links = "magnet:?xt=urn:btih:" + infohash.lower()
-                                log.info(
-                                    f"【{indexer}】{title}:{enclosure} 未下载到种子数据 转换使用磁力链 磁力链:{magnet_links}")
                                 enclosure = magnet_links
                             # 解析内容格式
                             if req.text and not str(req.text).startswith("magnet:"):
@@ -187,18 +185,12 @@ class _IIndexClient(metaclass=ABCMeta):
                                     bdecode(req.content)
                                 except Exception as err:
                                     magnet_links = "magnet:?xt=urn:btih:" + infohash.lower()
-                                    log.info(
-                                        f"【{indexer}】{title}:{enclosure} 种子数据有误 转换使用磁力链 磁力链:{magnet_links}")
                                     enclosure = magnet_links
                         elif req and (req.status_code == 301 or req.status_code == 302):
                             magnet_links = req.headers.get('Location')
-                            log.info(
-                                f"【{indexer}】{title}:{enclosure} 下载地址跳转 磁力链:{magnet_links}")
                             enclosure = magnet_links
                         elif infohash.lower() != "":
                             magnet_links = "magnet:?xt=urn:btih:" + infohash.lower()
-                            log.info(
-                                f"【{indexer}】{title}:{enclosure} 下载种子失败 转换使用磁力链 磁力链:{magnet_links}")
                             enclosure = magnet_links
                         else:
                             log.info(
