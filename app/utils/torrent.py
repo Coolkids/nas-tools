@@ -223,11 +223,9 @@ class Torrent:
         else:
             file_name = str(datetime.datetime.now())
 
-        if not PathUtils.is_valid_filename(file_name):
-            log.info("【Torrent】从下载请求中获取种子文件名:%s 非法，替换文件名。" % file_name)
-            file_name = PathUtils.sanitize_filename(file_name)
-            log.info("【Torrent】替换后文件名:%s" % file_name)
-
+        name = os.path.splitext(file_name)[0]
+        file_extension = os.path.splitext(file_name)[1]
+        file_name = PathUtils.calculate_md5(name) + file_extension
         return file_name
 
     @staticmethod
@@ -271,4 +269,3 @@ class Torrent:
             target_episodes = list(set(target_info.get("episodes")).intersection(set(source_info.get("episodes"))))
             target[title][index]["episodes"] = target_episodes
         return target
-

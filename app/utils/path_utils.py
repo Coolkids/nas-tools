@@ -1,5 +1,7 @@
 import os
 import re
+import hashlib
+
 
 class PathUtils:
 
@@ -169,3 +171,9 @@ class PathUtils:
     def sanitize_filename(filename):
         # 替换不合法字符为下划线
         return re.sub(r'[^\w\.\-]', '_', filename)
+
+    @staticmethod
+    def calculate_md5(filename):
+        md5_hash = hashlib.md5()
+        md5_hash.update(filename.encode('utf-8'))
+        return md5_hash.hexdigest()
