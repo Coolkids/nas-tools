@@ -1,5 +1,4 @@
 import argparse
-import json
 import os
 import random
 import re
@@ -552,38 +551,9 @@ class FileTransfer:
                 return __finish_transfer(True, "没有新文件需要处理")
         # API检索出媒体信息，传入一个文件列表，得出每一个文件的名称，这里是当前目录下所有的文件了
         Medias = self.media.get_media_info_on_files(file_list, tmdb_info, media_type, season, episode[0])
-        retry_count = 0
-        while retry_count < 3 and not Medias:
-            log.warn("【Rmt】检索媒体信息出错！ 等待1s 重试")
-            sleep(1)
-            Medias = self.media.get_media_info_on_files(file_list, tmdb_info, media_type, season, episode[0])
-            retry_count += 1
-
         if not Medias:
-            log.error("【Rmt】检索媒体信息出错！退出")
-            return __finish_transfer(False, "检索媒体信息出错 退出")
-
-        retry_count = 0
-        while retry_count < 3:
-            found = False
-            for file_item, media in Medias.items():
-                if not media or not media.tmdb_info or not media.get_title_string():
-                    file_name = os.path.basename(file_item)
-                    log.warn("【Rmt】%s 发现个别文件无法识别！准备重试中 当前次数：%d 当前：media:%s Medias:%s" %
-                             (file_name, retry_count, json.dumps(media), json.dumps(Medias))
-                    )
-                    found = True
-
-            if not found:
-                break
-            else:
-                sleep(1)
-                retry_count += 1
-                Medias = self.media.get_media_info_on_files(file_list, tmdb_info, media_type, season, episode[0])
-
-        if not Medias:
-            log.error("【Rmt】final检索媒体信息出错！退出")
-            return __finish_transfer(False, "final检索媒体信息出错 退出")
+            log.error("【Rmt】检索媒体信息出错！")
+            return __finish_transfer(False, "检索媒体信息出错")
 
         # 更新进度
         self.progress.update(ptype="filetransfer", text=f"共 {len(Medias)} 个文件需要处理...")
@@ -624,7 +594,7 @@ class FileTransfer:
                     reg_path = file_item
                 # 未识别
                 if not media or not media.tmdb_info or not media.get_title_string():
-                    log.warn("【Rmt】%s final无法识别媒体信息！ " % file_name)
+                    log.warn("【Rmt】%s 无法识别媒体信息！ media:%s Medias:%s" % (file_name, media, Medias))
                     success_flag = False
                     error_message = "无法识别媒体信息"
                     self.progress.update(ptype="filetransfer", text=error_message)
