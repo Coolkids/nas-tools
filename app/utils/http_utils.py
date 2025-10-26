@@ -202,7 +202,7 @@ class RequestUtils:
                                      allow_redirects=allow_redirects,
                                      files=files,
                                      json=json)
-           if response.status_code >= 500:
+            if response.status_code >= 500:
                 response.raise_for_status()
             return response
         except requests.exceptions.RequestException as e:

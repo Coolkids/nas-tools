@@ -1,5 +1,3 @@
-feapder
 anitopy
-plexapi
 transmission-rpc
 slack_bolt
