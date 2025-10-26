@@ -2,9 +2,13 @@ import requests
 import urllib3
 from urllib3.exceptions import InsecureRequestWarning
 from config import Config
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
+import logging
 urllib3.disable_warnings(InsecureRequestWarning)
 
+
+logger = logging.getLogger(__name__)
 
 class RequestUtils:
     _headers = None
@@ -52,12 +56,27 @@ class RequestUtils:
         if timeout:
             self._timeout = timeout
 
+    def _retry_callback(self, retry_state):
+        """重试失败后的回调函数，返回None而不是抛出异常,避免修改后续逻辑"""
+        logger.warning(f"所有重试都失败了，最后异常: {retry_state.outcome.exception()}")
+        return None
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(
+            (requests.exceptions.Timeout,
+             requests.exceptions.ConnectionError,
+             requests.exceptions.ConnectTimeout)
+        ),
+        retry_error_callback=lambda retry_state: None  # 直接返回None
+    )
     def post(self, url, params=None, json=None):
         if json is None:
             json = {}
         try:
             if self._session:
-                return self._session.post(url,
+                response = self._session.post(url,
                                           data=params,
                                           verify=False,
                                           headers=self._headers,
@@ -65,16 +84,30 @@ class RequestUtils:
                                           timeout=self._timeout,
                                           json=json)
             else:
-                return requests.post(url,
+                response = requests.post(url,
                                      data=params,
                                      verify=False,
                                      headers=self._headers,
                                      proxies=self._proxies,
                                      timeout=self._timeout,
                                      json=json)
-        except requests.exceptions.RequestException:
-            return None
+            if response.status_code >= 500:
+                response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"post请求失败: {e}")
+            raise
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(
+            (requests.exceptions.Timeout,
+             requests.exceptions.ConnectionError,
+             requests.exceptions.ConnectTimeout)
+        ),
+        retry_error_callback=lambda retry_state: None  # 直接返回None
+    )
     def get(self, url, params=None):
         try:
             if self._session:
@@ -91,10 +124,23 @@ class RequestUtils:
                                  proxies=self._proxies,
                                  timeout=self._timeout,
                                  params=params)
+            if r.status_code >= 500:
+                r.raise_for_status()
             return str(r.content, 'utf-8')
-        except requests.exceptions.RequestException:
-            return None
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"get请求失败: {e}")
+            raise
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(
+            (requests.exceptions.Timeout,
+             requests.exceptions.ConnectionError,
+             requests.exceptions.ConnectTimeout)
+        ),
+        retry_error_callback=lambda retry_state: None  # 直接返回None
+    )
     def get_res(self, url, params=None, allow_redirects=True):
         try:
             if self._session:
@@ -115,13 +161,27 @@ class RequestUtils:
                                     cookies=self._cookies,
                                     timeout=self._timeout,
                                     allow_redirects=allow_redirects)
-        except requests.exceptions.RequestException:
-            return None
+           if response.status_code >= 500:
+                response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"get_res请求失败: {e}")
+            raise
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(
+            (requests.exceptions.Timeout,
+             requests.exceptions.ConnectionError,
+             requests.exceptions.ConnectTimeout)
+        ),
+        retry_error_callback=lambda retry_state: None  # 直接返回None
+    )
     def post_res(self, url, params=None, allow_redirects=True, files=None, json=None):
         try:
             if self._session:
-                return self._session.post(url,
+                response = self._session.post(url,
                                           data=params,
                                           verify=False,
                                           headers=self._headers,
@@ -132,7 +192,7 @@ class RequestUtils:
                                           files=files,
                                           json=json)
             else:
-                return requests.post(url,
+                response = requests.post(url,
                                      data=params,
                                      verify=False,
                                      headers=self._headers,
@@ -142,8 +202,12 @@ class RequestUtils:
                                      allow_redirects=allow_redirects,
                                      files=files,
                                      json=json)
-        except requests.exceptions.RequestException:
-            return None
+           if response.status_code >= 500:
+                response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"post_res请求失败: {e}")
+            raise
 
     @staticmethod
     def cookie_parse(cookies_str, array=False):

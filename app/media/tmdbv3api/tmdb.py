@@ -7,6 +7,7 @@ from functools import lru_cache
 
 import requests
 import requests.exceptions
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from .as_obj import AsObj
 from .exceptions import TMDbException
@@ -139,10 +140,61 @@ class TMDb(object):
     @staticmethod
     @lru_cache(maxsize=REQUEST_CACHE_MAXSIZE)
     def cached_request(method, url, data, proxies):
-        return requests.request(method, url, data=data, proxies=eval(proxies), verify=False, timeout=10)
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=10),
+            retry=retry_if_exception_type(
+                (requests.exceptions.Timeout,
+                 requests.exceptions.ConnectTimeout,
+                 requests.exceptions.ConnectionError)
+            )
+        )
+        def _request_with_retry():
+            # 解析proxies参数
+            proxies_dict = eval(proxies) if proxies else None
+
+            # 发送请求
+            response = requests.request(
+                method=method,
+                url=url,
+                data=data,
+                proxies=proxies_dict,
+                verify=False,
+                timeout=10
+            )
+
+            if response.status_code >= 500:
+                response.raise_for_status()
+            return response
+
+        try:
+            return _request_with_retry()
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"TMDB请求失败: {e}")
+            raise
 
     def cache_clear(self):
         return self.cached_request.cache_clear()
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(
+            (requests.exceptions.Timeout,
+             requests.exceptions.ConnectTimeout,
+             requests.exceptions.ConnectionError)
+        )
+    )
+    def session_request(session, method, url, data, proxies):
+        proxies_dict = eval(proxies) if proxies else None
+        try:
+            response = session.request(method, url, data=data, proxies=proxies_dict, timeout=10, verify=False)
+            if response.status_code >= 500:
+                response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"session_request请求失败: {e}")
+            raise
 
     def _call(
             self, action, append_to_response, call_cached=True, method="GET", data=None
@@ -161,7 +213,7 @@ class TMDb(object):
         if self.cache and self.obj_cached and call_cached and method != "POST":
             req = self.cached_request(method, url, data, self.proxies)
         else:
-            req = self._session.request(method, url, data=data, proxies=eval(self.proxies), timeout=10, verify=False)
+            req = self.session_request(self._session, method, url, data, self.proxies)
 
         headers = req.headers
 
