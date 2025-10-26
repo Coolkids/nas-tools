@@ -47,7 +47,7 @@ msgpack==1.0.4
 outcome==1.2.0
 parse==1.19.0
 parsel==1.6.0
-parso==0.8.3
+parso>=0.8.3
 pexpect==4.8.0
 pickleshare==0.7.5
 pikpakapi==0.1.1
