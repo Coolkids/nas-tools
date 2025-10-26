@@ -1,4 +1,4 @@
-FROM python:3.9-alpine
+FROM python:3.12-alpine
 RUN apk add --no-cache libffi-dev \
     && apk add --no-cache $(echo $(wget --no-check-certificate -qO- https://raw.githubusercontent.com/Coolkids/nas-tools/main/package_list.txt)) \
     && ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime \
@@ -8,7 +8,7 @@ RUN apk add --no-cache libffi-dev \
     && curl https://dl.min.io/client/mc/release/linux-${ARCH}/mc --create-dirs -o /usr/bin/mc \
     && chmod +x /usr/bin/mc \
     && pip install --upgrade pip setuptools wheel \
-    && pip install cython \
+    && pip install Cython==3.0.10 \
     && pip install -r https://raw.githubusercontent.com/Coolkids/nas-tools/main/requirements.txt \
     && apk del libffi-dev \
     && npm install pm2 -g \
