@@ -82,7 +82,7 @@ ruamel.yaml.clib>=0.2.7
 selenium==4.38.0
 six==1.16.0
 slack-sdk==3.19.5
-sniffio==1.2.0
+sniffio>=1.3.0
 sortedcontainers==2.4.0
 soupsieve==2.3.2.post1
 SQLAlchemy==1.4.42
