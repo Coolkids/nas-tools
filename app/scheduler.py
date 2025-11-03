@@ -45,6 +45,9 @@ class Scheduler:
         self.SCHEDULER = BackgroundScheduler(timezone=Config().get_timezone(),
                                              executors={
                                                  'default': ThreadPoolExecutor(20)
+                                             },
+                                             job_defaults={
+                                                 'max_instances': 3  # 允许最多3个实例同时运行
                                              })
         if not self.SCHEDULER:
             return
