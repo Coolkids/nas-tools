@@ -22,7 +22,7 @@ jobs:
         pip install wheel numpy pyparsing wxpython pyinstaller
         git clone --depth=1 -b main https://github.com/Coolkids/nas-tools --recurse-submodule
         cd nas-tools
-        pip install -r requirements.txt
+        python -m pip install -r requirements.txt
         echo ("NASTOOL_CONFIG=D:/a/nas-tools/nas-tools/nas-tools/config/config.yaml") >> $env:GITHUB_ENV
         echo $env:NASTOOL_CONFIG
       shell: pwsh
