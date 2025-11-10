@@ -6,7 +6,7 @@ import time
 from collections import deque
 from html import escape
 from logging.handlers import RotatingFileHandler
-
+import json
 from config import Config
 
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
@@ -75,12 +75,17 @@ class Logger:
 def __append_log_queue(level, text):
     global LOG_INDEX, LOG_QUEUE
     with lock:
-        text = escape(text)
-        if text.startswith("【"):
-            source = re.findall(r"(?<=【).*?(?=】)", text)[0]
-            text = text.replace(f"【{source}】", "")
+        if type(text) is str:
+            text = escape(text)
+            if text.startswith("【"):
+                source = re.findall(r"(?<=【).*?(?=】)", text)[0]
+                text = text.replace(f"【{source}】", "")
+            else:
+                source = "System"
         else:
-            source = "System"
+            text = json.dumps(text)
+            source = "Object"
+
         LOG_QUEUE.append({
             "time": time.strftime('%H:%M:%S', time.localtime(time.time())),
             "level": level,

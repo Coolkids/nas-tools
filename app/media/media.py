@@ -7,7 +7,7 @@ from functools import lru_cache
 
 import zhconv
 from lxml import etree
-
+from app.utils import ExceptionUtils
 import log
 from app.helper import MetaHelper
 from app.media.meta.metainfo import MetaInfo
@@ -277,9 +277,11 @@ class Media:
             else:
                 tvs = self.search.tv_shows({"query": file_media_name})
         except TMDbException as err:
+            ExceptionUtils.exception_traceback(err)
             log.error(f"【Meta】连接TMDB出错：{str(err)}")
             return None
         except Exception as e:
+            ExceptionUtils.exception_traceback(e)
             log.error(f"【Meta】连接TMDB出错：{str(e)}")
             return None
         log.debug(f"【Meta】API返回：{str(self.search.total_results)}")

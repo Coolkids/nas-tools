@@ -245,9 +245,9 @@ class TMDb(object):
         if "total_pages" in json:
             os.environ["total_pages"] = str(json["total_pages"])
 
-        if self.debug:
-            log.info(json)
-            log.info(self.cached_request.cache_info())
+        # if self.debug:
+        #     log.debug(json)
+        #     log.info(self.cached_request.cache_info())
 
         if "errors" in json:
             raise TMDbException(json["errors"])
