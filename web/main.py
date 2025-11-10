@@ -1192,6 +1192,7 @@ def dirlist():
             if not os.path.isdir(d):
                 d = os.path.dirname(d)
             dirs = [os.path.join(d, f) for f in os.listdir(d)]
+        dirs.sort()
         for ff in dirs:
             f = os.path.basename(ff)
             if not f:
