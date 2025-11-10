@@ -203,7 +203,7 @@ class Plex(_IMediaClient):
                            "library": item.librarySectionID,
                            "type": item.type,
                            "title": item.title,
-                           "year": item.year,
+                           "year": item.year if hasattr(item, 'year') and item.year is not None else 2024,
                            "json": str(item.__dict__)}
         except Exception as err:
             ExceptionUtils.exception_traceback(err)

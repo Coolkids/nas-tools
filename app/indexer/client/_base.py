@@ -97,7 +97,7 @@ class _IIndexClient(metaclass=ABCMeta):
         if not url:
             return []
         try:
-            ret = RequestUtils(timeout=30).get_res(url)
+            ret = RequestUtils(timeout=300).get_res(url)
         except Exception as e2:
             ExceptionUtils.exception_traceback(e2)
             return []
@@ -173,7 +173,7 @@ class _IIndexClient(metaclass=ABCMeta):
 
                     if enclosure.startswith("http"):
                         req = RequestUtils(
-                            timeout=60
+                            timeout=120
                         ).get_res(url=enclosure, allow_redirects=False)
                         if req and req.status_code == 200:
                             if not req.content:

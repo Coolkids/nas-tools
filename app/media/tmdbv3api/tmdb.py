@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-import logging
+import log
 import os
 import time
 from functools import lru_cache
@@ -11,9 +11,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from .as_obj import AsObj
 from .exceptions import TMDbException
-
-logger = logging.getLogger(__name__)
-
+from app.utils import ExceptionUtils
 
 class TMDb(object):
     TMDB_API_KEY = "TMDB_API_KEY"
@@ -23,7 +21,7 @@ class TMDb(object):
     TMDB_CACHE_ENABLED = "TMDB_CACHE_ENABLED"
     TMDB_PROXIES = "TMDB_PROXIES"
     TMDB_DOMAIN = "TMDB_DOMAIN"
-    REQUEST_CACHE_MAXSIZE = 256
+    REQUEST_CACHE_MAXSIZE = 5000
 
     def __init__(self, obj_cached=True, session=None):
         self._session = requests.Session() if session is None else session
@@ -160,7 +158,7 @@ class TMDb(object):
                 data=data,
                 proxies=proxies_dict,
                 verify=False,
-                timeout=10
+                timeout=30
             )
 
             if response.status_code >= 500:
@@ -170,7 +168,7 @@ class TMDb(object):
         try:
             return _request_with_retry()
         except requests.exceptions.RequestException as e:
-            logger.warning(f"TMDB请求失败: {e}")
+            log.error("【TMDB-API】 cached_request请求失败！%s" % (ExceptionUtils.exception_traceback(e)))
             raise
 
     def cache_clear(self):
@@ -185,7 +183,7 @@ class TMDb(object):
              requests.exceptions.ConnectionError)
         )
     )
-    def session_request(session, method, url, data, proxies):
+    def session_request(self, session, method, url, data, proxies):
         proxies_dict = eval(proxies) if proxies else None
         try:
             response = session.request(method, url, data=data, proxies=proxies_dict, timeout=10, verify=False)
@@ -193,7 +191,7 @@ class TMDb(object):
                 response.raise_for_status()
             return response
         except requests.exceptions.RequestException as e:
-            logger.warning(f"session_request请求失败: {e}")
+            log.error("【TMDB-API】 session_request请求失败！%s" % (ExceptionUtils.exception_traceback(e)))
             raise
 
     def _call(
@@ -228,7 +226,7 @@ class TMDb(object):
             sleep_time = self._reset - current_time
 
             if self.wait_on_rate_limit:
-                logger.warning("Rate limit reached. Sleeping for: %d" % sleep_time)
+                log.warn("【TMDB-API】 Rate limit reached. Sleeping for: %d" % sleep_time)
                 time.sleep(abs(sleep_time))
                 self._call(action, append_to_response, call_cached, method, data)
             else:
@@ -248,8 +246,8 @@ class TMDb(object):
             os.environ["total_pages"] = str(json["total_pages"])
 
         if self.debug:
-            logger.info(json)
-            logger.info(self.cached_request.cache_info())
+            log.info(json)
+            log.info(self.cached_request.cache_info())
 
         if "errors" in json:
             raise TMDbException(json["errors"])

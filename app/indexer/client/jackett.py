@@ -60,7 +60,7 @@ class Jackett(_IIndexClient):
             cookie = session.cookies.get_dict()
         indexer_query_url = f"{self.host}api/v2.0/indexers?configured=true"
         try:
-            ret = RequestUtils(cookies=cookie).get_res(indexer_query_url)
+            ret = RequestUtils(cookies=cookie, timeout=300).get_res(indexer_query_url)
             if not ret or not ret.json():
                 return []
             return [IndexerConf({"id": v["id"],

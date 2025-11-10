@@ -49,7 +49,7 @@ class Prowlarr(_IIndexClient):
         """
         indexer_query_url = f"{self.host}api/v1/indexer?apikey={self.api_key}"
         try:
-            ret = RequestUtils().get_res(indexer_query_url)
+            ret = RequestUtils(timeout=300).get_res(indexer_query_url)
         except Exception as e2:
             ExceptionUtils.exception_traceback(e2)
             return []
