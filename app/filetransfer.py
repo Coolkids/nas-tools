@@ -594,7 +594,7 @@ class FileTransfer:
                     reg_path = file_item
                 # 未识别
                 if not media or not media.tmdb_info or not media.get_title_string():
-                    log.warn("【Rmt】%s 无法识别媒体信息！ media:%s Medias:%s" % (file_name, media, Medias))
+                    log.error("【Rmt】%s 无法识别媒体信息！ media:%s Medias:%s" % (file_name, media, Medias))
                     success_flag = False
                     error_message = "无法识别媒体信息"
                     self.progress.update(ptype="filetransfer", text=error_message)
