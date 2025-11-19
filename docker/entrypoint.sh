@@ -8,11 +8,6 @@ if [ "${NASTOOL_AUTO_UPDATE}" = "true" ]; then
     if [ ! -s /tmp/third_party.txt.sha256sum ]; then
         sha256sum third_party.txt > /tmp/third_party.txt.sha256sum
     fi
-    if [ "${NASTOOL_VERSION}" != "lite" ]; then
-        if [ ! -s /tmp/package_list.txt.sha256sum ]; then
-            sha256sum package_list.txt > /tmp/package_list.txt.sha256sum
-        fi
-    fi
     echo "更新程序..."
     git remote set-url origin "${REPO_URL}" &> /dev/null
     echo "windows/" > .gitignore
@@ -32,11 +27,11 @@ if [ "${NASTOOL_AUTO_UPDATE}" = "true" ]; then
         if [ "${hash_old}" != "${hash_new}" ]; then
             echo "检测到requirements.txt有变化，重新安装依赖..."
             if [ "${NASTOOL_CN_UPDATE}" = "true" ]; then
-                pip install --upgrade pip setuptools wheel -i "${PYPI_MIRROR}"
-                pip install -r requirements.txt -i "${PYPI_MIRROR}"
+                python -m pip install --upgrade pip setuptools wheel -i "${PYPI_MIRROR}"
+                python -m pip install -r requirements.txt -i "${PYPI_MIRROR}"
             else
-                pip install --upgrade pip setuptools wheel
-                pip install -r requirements.txt
+                python -m pip install --upgrade pip setuptools wheel
+                python -m pip install -r requirements.txt
             fi
             if [ $? -ne 0 ]; then
                 echo "无法安装依赖，请更新镜像..."
@@ -54,27 +49,6 @@ if [ "${NASTOOL_AUTO_UPDATE}" = "true" ]; then
                         echo "第三方组件安装成功..."
                         sha256sum third_party.txt > /tmp/third_party.txt.sha256sum
                     fi
-                fi
-            fi
-        fi
-        # 系统软件包更新
-        if [ "${NASTOOL_VERSION}" != "lite" ]; then
-            hash_old=$(cat /tmp/package_list.txt.sha256sum)
-            hash_new=$(sha256sum package_list.txt)
-            if [ "${hash_old}" != "${hash_new}" ]; then
-                echo "检测到package_list.txt有变化，更新软件包..."
-                if [ "${NASTOOL_CN_UPDATE}" = "true" ]; then
-                    sed -i "s/dl-cdn.alpinelinux.org/${ALPINE_MIRROR}/g" /etc/apk/repositories
-                    apk update -f
-                fi
-                apk add --no-cache libffi-dev
-                apk add --no-cache $(echo $(cat package_list.txt))
-                if [ $? -ne 0 ]; then
-                    echo "无法更新软件包，请更新镜像..."
-                else
-                    apk del libffi-dev
-                    echo "软件包安装成功..."
-                    sha256sum package_list.txt > /tmp/package_list.txt.sha256sum
                 fi
             fi
         fi
@@ -97,4 +71,4 @@ else
     export PATH=${PATH}:/usr/lib/chromium
 fi
 umask "${UMASK}"
-exec su-exec "${PUID}":"${PGID}" "$(which dumb-init)" "$(which pm2-runtime)" start run.py -n NAStool --interpreter python3
+exec gosu "${PUID}":"${PGID}" "$(which dumb-init)" "$(which pm2-runtime)" start run.py -n NAStool --interpreter python3
