@@ -1,4 +1,4 @@
-FROM python:3.12-alpine
+FROM python:3.14-alpine
 RUN apk add --no-cache libffi-dev  \
     git  \
     gcc  \
@@ -13,9 +13,9 @@ RUN apk add --no-cache libffi-dev  \
     npm \
     && ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime \
     && echo "${TZ}" > /etc/timezone \
-    && pip install --upgrade pip setuptools wheel \
+    && python -m pip install --upgrade pip setuptools wheel \
     && pip install Cython \
-    && pip install -r https://raw.githubusercontent.com/Coolkids/nas-tools/main/requirements.txt \
+    && python -m pip install -r https://raw.githubusercontent.com/Coolkids/nas-tools/main/requirements.txt \
     && npm install pm2 -g \
     && apk del --purge libffi-dev gcc musl-dev libxml2-dev libxslt-dev \
     && pip uninstall -y cython \
