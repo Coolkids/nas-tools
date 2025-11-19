@@ -9,7 +9,7 @@ cn2an==0.5.23
 databases==0.9.0
 dateparser==1.2.2
 fast_bencode==1.1.8
-feapder[all]==1.9.2
+feapder[all]==1.7.9
 flask_compress==1.23
 Flask_Login==0.6.3
 flask_restx==1.3.2
