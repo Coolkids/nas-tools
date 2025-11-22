@@ -1,4 +1,4 @@
-FROM python:3.14-trixie
+FROM python:3.14-slim
 
 # 安装必要的包
 RUN apt-get update && apt-get install -y \
