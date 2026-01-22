@@ -1,0 +1,17 @@
+__pycache__
+*.sock
+*.log
+*.pid
+test.py
+media.db
+user.db
+venv
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+out/
+gen/
+.DS_Store
