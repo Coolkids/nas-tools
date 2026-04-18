@@ -9,8 +9,8 @@ on:
       - .github/workflows/build-windows.yml
 
 env:
-  PYTHON_VERSION: "3.14.2"
-  PYTHON_HOME: C:\hostedtoolcache\windows\Python\3.14.2\x64
+  PYTHON_VERSION: "3.14.4"
+  PYTHON_HOME: C:\hostedtoolcache\windows\Python\3.14.4\x64
 
 jobs:
   windows-build:
@@ -45,7 +45,7 @@ jobs:
         pyinstaller nas-tools.spec
       shell: pwsh
     - name: upload windows file
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v7
       with:
         name: windows-nas-tools
         path: D:/a/nas-tools/nas-tools/nas-tools/windows/dist/nas-tools.exe
@@ -61,16 +61,17 @@ jobs:
         app_version=$(cat version.py |sed -ne "s/APP_VERSION\s=\s'v\(.*\)'/\1/gp")
         echo "app_version=$app_version" >> $GITHUB_ENV
     - name: download exe and rename
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@v8
+      with:
+        path: artifacts
     - name: get release_informations
       shell: bash
       run: |
         pwd
+        ls
         mkdir releases
-        cd windows-nas-tools
+        cd artifacts/windows-nas-tools
         mv nas-tools.exe /home/runner/work/nas-tools/nas-tools/releases/nastool_win_v${{ env.app_version }}.exe
-        dir
-        pwd
     - name: Create release
       id: create_release
       uses: actions/create-release@latest
