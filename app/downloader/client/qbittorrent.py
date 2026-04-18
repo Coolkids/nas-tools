@@ -4,7 +4,7 @@ import time
 from datetime import datetime
 from urllib import parse
 
-from pkg_resources import parse_version as v
+from packaging.version import parse as v
 
 import log
 import qbittorrentapi
