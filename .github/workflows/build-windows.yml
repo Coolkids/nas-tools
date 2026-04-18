@@ -68,9 +68,10 @@ jobs:
       shell: bash
       run: |
         pwd
-        ls
         mkdir releases
-        cd artifacts/windows-nas-tools
+        cd artifacts
+        ls
+        cd windows-nas-tools
         mv nas-tools.exe /home/runner/work/nas-tools/nas-tools/releases/nastool_win_v${{ env.app_version }}.exe
     - name: Create release
       id: create_release
