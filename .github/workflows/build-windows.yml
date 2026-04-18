@@ -45,9 +45,9 @@ jobs:
         pyinstaller nas-tools.spec
       shell: pwsh
     - name: upload windows file
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@v6
       with:
-        name: windows
+        name: windows-nas-tools
         path: D:/a/nas-tools/nas-tools/nas-tools/windows/dist/nas-tools.exe
 
   Create-release_Send-message:
@@ -61,13 +61,13 @@ jobs:
         app_version=$(cat version.py |sed -ne "s/APP_VERSION\s=\s'v\(.*\)'/\1/gp")
         echo "app_version=$app_version" >> $GITHUB_ENV
     - name: download exe and rename
-      uses: actions/download-artifact@v8
+      uses: actions/download-artifact@v7
     - name: get release_informations
       shell: bash
       run: |
         pwd
         mkdir releases
-        cd windows
+        cd windows-nas-tools
         mv nas-tools.exe /home/runner/work/nas-tools/nas-tools/releases/nastool_win_v${{ env.app_version }}.exe
         dir
         pwd
