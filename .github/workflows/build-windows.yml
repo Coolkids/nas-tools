@@ -71,22 +71,22 @@ jobs:
         mkdir releases
         cd artifacts
         mv nas-tools.exe /home/runner/work/nas-tools/nas-tools/releases/nastool_win_v${{ env.app_version }}.exe
-    - name: Create release
-      id: create_release
-      uses: actions/create-release@latest
-      env:
-        GITHUB_TOKEN: ${{ secrets.UPLOAD_KEY }}
-      with:
-        tag_name: v${{ env.app_version }}
-        release_name: v${{ env.app_version }}
-        body: ${{ github.event.commits[0].message }}
-        draft: false
-        prerelease: false
+
     - name: Upload release asset
-      uses: dwenegar/upload-release-assets@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.UPLOAD_KEY }}
+      uses: softprops/action-gh-release@v3
       with:
-        release_id: ${{ steps.create_release.outputs.id }}
-        assets_path: |
-            /home/runner/work/nas-tools/nas-tools/releases/
+        token: ${{ secrets.UPLOAD_KEY }}
+        files: /home/runner/work/nas-tools/nas-tools/releases/*
+        overwrite_files: true
+        name: v${{ env.app_version }}
+        tag_name: v${{ env.app_version }}
+        body: ${{ github.event.commits[0].message }}
+
+    - name: Delete releases and workflows runs
+      uses: ophub/delete-releases-workflows@main
+      with:
+        delete_releases: true
+        releases_keep_latest: 5
+        delete_workflows: true
+        workflows_keep_day: 10
+        gh_token: ${{ secrets.UPLOAD_KEY }}
