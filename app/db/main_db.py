@@ -3,6 +3,7 @@ import threading
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy.pool import QueuePool
+from sqlalchemy import text
 
 from app.db.models import Base
 from app.utils import ExceptionUtils, PathUtils
@@ -14,9 +15,13 @@ _Engine = create_engine(
     echo=False,
     poolclass=QueuePool,
     pool_pre_ping=True,
-    pool_size=50,
-    pool_recycle=60 * 10,
-    max_overflow=0
+    pool_size=10,
+    pool_recycle=3600,
+    max_overflow=100,
+    connect_args={
+        'timeout': 30,              # 等待数据库锁释放的超时时间
+        'check_same_thread': False  # 允许在不同线程中复用连接
+    }
 )
 _Session = scoped_session(sessionmaker(bind=_Engine,
                                        autoflush=True,
@@ -34,6 +39,9 @@ class MainDb:
     def init_db():
         with lock:
             Base.metadata.create_all(_Engine)
+            with _Engine.connect() as conn:
+                conn.execute(text("PRAGMA journal_mode=WAL;"))
+                conn.execute(text("PRAGMA SYNCHRONOUS=NORMAL;"))
 
     def init_data(self):
         """
