@@ -121,7 +121,7 @@ class Qbittorrent(_IDownloadClient):
         """
         if not self.qbc:
             return []
-        torrents, _ = self.get_torrents(status="downloading", tag=tag)
+        torrents, _ = self.get_torrents(status="all", tag=tag)
         return torrents
 
     def remove_torrents_tag(self, ids, tag):
@@ -361,7 +361,7 @@ class Qbittorrent(_IDownloadClient):
                                             seeding_time_limit=seeding_time_limit,
                                             use_auto_torrent_management=use_auto_torrent_management,
                                             cookie=cookie)
-            return True if qbc_ret and str(qbc_ret).find("Ok") != -1 else False
+            return True if qbc_ret and qbc_ret.get('success_count') > 0 else False
         except Exception as err:
             ExceptionUtils.exception_traceback(err)
             return False
