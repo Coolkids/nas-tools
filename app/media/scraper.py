@@ -304,10 +304,9 @@ class Scraper:
         if not scraper_pic:
             scraper_pic = {}
 
-        tasks = []
-
         try:
             with ThreadPoolExecutor(max_workers=5) as pool:
+                tasks = []
                 # 电影
                 if media.type == MediaType.MOVIE:
                     scraper_movie_nfo = scraper_nfo.get("movie")
