@@ -1,5 +1,6 @@
 import json
 from threading import Lock
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import log
 from app.downloader import Downloader
@@ -560,10 +561,12 @@ class Subscribe:
         """
         try:
             lock.acquire()
+            log.info("【Subscribe】订阅任务开始")
             # 处理电影
             self.subscribe_search_movie(state=state)
             # 处理电视剧
             self.subscribe_search_tv(state=state)
+            log.info("【Subscribe】订阅结束开始")
         finally:
             lock.release()
 
@@ -579,10 +582,11 @@ class Subscribe:
             rss_movies = self.get_subscribe_movies(state=state)
         if rss_movies:
             log.info("【Subscribe】共有 %s 个电影订阅需要检索" % len(rss_movies))
-        for rid, rss_info in rss_movies.items():
+
+        def subscribe_search_movie_task(rid, rss_info):
             # 跳过模糊匹配的
             if rss_info.get("fuzzy_match"):
-                continue
+                return
             # 搜索站点范围
             rssid = rss_info.get("id")
             name = rss_info.get("name")
@@ -598,7 +602,7 @@ class Subscribe:
             # 未识别到媒体信息
             if not media_info or not media_info.tmdb_info:
                 self.dbhelper.update_rss_movie_state(rssid=rssid, state='R')
-                continue
+                return
             media_info.set_download_info(download_setting=rss_info.get("download_setting"),
                                          save_path=rss_info.get("save_path"))
             # 自定义搜索词
@@ -611,7 +615,7 @@ class Subscribe:
                 if exist_flag:
                     log.info("【Subscribe】电影 %s 已存在" % media_info.get_title_string())
                     self.finish_rss_subscribe(rssid=rssid, media=media_info)
-                    continue
+                    return
             else:
                 # 洗版时按缺失来下载
                 no_exists = {}
@@ -645,6 +649,20 @@ class Subscribe:
             else:
                 self.dbhelper.update_rss_movie_state(rssid=rssid, state='R')
 
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            tasks = []
+            for k_rid, v_rss_info in rss_movies.items():
+                tasks.append(pool.submit(subscribe_search_movie_task,
+                                         k_rid,v_rss_info)
+                )
+
+            for f in as_completed(tasks):
+                try:
+                    f.result()
+                except Exception as e:
+                    log.error("【Subscribe】检索电影RSS子任务发生错误", e)
+
+
     def subscribe_search_tv(self, rssid=None, state="D"):
         """
         检索电视剧RSS
@@ -657,11 +675,12 @@ class Subscribe:
             rss_tvs = self.get_subscribe_tvs(state=state)
         if rss_tvs:
             log.info("【Subscribe】共有 %s 个电视剧订阅需要检索" % len(rss_tvs))
-        rss_no_exists = {}
-        for rid, rss_info in rss_tvs.items():
+
+        def subscribe_search_tv_task(rid, rss_info):
+            rss_no_exists = {}
             # 跳过模糊匹配的
             if rss_info.get("fuzzy_match"):
-                continue
+                return
             rssid = rss_info.get("id")
             name = rss_info.get("name")
             year = rss_info.get("year") or ""
@@ -675,7 +694,7 @@ class Subscribe:
             # 未识别到媒体信息
             if not media_info or not media_info.tmdb_info:
                 self.dbhelper.update_rss_tv_state(rssid=rssid, state='R')
-                continue
+                return
             # 取下载设置
             media_info.set_download_info(download_setting=rss_info.get("download_setting"),
                                          save_path=rss_info.get("save_path"))
@@ -728,7 +747,7 @@ class Subscribe:
                         # 完成订阅
                         self.finish_rss_subscribe(rssid=rss_info.get("id"),
                                                   media=media_info)
-                    continue
+                    return
                 # 取交集做为缺失集
                 rss_no_exists = Torrent.get_intersection_episodes(target=rss_no_exists,
                                                                   source=library_no_exists,
@@ -775,6 +794,19 @@ class Subscribe:
                 self.update_subscribe_tv_lack(rssid=rssid,
                                               media_info=media_info,
                                               seasoninfo=no_exists.get(media_info.tmdb_id))
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            tasks = []
+            for k_rid, v_rss_info in rss_tvs.items():
+                tasks.append(pool.submit(subscribe_search_tv_task,
+                                         k_rid, v_rss_info)
+                             )
+
+            for f in as_completed(tasks):
+                try:
+                    f.result()
+                except Exception as e:
+                    log.error("【Subscribe】检索电视剧RSS子任务发生错误", e)
 
     def update_rss_state(self, rtype, rssid, state):
         """
