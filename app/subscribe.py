@@ -553,20 +553,19 @@ class Subscribe:
         """
         搜索R状态的所有订阅，由定时服务调用
         """
+        log.info("【Subscribe】订阅任务开始")
         self.subscribe_search(state="R")
-
+        log.info("【Subscribe】订阅结束开始")
     def subscribe_search(self, state="D"):
         """
         RSS订阅队列中状态的任务处理，先进行存量资源检索，缺失的才标志为RSS状态，由定时服务调用
         """
         try:
             lock.acquire()
-            log.info("【Subscribe】订阅任务开始")
             # 处理电影
             self.subscribe_search_movie(state=state)
             # 处理电视剧
             self.subscribe_search_tv(state=state)
-            log.info("【Subscribe】订阅结束开始")
         finally:
             lock.release()
 
