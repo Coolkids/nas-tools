@@ -22,3 +22,5 @@ web2/node_modules
 web2/dist
 web2/.vite
 web2/*.tsbuildinfo
+*.db-shm
+*.db-wal
