@@ -17,7 +17,7 @@ from urllib import parse
 
 from flask import Flask, request, json, render_template, make_response, session, send_from_directory, send_file, Response
 from flask_compress import Compress
-from flask_login import LoginManager, login_user, login_required, current_user
+from flask_login import LoginManager, login_user, login_required, current_user, logout_user
 
 import log
 from app.brushtask import BrushTask
@@ -1152,6 +1152,50 @@ def rss_parser():
     return render_template("rss/rss_parser.html",
                            RssParsers=RssParsers,
                            Count=len(RssParsers))
+
+
+# JSON 登录接口（供 Vue 前端使用，前后端分离）
+@App.route('/login_json', methods=['POST'])
+def login_json():
+    username = request.form.get('username')
+    password = request.form.get('password')
+    remember = request.form.get('remember')
+    if not username or not password:
+        return {"code": 1, "success": False, "message": "请输入用户名和密码"}
+    user_info = User().get_user(username)
+    if not user_info or not user_info.verify_password(password):
+        return {"code": 1, "success": False, "message": "用户名或密码错误"}
+    login_user(user_info)
+    session.permanent = True if remember else False
+    return {
+        "code": 0,
+        "success": True,
+        "message": "登录成功",
+        "data": {
+            "userid": user_info.id,
+            "username": user_info.username,
+            "userpris": str(user_info.pris).split(",")
+        }
+    }
+
+
+# JSON 登出接口
+@App.route('/logout_json', methods=['POST'])
+def logout_json():
+    logout_user()
+    return {"code": 0, "success": True, "message": "已退出登录"}
+
+
+# CORS 支持（前后端分离开发模式备用，生产环境由 nginx 同源处理）
+@App.after_request
+def add_cors_headers(r):
+    origin = request.headers.get('Origin')
+    if origin:
+        r.headers['Access-Control-Allow-Origin'] = origin
+        r.headers['Access-Control-Allow-Credentials'] = 'true'
+        r.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+        r.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With'
+    return r
 
 
 # 事件响应

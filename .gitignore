@@ -16,3 +16,9 @@ out/
 gen/
 .DS_Store
 config/tmdb.dat
+
+### Vue3 新前端 (web2) ###
+web2/node_modules
+web2/dist
+web2/.vite
+web2/*.tsbuildinfo

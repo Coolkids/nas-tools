@@ -99,6 +99,7 @@ class WebAction:
             "add_brushtask": self.__add_brushtask,
             "del_brushtask": self.__del_brushtask,
             "brushtask_detail": self.__brushtask_detail,
+            "get_brushtask_info": self.__get_brushtask_info,
             "add_downloader": self.__add_downloader,
             "delete_downloader": self.__delete_downloader,
             "get_downloader": self.__get_downloader,
@@ -165,6 +166,7 @@ class WebAction:
             "get_unknown_list": self.get_unknown_list,
             "get_customwords": self.get_customwords,
             "get_directorysync": self.get_directorysync,
+            "get_tmdb_cache": self.get_tmdb_cache,
             "get_users": self.get_users,
             "get_filterrules": self.get_filterrules,
             "get_downloading": self.get_downloading,
@@ -205,7 +207,9 @@ class WebAction:
             "media_person": self.__media_person,
             "person_medias": self.__person_medias,
             "save_user_script": self.__save_user_script,
-            "run_directory_sync": self.__run_directory_sync
+            "run_directory_sync": self.__run_directory_sync,
+            "get_config": self.__get_config,
+            "get_system_config": self.__get_system_config
         }
 
     def action(self, cmd, data=None):
@@ -1971,6 +1975,13 @@ class WebAction:
             "forceupload": brushtask.FORCEUPLOAD
         }
         return {"code": 0, "task": task}
+
+    @staticmethod
+    def __get_brushtask_info(data):
+        """
+        查询刷流任务列表（供Vue前端使用）
+        """
+        return {"code": 0, "data": BrushTask().get_brushtask_info()}
 
     def __add_downloader(self, data):
         """
@@ -3822,6 +3833,24 @@ class WebAction:
         SyncPaths = sorted(SyncPaths, key=lambda o: o.get("from"))
         return {"code": 0, "result": SyncPaths}
 
+    def get_tmdb_cache(self, data=None):
+        """
+        分页查询TMDB缓存列表
+        """
+        page_num = int(data.get("pagenum") or 30)
+        search = data.get("keyword") or ""
+        current_page = int(data.get("page") or 1)
+        total_count, tmdb_caches = MetaHelper().dump_meta_data(search, current_page, page_num)
+        total_page = floor(total_count / page_num) + 1
+        return {
+            "code": 0,
+            "total": total_count,
+            "result": tmdb_caches,
+            "currentPage": current_page,
+            "pageNum": page_num,
+            "totalPage": total_page
+        }
+
     def get_users(self, data=None):
         """
         查询所有用户
@@ -4323,6 +4352,22 @@ class WebAction:
         except Exception as e:
             ExceptionUtils.exception_traceback(e)
             return {"code": 1}
+
+    @staticmethod
+    def __get_config(data):
+        """
+        获取配置信息（供Vue前端使用）
+        """
+        cfg = Config().get_config()
+        return {"code": 0, "config": cfg}
+
+    @staticmethod
+    def __get_system_config(data):
+        """
+        获取系统设置（数据库，供Vue前端使用）
+        """
+        key = data.get("key")
+        return {"code": 0, "value": SystemConfig().get_system_config(key=key) or {}}
 
     @staticmethod
     def get_site_user_statistics(data):
