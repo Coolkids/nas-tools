@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, reactive, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import { Search, Loading, Download, Link } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { search, getSearchResult, type SearchResultItem, type TorrentItem } from '@/api/media'
 import { useModalStore } from '@/stores/modal'
+import { doAction } from '@/api/request'
 
 const route = useRoute()
 const modal = useModalStore()
@@ -71,6 +72,136 @@ function openTorrent(t: TorrentItem) {
 function openPage(url: string) {
   if (url) window.open(url, '_blank')
 }
+
+// ---- 高级搜索 ----
+
+const showAdvanced = ref(false)
+const advancedForm = reactive({
+  type: '',
+  name: '',
+  year: '',
+  season: '',
+  restype: '',
+  pix: '',
+  sp_state: '* *',
+  rule: ''
+})
+
+const restypeDict: Record<string, string> = {
+  BLURAY: 'BluRay',
+  REMUX: 'REMUX',
+  DOLBY: 'Dolby',
+  WEB: 'WEB-DL',
+  HDTV: 'HDTV',
+  UHD: 'UHD',
+  HDR: 'HDR',
+  '3D': '3D'
+}
+
+const pixDict: Record<string, string> = {
+  '8k': '8K',
+  '4k': '4K',
+  '1080p': '1080p',
+  '720p': '720p'
+}
+
+const spStates = [
+  { value: '* *', label: '全部' },
+  { value: '1.0 1.0', label: '普通' },
+  { value: '1.0 0.0', label: '免费' },
+  { value: '2.0 1.0', label: '2X' },
+  { value: '2.0 0.0', label: '2X免费' },
+  { value: '1.0 0.5', label: '50%' },
+  { value: '2.0 0.5', label: '2X 50%' },
+  { value: '1.0 0.7', label: '70%' },
+  { value: '1.0 0.3', label: '30%' }
+]
+
+const seasonOptions = computed(() => {
+  const options = [{ value: '', label: '全部' }]
+  for (let i = 1; i <= 20; i++) {
+    options.push({ value: `S${i.toString().padStart(2, '0')}`, label: `第${i}季` })
+  }
+  return options
+})
+
+interface RuleOption {
+  id: number
+  name: string
+}
+
+const filterRules = ref<RuleOption[]>([])
+
+async function loadFilterRules() {
+  try {
+    const res: any = await doAction('get_filterrules', {})
+    if (res.code === 0) {
+      filterRules.value = (res.ruleGroups || []).map((g: any) => ({
+        id: g.id,
+        name: g.name
+      }))
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function openAdvancedDialog() {
+  advancedForm.type = ''
+  advancedForm.name = keyword.value || ''
+  advancedForm.year = ''
+  advancedForm.season = ''
+  advancedForm.restype = ''
+  advancedForm.pix = ''
+  advancedForm.sp_state = '* *'
+  advancedForm.rule = ''
+  loadFilterRules()
+  showAdvanced.value = true
+}
+
+async function doAdvancedSearch() {
+  const name = advancedForm.name.trim()
+  if (!name) {
+    modal.warning('请输入电影/电视剧名称')
+    return
+  }
+  let kw = name
+  if (advancedForm.type) {
+    kw = advancedForm.type + ' ' + name
+  }
+  if (advancedForm.year) {
+    kw = kw + ' ' + advancedForm.year
+  }
+  if (advancedForm.season) {
+    kw = kw + ' ' + advancedForm.season
+  }
+  const filters: Record<string, string> = {}
+  if (advancedForm.restype) filters.restype = advancedForm.restype
+  if (advancedForm.pix) filters.pix = advancedForm.pix
+  if (advancedForm.sp_state && advancedForm.sp_state !== '* *') filters.sp_state = advancedForm.sp_state
+  if (advancedForm.rule) filters.rule = advancedForm.rule
+  showAdvanced.value = false
+  keyword.value = kw
+  stopPolling()
+  searching.value = true
+  results.value = []
+  total.value = 0
+  lastTotal = -1
+  stableCount = 0
+  try {
+    const res = await search({ search_word: kw, filters, unident: true })
+    if (res.code !== 0 && res.msg) {
+      modal.error(res.msg)
+    }
+  } catch (e) {
+    modal.error(e instanceof Error ? e.message : '搜索请求失败')
+  }
+  pollStart = Date.now()
+  await fetchResults()
+  startPolling()
+}
+
+// ---- 基础搜索 ----
 
 async function doSearch() {
   const q = keyword.value.trim()
@@ -160,6 +291,7 @@ onBeforeUnmount(stopPolling)
           {{ searching ? '搜索中' : '搜索' }}
         </el-button>
         <el-button v-if="searching" @click="stopPolling">停止</el-button>
+        <el-button @click="openAdvancedDialog">高级搜索</el-button>
       </template>
     </PageHeader>
 
@@ -248,7 +380,7 @@ onBeforeUnmount(stopPolling)
                 <span v-if="row.seeders">{{ row.seeders }}↑</span>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="120" align="center">
+            <el-table-column label="操作" width="160" align="center">
               <template #default="{ row }">
                 <el-button size="small" type="primary" :icon="Download" @click="openTorrent(row)">
                   下载
@@ -265,6 +397,105 @@ onBeforeUnmount(stopPolling)
         </div>
       </el-card>
     </div>
+
+    <el-dialog v-model="showAdvanced" title="高级搜索" width="750px" destroy-on-close>
+      <el-form label-width="60px">
+        <el-row :gutter="16">
+          <el-col :span="6">
+            <el-form-item label="类型">
+              <el-select v-model="advancedForm.type" style="width: 100%">
+                <el-option label="全部" value="" />
+                <el-option label="电影" value="电影" />
+                <el-option label="电视剧" value="电视剧" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="10">
+            <el-form-item label="名称">
+              <el-input v-model="advancedForm.name" placeholder="电影/电视剧名称" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="年份">
+              <el-input v-model="advancedForm.year" placeholder="20xx" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="季">
+              <el-select v-model="advancedForm.season" style="width: 100%">
+                <el-option
+                  v-for="opt in seasonOptions"
+                  :key="opt.value"
+                  :label="opt.label"
+                  :value="opt.value"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="质量">
+              <el-select v-model="advancedForm.restype" style="width: 100%">
+                <el-option label="全部" value="" />
+                <el-option
+                  v-for="(label, key) in restypeDict"
+                  :key="key"
+                  :label="label"
+                  :value="key"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="分辨率">
+              <el-select v-model="advancedForm.pix" style="width: 100%">
+                <el-option label="全部" value="" />
+                <el-option
+                  v-for="(label, key) in pixDict"
+                  :key="key"
+                  :label="label"
+                  :value="key"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="促销">
+              <el-select v-model="advancedForm.sp_state" style="width: 100%">
+                <el-option
+                  v-for="s in spStates"
+                  :key="s.value"
+                  :label="s.label"
+                  :value="s.value"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="24">
+            <el-form-item label="规则">
+              <el-select v-model="advancedForm.rule" style="width: 100%">
+                <el-option label="全部" value="" />
+                <el-option
+                  v-for="r in filterRules"
+                  :key="r.id"
+                  :label="r.name"
+                  :value="r.id"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+      </el-form>
+      <template #footer>
+        <el-button @click="showAdvanced = false">取消</el-button>
+        <el-button type="primary" @click="doAdvancedSearch">开始搜索</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 

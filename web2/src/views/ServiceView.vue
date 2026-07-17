@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, computed, reactive } from 'vue'
+import { onMounted, ref, computed } from 'vue'
 import { Refresh, VideoPause, Tools, Delete, Search, Connection, Promotion } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { useModalStore } from '@/stores/modal'
@@ -170,56 +170,89 @@ async function runService(s: ServiceItem) {
   }
 }
 
-const nameTestState = reactive({
-  input: '',
-  loading: false,
-  result: null as NameTestData | { name: string } | null
-})
+const nameTestVisible = ref(false)
+const nameTestInput = ref('')
+const nameTestLoading = ref(false)
+const nameTestResult = ref<NameTestData | { name: string } | null>(null)
+
+function openNameTest() {
+  nameTestInput.value = ''
+  nameTestResult.value = null
+  nameTestVisible.value = true
+}
 
 async function doNameTest() {
-  const name = nameTestState.input.trim()
+  const name = nameTestInput.value.trim()
   if (!name) {
     modal.warning('请输入资源名称')
     return
   }
-  nameTestState.loading = true
-  nameTestState.result = null
+  nameTestLoading.value = true
+  nameTestResult.value = null
   try {
     const res = await nameTest(name)
     if (res.code === 0 && res.data) {
-      nameTestState.result = res.data
+      nameTestResult.value = res.data
     } else {
-      nameTestState.result = { name: '无法识别' }
+      nameTestResult.value = { name: '无法识别' }
     }
   } catch {
     modal.error('识别失败')
   } finally {
-    nameTestState.loading = false
+    nameTestLoading.value = false
   }
 }
 
-const isFullNameData = (
-  d: NameTestData | { name: string } | null
-): d is NameTestData => !!d && 'title' in d
-
-const netTestState = reactive({
-  input: '',
-  loading: false,
-  results: [] as { target: string; res?: boolean; time?: string; testing: boolean }[]
-})
-
-function startNetTest() {
-  let targets: string[]
-  const input = netTestState.input.trim()
-  if (input) {
-    targets = input.split(/[\s,，;；\n]+/).filter(Boolean)
-  } else {
-    targets = [...NETTEST_TARGETS]
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    modal.success('已复制到剪贴板')
+  } catch {
+    modal.error('复制失败')
   }
-  netTestState.results = targets.map((t) => ({ target: t, testing: true }))
-  netTestState.loading = true
+}
+
+function openUrl(url: string) {
+  if (url) window.open(url, '_blank')
+}
+
+function searchTmdb(query: string) {
+  if (query) window.open(`https://www.themoviedb.org/search?query=${encodeURIComponent(query)}`, '_blank')
+}
+
+function toArray(v: unknown): string[] {
+  if (Array.isArray(v)) return v.filter(Boolean)
+  if (typeof v === 'string' && v) return [v]
+  return []
+}
+
+function getReplacedWords(data: NameTestData): string[] {
+  return toArray((data as any).replaced_words)
+}
+
+function hasReplacedWords(data: NameTestData): boolean {
+  return getReplacedWords(data).length > 0
+}
+
+function showOrgString(data: NameTestData): boolean {
+  if (!data.org_string) return false
+  const hasReplaced = hasReplacedWords(data)
+  const hasTmdb = !!data.tmdbid
+  if (hasReplaced) return true
+  if (!hasTmdb) return true
+  return false
+}
+
+const netTestVisible = ref(false)
+const netTestLoading = ref(false)
+const netTestResults = ref<{ target: string; res?: boolean; time?: string; testing: boolean }[]>([])
+
+function openNetTest() {
+  netTestResults.value = NETTEST_TARGETS.map((t) => ({ target: t, testing: true }))
+  netTestLoading.value = true
+  netTestVisible.value = true
   Promise.all(
-    netTestState.results.map((r) =>
+    netTestResults.value.map((r) =>
       netTest(r.target)
         .then((ret: NetTestResult) => {
           r.res = ret.res
@@ -234,7 +267,7 @@ function startNetTest() {
         })
     )
   ).finally(() => {
-    netTestState.loading = false
+    netTestLoading.value = false
   })
 }
 
@@ -343,109 +376,132 @@ onMounted(load)
         </div>
       </template>
 
-      <el-collapse>
-        <el-collapse-item title="名称识别测试" name="name">
-          <div class="tool-body">
-            <el-input
-              v-model="nameTestState.input"
-              placeholder="种子名/文件名等"
-              clearable
-              @keyup.enter="doNameTest"
-            >
-              <template #prefix>
-                <el-icon><Search /></el-icon>
-              </template>
-            </el-input>
-            <el-button
-              type="primary"
-              :icon="Search"
-              :loading="nameTestState.loading"
-              @click="doNameTest"
-            >
-              识别
-            </el-button>
-          </div>
-          <div v-if="nameTestState.result" class="name-result">
-            <template v-if="isFullNameData(nameTestState.result)">
-              <el-descriptions :column="2" border size="small">
-                <el-descriptions-item label="类型">{{ nameTestState.result.type }}</el-descriptions-item>
-                <el-descriptions-item label="名称">{{ nameTestState.result.name }}</el-descriptions-item>
-                <el-descriptions-item label="标题">{{ nameTestState.result.title }}</el-descriptions-item>
-                <el-descriptions-item label="年份">{{ nameTestState.result.year }}</el-descriptions-item>
-                <el-descriptions-item label="季集">{{ nameTestState.result.season_episode }}</el-descriptions-item>
-                <el-descriptions-item label="分类">{{ nameTestState.result.category }}</el-descriptions-item>
-                <el-descriptions-item label="TMDB ID">{{ nameTestState.result.tmdbid }}</el-descriptions-item>
-                <el-descriptions-item label="资源类型">{{ nameTestState.result.restype }}</el-descriptions-item>
-                <el-descriptions-item label="分辨率">{{ nameTestState.result.pix }}</el-descriptions-item>
-                <el-descriptions-item label="制作组">{{ nameTestState.result.team }}</el-descriptions-item>
-                <el-descriptions-item label="视频编码">{{ nameTestState.result.video_codec }}</el-descriptions-item>
-                <el-descriptions-item label="音频编码">{{ nameTestState.result.audio_codec }}</el-descriptions-item>
-                <el-descriptions-item label="TMDB 链接" :span="2">
-                  <el-link
-                    v-if="nameTestState.result.tmdblink"
-                    type="primary"
-                    :href="nameTestState.result.tmdblink"
-                    target="_blank"
-                  >
-                    {{ nameTestState.result.tmdblink }}
-                  </el-link>
-                  <span v-else>-</span>
-                </el-descriptions-item>
-                <el-descriptions-item label="原始串" :span="2">{{ nameTestState.result.org_string }}</el-descriptions-item>
-              </el-descriptions>
-            </template>
-            <template v-else>
-              <el-tag type="warning">{{ nameTestState.result.name }}</el-tag>
-            </template>
-          </div>
-        </el-collapse-item>
-
-        <el-collapse-item title="网络连通性测试" name="net">
-          <div class="tool-body">
-            <el-input
-              v-model="netTestState.input"
-              placeholder="留空则测试默认目标，多个目标用空格或逗号分隔"
-              clearable
-            >
-              <template #prefix>
-                <el-icon><Connection /></el-icon>
-              </template>
-            </el-input>
-            <el-button
-              type="primary"
-              :icon="Connection"
-              :loading="netTestState.loading"
-              @click="startNetTest"
-            >
-              测试
-            </el-button>
-          </div>
-          <el-table
-            v-if="netTestState.results.length"
-            :data="netTestState.results"
-            size="small"
-            style="margin-top: 12px"
-          >
-            <el-table-column prop="target" label="测试对象" min-width="240" />
-            <el-table-column label="连通性" width="100" align="center">
-              <template #default="{ row }">
-                <el-tag v-if="row.testing" size="small" type="info">测试中</el-tag>
-                <el-tag v-else size="small" :type="row.res ? 'success' : 'danger'">
-                  {{ row.res ? '是' : '否' }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="耗时" width="120" align="center">
-              <template #default="{ row }">
-                <span :style="{ color: row.res ? 'var(--el-color-success)' : 'var(--el-color-danger)' }">
-                  {{ row.time || '-' }}
-                </span>
-              </template>
-            </el-table-column>
-          </el-table>
-        </el-collapse-item>
-      </el-collapse>
+      <div class="tool-body" style="margin-bottom: 16px">
+        <el-button :icon="Tools" @click="openNameTest">名称识别测试</el-button>
+        <el-button :icon="Connection" @click="openNetTest">网络连通性测试</el-button>
+      </div>
     </el-card>
+
+    <el-dialog v-model="nameTestVisible" title="名称识别测试" width="640px" destroy-on-close>
+      <div class="name-test-body">
+        <el-input
+          v-model="nameTestInput"
+          placeholder="种子名/文件名等"
+          clearable
+          @keyup.enter="doNameTest"
+        >
+          <template #prefix>
+            <el-icon><Search /></el-icon>
+          </template>
+        </el-input>
+      </div>
+      <div v-if="nameTestResult" class="name-test-result">
+        <template v-if="'title' in nameTestResult">
+          <div class="result-row">
+            <span class="result-group">
+              <el-tag
+                type="warning"
+                :class="{ 'is-danger': (nameTestResult as NameTestData).name === '无法识别' }"
+                class="link-tag"
+                @click="searchTmdb((nameTestResult as NameTestData).name)"
+              >识别名称：{{ (nameTestResult as NameTestData).name }}</el-tag>
+              <el-tag
+                v-if="showOrgString(nameTestResult as NameTestData)"
+                type="warning"
+                class="wrap-tag"
+              >识别用名：{{ (nameTestResult as NameTestData).org_string }}</el-tag>
+            </span>
+          </div>
+          <div v-if="hasReplacedWords(nameTestResult as NameTestData)" class="result-row">
+            <span class="result-group">
+              <span class="chip-label" style="font-size: 13px; color: var(--el-text-color-secondary);">应用替换词：</span>
+              <el-tag
+                v-for="(w, wi) in toArray(getReplacedWords(nameTestResult as NameTestData))"
+                :key="wi"
+                type="info"
+                size="small"
+              >{{ w }}</el-tag>
+            </span>
+          </div>
+          <div class="result-row">
+            <span class="result-group">
+              <el-tag
+                type="success"
+                class="link-tag"
+                title="点击复制"
+                @click="copyText((nameTestResult as NameTestData).title)"
+              >
+                <span class="link-label">标题</span>：{{ (nameTestResult as NameTestData).title }}
+              </el-tag>
+              <el-tag
+                v-if="(nameTestResult as NameTestData).tmdbid"
+                type="success"
+                class="link-tag"
+                @click="openUrl((nameTestResult as NameTestData).tmdblink)"
+              ><span class="link-label">TMDB ID</span>：{{ (nameTestResult as NameTestData).tmdbid }}</el-tag>
+              <el-tag v-if="(nameTestResult as NameTestData).year" type="warning">年份：{{ (nameTestResult as NameTestData).year }}</el-tag>
+              <el-tag
+                v-if="(nameTestResult as NameTestData).season_episode"
+                type="warning"
+                class="link-tag"
+                @click="openUrl((nameTestResult as NameTestData).tmdb_S_E_link)"
+              ><span class="link-label">季集</span>：{{ (nameTestResult as NameTestData).season_episode }}</el-tag>
+            </span>
+          </div>
+          <div class="result-row">
+            <span class="result-group">
+              <el-tag v-if="(nameTestResult as NameTestData).restype">质量：{{ (nameTestResult as NameTestData).restype }}</el-tag>
+              <el-tag v-if="(nameTestResult as NameTestData).effect">特性：{{ (nameTestResult as NameTestData).effect }}</el-tag>
+              <el-tag v-if="(nameTestResult as NameTestData).category" type="primary">类别：{{ (nameTestResult as NameTestData).category }}</el-tag>
+              <el-tag v-if="(nameTestResult as NameTestData).pix">分辨率：{{ (nameTestResult as NameTestData).pix }}</el-tag>
+              <el-tag v-if="(nameTestResult as NameTestData).video_codec">视频编码：{{ (nameTestResult as NameTestData).video_codec }}</el-tag>
+              <el-tag v-if="(nameTestResult as NameTestData).audio_codec">音频编码：{{ (nameTestResult as NameTestData).audio_codec }}</el-tag>
+              <el-tag v-if="(nameTestResult as NameTestData).team" type="info">制作组/字幕组：{{ (nameTestResult as NameTestData).team }}</el-tag>
+              <el-tag v-if="(nameTestResult as NameTestData).part" type="warning">分集：{{ (nameTestResult as NameTestData).part }}</el-tag>
+            </span>
+          </div>
+        </template>
+        <template v-else>
+          <el-tag type="danger">{{ nameTestResult.name }}</el-tag>
+        </template>
+      </div>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="nameTestVisible = false">取消</el-button>
+          <el-button type="primary" :loading="nameTestLoading" @click="doNameTest">
+            {{ nameTestLoading ? '识别中...' : '识别' }}
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="netTestVisible" title="网络连通性测试" width="600px" destroy-on-close>
+      <el-table
+        v-loading="netTestLoading"
+        :data="netTestResults"
+        size="small"
+      >
+        <el-table-column prop="target" label="测试对象" min-width="240" />
+        <el-table-column label="连通性" width="100" align="center">
+          <template #default="{ row }">
+            <el-tag v-if="row.testing" size="small" type="info">测试中</el-tag>
+            <el-tag v-else size="small" :type="row.res ? 'success' : 'danger'">
+              {{ row.res ? '是' : '否' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="耗时" width="120" align="center">
+          <template #default="{ row }">
+            <span :style="{ color: row.res ? 'var(--el-color-success)' : 'var(--el-color-danger)' }">
+              {{ row.time || '-' }}
+            </span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="netTestVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -497,5 +553,51 @@ onMounted(load)
 }
 .name-result {
   margin-top: 12px;
+}
+.name-test-body {
+  margin-bottom: 12px;
+}
+.name-test-result {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.result-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.result-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.dialog-footer {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+}
+.link-tag {
+  cursor: pointer;
+}
+.link-tag:hover {
+  opacity: 0.8;
+}
+.link-label {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.is-danger.el-tag {
+  --el-tag-bg-color: var(--el-color-danger-light-9);
+  --el-tag-border-color: var(--el-color-danger-light-5);
+  --el-tag-text-color: var(--el-color-danger);
+}
+.name-test-result .el-tag {
+  max-width: 100%;
+  white-space: normal;
+  word-break: break-all;
+  line-height: 1.4;
+  height: auto;
+  min-height: 24px;
 }
 </style>

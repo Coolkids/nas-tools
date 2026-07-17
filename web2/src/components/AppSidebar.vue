@@ -61,9 +61,9 @@ const activeMenu = computed(() => route.path)
         <el-icon><Files /></el-icon>
         <span>媒体整理</span>
       </template>
+      <el-menu-item index="/mediafile">文件管理</el-menu-item>
       <el-menu-item index="/history">转移历史</el-menu-item>
       <el-menu-item index="/unidentification">手动识别</el-menu-item>
-      <el-menu-item index="/mediafile">文件管理</el-menu-item>
       <el-menu-item index="/tmdbcache">TMDB缓存</el-menu-item>
     </el-sub-menu>
 

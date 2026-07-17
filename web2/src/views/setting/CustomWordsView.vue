@@ -9,7 +9,8 @@ import {
   VideoPause,
   Upload as UploadIcon,
   Download as DownloadIcon,
-  DocumentCopy
+  DocumentCopy,
+  QuestionFilled
 } from '@element-plus/icons-vue'
 import { doAction } from '@/api'
 import PageHeader from '@/components/PageHeader.vue'
@@ -43,7 +44,7 @@ interface WordGroup {
 interface GroupsResult {
   code: number
   msg?: string
-  groups: WordGroup[]
+  result: WordGroup[]
 }
 
 interface WordDetailResult {
@@ -64,7 +65,7 @@ async function load() {
   try {
     const res = await doAction<GroupsResult>('get_customwords', {})
     if (res.code === 0) {
-      groups.value = res.groups || []
+      groups.value = res.result || []
     } else {
       modal.error(res.msg || '获取识别词失败')
     }
@@ -161,7 +162,11 @@ async function submitWord() {
   if ((form.type === 2 || form.type === 3) && (!form.new_replaced || !form.new_replace)) return modal.warning('请填写被替换词和替换词')
   if ((form.type === 3 || form.type === 4) && (!form.new_front || !form.new_back || !form.new_offset)) return modal.warning('请填写定位词和偏移集数')
   try {
-    const res = await doAction<{ code: number; msg?: string }>('add_or_edit_custom_word', { ...form })
+    const payload: Record<string, string> = {}
+    for (const [k, v] of Object.entries(form)) {
+      payload[k] = String(v)
+    }
+    const res = await doAction<{ code: number; msg?: string }>('add_or_edit_custom_word', payload)
     if (res.code === 0) {
       modal.success('保存成功')
       editVisible.value = false
@@ -400,17 +405,30 @@ function seasonLabel(s: number): string {
           <el-row :gutter="12">
             <el-col :span="8">
               <el-form-item label="前定位词" required>
-                <el-input v-model="form.new_front" />
+                <el-input v-model="form.new_front" placeholder="如 第" />
               </el-form-item>
             </el-col>
             <el-col :span="8">
               <el-form-item label="后定位词" required>
-                <el-input v-model="form.new_back" />
+                <el-input v-model="form.new_back" placeholder="如 話" />
               </el-form-item>
             </el-col>
             <el-col :span="8">
-              <el-form-item label="偏移集数" required>
-                <el-input v-model="form.new_offset" placeholder="EP+1" />
+              <el-form-item required>
+                <template #label>
+                  偏移集数
+                  <el-tooltip placement="top">
+                    <template #content>
+                      <div>1、前定位词/后定位词用于标定集数位置。</div>
+                      <div>例如 第{ep}話 中 {ep} 表示集数位置，前定位词填 第、后定位词填 話；如果文件名中没有变化的部分，只标定 {ep} 位置即可。</div>
+                      <div style="margin-top: 4px">2、偏移集数：例如定位出的集数是 11，实际是第 1 集，偏移填 -10，以应付多季合集的场景。</div>
+                    </template>
+                    <el-icon style="cursor: help; margin-left: 4px; color: var(--el-text-color-secondary); font-size: 14px;">
+                      <QuestionFilled />
+                    </el-icon>
+                  </el-tooltip>
+                </template>
+                <el-input v-model="form.new_offset" placeholder="如 -10" />
               </el-form-item>
             </el-col>
           </el-row>

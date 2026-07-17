@@ -1,11 +1,25 @@
 <script setup lang="ts">
+import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { logout } from '@/api/auth'
+import { doAction } from '@/api'
 import { useModalStore } from '@/stores/modal'
 import AppSearchbar from '@/components/AppSearchbar.vue'
 
+const appVersion = ref('')
 const router = useRouter()
 const modal = useModalStore()
+
+onMounted(async () => {
+  try {
+    const res = await doAction<{ code: number; version: string }>('version')
+    if (res.code === 0 && res.version) {
+      appVersion.value = res.version
+    }
+  } catch {
+    // 忽略
+  }
+})
 
 async function handleLogout() {
   const ok = await modal.confirm('确定要退出登录吗？', '退出登录')
@@ -42,6 +56,7 @@ function goHome() {
         <el-dropdown-menu>
           <el-dropdown-item @click="router.push('/users')">用户管理</el-dropdown-item>
           <el-dropdown-item @click="router.push('/basic')">系统设置</el-dropdown-item>
+          <el-dropdown-item divided disabled class="version-item">{{ appVersion }}</el-dropdown-item>
           <el-dropdown-item divided @click="handleLogout">退出登录</el-dropdown-item>
         </el-dropdown-menu>
       </template>
@@ -59,5 +74,10 @@ function goHome() {
   gap: 4px;
   cursor: pointer;
   outline: none;
+}
+:deep(.version-item) {
+  opacity: 0.6;
+  cursor: default !important;
+  font-size: 12px;
 }
 </style>

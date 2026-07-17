@@ -44,6 +44,7 @@ from app.utils.types import RmtMode, OsType, SearchType, DownloaderType, SyncTyp
 from config import RMT_MEDIAEXT, TMDB_IMAGE_W500_URL, RMT_SUBEXT, Config
 from web.backend.search_torrents import search_medias_for_web, search_media_by_message
 from web.backend.web_utils import WebUtils
+from version import APP_VERSION
 
 
 class WebAction:
@@ -209,7 +210,8 @@ class WebAction:
             "save_user_script": self.__save_user_script,
             "run_directory_sync": self.__run_directory_sync,
             "get_config": self.__get_config,
-            "get_system_config": self.__get_system_config
+            "get_system_config": self.__get_system_config,
+            "version": self.__version
         }
 
     def action(self, cmd, data=None):
@@ -4360,6 +4362,10 @@ class WebAction:
         """
         cfg = Config().get_config()
         return {"code": 0, "config": cfg}
+
+    @staticmethod
+    def __version(data=None):
+        return {"code": 0, "version": APP_VERSION}
 
     @staticmethod
     def __get_system_config(data):
