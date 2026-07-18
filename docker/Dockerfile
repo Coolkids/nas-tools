@@ -118,10 +118,18 @@ RUN echo 'fs.inotify.max_user_watches=524288' >> /etc/sysctl.conf \
     && chmod +x /app/nas-tools/docker/entrypoint.sh
 
 # 设置目录权限（nginx 非 root 运行需要预建临时目录）
-RUN mkdir -p /var/lib/nginx/{body,proxy,fastcgi,scgi,uwsgi} \
+RUN mkdir -p \
+    /var/lib/nginx/body \
+    /var/lib/nginx/proxy \
+    /var/lib/nginx/fastcgi \
+    /var/lib/nginx/scgi \
+    /var/lib/nginx/uwsgi \
     && chown -R nastool:nastool \
         /app \
         /var/run/supervisor \
+        /var/lib/nginx \
+        /var/log/nginx \
+    && chmod 0777 -R nastool:nastool \
         /var/lib/nginx \
         /var/log/nginx
 
