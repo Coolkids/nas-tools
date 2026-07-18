@@ -91,7 +91,7 @@ RUN groupadd -r nastool && useradd -r -g nastool -d /app -s /usr/sbin/nologin na
 
 # nginx 配置
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
-RUN sed -i 's/^user .*/user nastool;/' /etc/nginx/nginx.conf
+RUN sed -i 's/^user /# user /' /etc/nginx/nginx.conf
 
 # supervisor 配置
 RUN mkdir -p /var/run/supervisor
