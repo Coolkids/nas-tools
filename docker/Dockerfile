@@ -22,18 +22,18 @@ RUN apt-get update && apt-get install -y \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
-RUN wget -q https://www.python.org/ftp/python/3.14.0/Python-3.14.0.tgz \
-    && tar xzf Python-3.14.0.tgz \
-    && cd Python-3.14.0 \
+RUN wget -q https://www.python.org/ftp/python/3.14.6/Python-3.14.6.tgz \
+    && tar xzf Python-3.14.6.tgz \
+    && cd Python-3.14.6 \
     && ./configure --enable-optimizations --prefix=/usr/local \
     && make -j$(nproc) \
     && make install \
-    && cd / && rm -rf Python-3.14.0 Python-3.14.0.tgz
+    && cd / && rm -rf Python-3.14.6 Python-3.14.6.tgz
 
 # ============================================================
 # Stage 2: Build frontend
 # ============================================================
-FROM node:22-slim AS frontend-builder
+FROM node:24-slim AS frontend-builder
 
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 
