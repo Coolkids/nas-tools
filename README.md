@@ -3,19 +3,12 @@
 
 [![GitHub stars](https://img.shields.io/github/stars/Coolkids/nas-tools?style=plastic)](https://github.com/Coolkids/nas-tools/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/Coolkids/nas-tools?style=plastic)](https://github.com/Coolkids/nas-tools/network/members)
-[![GitHub issues](https://img.shields.io/github/issues/Coolkids/nas-tools?style=plastic)](https://github.com/Coolkids/nas-tools/issues)
 [![GitHub license](https://img.shields.io/github/license/Coolkids/nas-tools?style=plastic)](https://github.com/Coolkids/nas-tools/blob/master/LICENSE.md)
-[![Docker pulls](https://img.shields.io/docker/pulls/coolkid903/nas-tools?style=plastic)](https://hub.docker.com/r/coolkid903/nas-tools)
-[![Platform](https://img.shields.io/badge/platform-amd64/arm64-pink?style=plastic)](https://hub.docker.com/r/coolkid903/nas-tools)
+
+> 前端界面已独立拆分至 [nas-tools-web](https://github.com/Coolkids/nas-tools-web)
 
 
 Docker：https://hub.docker.com/r/coolkid903/nas-tools
-
-TG频道：<span style="color:red">无</span>
-
-WIKI：<span style="color:red">无</span>
-
-API: http://localhost:3000/api/v1/
 
 
 ## 功能：

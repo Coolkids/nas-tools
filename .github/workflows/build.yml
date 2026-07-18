@@ -8,6 +8,8 @@ on:
     paths:
       - version.py
       - docker/Dockerfile
+      - docker/nginx.conf
+      - docker/entrypoint.sh
       - .github/workflows/build.yml
       - requirements.txt
 
@@ -47,6 +49,5 @@ jobs:
           push: true
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/nas-tools:latest
+            ${{ secrets.DOCKER_USERNAME }}/nas-tools:v3
             ${{ secrets.DOCKER_USERNAME }}/nas-tools:${{ env.app_version }}
-
-  

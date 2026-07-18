@@ -3642,10 +3642,13 @@ class WebAction:
 
     def get_rss_history(self, data):
         """
-        查询所有订阅历史
+        查询订阅历史（支持分页）
         """
         mtype = data.get("type")
-        return {"code": 0, "result": [rec.as_dict() for rec in self.dbhelper.get_rss_history(rtype=mtype)]}
+        page = data.get("page", 1)
+        page_size = data.get("page_size", 30)
+        records, total = self.dbhelper.get_rss_history(rtype=mtype, page=page, page_size=page_size)
+        return {"code": 0, "result": [rec.as_dict() for rec in records], "total": total}
 
     @staticmethod
     def get_downloading(data=None):

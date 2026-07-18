@@ -8,6 +8,21 @@ from alembic.config import Config as AlembicConfig
 from alembic.command import upgrade as alembic_upgrade
 
 
+def close_db():
+    """
+    释放当前线程的数据库会话，归还连接到连接池
+    应在请求结束时调用，避免连接泄漏导致 QueuePool 耗尽
+    """
+    try:
+        MainDb.close_session()
+    except Exception as e:
+        log.error(f"关闭 MainDb 会话失败: {e}")
+    try:
+        MediaDb.close_session()
+    except Exception as e:
+        log.error(f"关闭 MediaDb 会话失败: {e}")
+
+
 def init_db():
     """
     初始化数据库

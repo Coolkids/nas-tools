@@ -36,6 +36,10 @@ class MediaDb:
         return _Session()
 
     @staticmethod
+    def close_session():
+        _Session.remove()
+
+    @staticmethod
     def init_db():
         with lock:
             BaseMedia.metadata.create_all(_Engine)

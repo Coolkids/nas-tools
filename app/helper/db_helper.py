@@ -2078,16 +2078,19 @@ class DbHelper:
         return self._db.query(USERRSSTASKHISTORY).filter(USERRSSTASKHISTORY.TASK_ID == task_id) \
             .order_by(USERRSSTASKHISTORY.DATE.desc()).all()
 
-    def get_rss_history(self, rtype=None, rid=None):
+    def get_rss_history(self, rtype=None, rid=None, page=1, page_size=30):
         """
-        查询RSS历史
+        查询RSS历史（支持分页）
         """
+        query = self._db.query(RSSHISTORY)
         if rid:
-            return self._db.query(RSSHISTORY).filter(RSSHISTORY.ID == int(rid)).all()
-        elif rtype:
-            return self._db.query(RSSHISTORY).filter(RSSHISTORY.TYPE == rtype) \
-                .order_by(RSSHISTORY.FINISH_TIME.desc()).all()
-        return self._db.query(RSSHISTORY).order_by(RSSHISTORY.FINISH_TIME.desc()).all()
+            return query.filter(RSSHISTORY.ID == int(rid)).all(), 1
+        if rtype:
+            query = query.filter(RSSHISTORY.TYPE == rtype)
+        total = query.count()
+        records = query.order_by(RSSHISTORY.FINISH_TIME.desc()) \
+            .offset((int(page) - 1) * int(page_size)).limit(int(page_size)).all()
+        return records, total
 
     def is_exists_rss_history(self, rssid):
         """

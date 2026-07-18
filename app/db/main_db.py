@@ -36,6 +36,10 @@ class MainDb:
         return _Session()
 
     @staticmethod
+    def close_session():
+        _Session.remove()
+
+    @staticmethod
     def init_db():
         with lock:
             Base.metadata.create_all(_Engine)

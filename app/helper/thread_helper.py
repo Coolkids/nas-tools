@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 
+from app.db import close_db
 from app.utils.commons import singleton
 
 
@@ -15,4 +16,11 @@ class ThreadHelper:
         pass
 
     def start_thread(self, func, kwargs):
-        self.executor.submit(func, *kwargs)
+        def _wrapped():
+            try:
+                return func(*kwargs)
+            finally:
+                # 任务结束后释放当前线程的 scoped_session，归还连接到连接池
+                close_db()
+
+        self.executor.submit(_wrapped)
