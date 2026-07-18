@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y \
     tk-dev \
     libffi-dev \
     wget \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 RUN wget -q https://www.python.org/ftp/python/3.14.0/Python-3.14.0.tgz \
@@ -60,7 +61,9 @@ RUN apt-get update && apt-get install -y \
     inotify-tools \
     dumb-init \
     ffmpeg \
-    nginx \
+    nginx-full \
+    unzip \
+    7zip \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制 Python 3.14
