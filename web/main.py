@@ -85,19 +85,6 @@ def shutdown_session(exception=None):
 def load_user(user_id):
     return User().get(user_id)
 
-
-# 页面不存在
-@App.errorhandler(404)
-def page_not_found(error):
-    return 404
-
-
-# 服务错误
-@App.errorhandler(500)
-def page_server_error(error):
-    return 500
-
-
 def action_login_check(func):
     """
     Action安全认证
