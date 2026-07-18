@@ -47,14 +47,21 @@ ENV PATH="/root/.local/bin:${PATH}" \
     UV_PYTHON_INSTALL_DIR="/opt/python" \
     UV_LINK_MODE=copy
 
-# 安装 Python 3.14（uv 下载预编译二进制，无需从源码编译）
+# 安装 Python 3.14 并创建虚拟环境
 RUN uv python install 3.14 \
-    && ln -sf "$(uv python find 3.14)" /usr/local/bin/python3 \
-    && ln -sf "$(uv python find 3.14)" /usr/local/bin/python
+    && uv venv /app/.venv --python 3.14
+
+# 激活 venv（后续 RUN 层通过 PATH 继承 venv 优先）
+ENV VIRTUAL_ENV=/app/.venv \
+    PATH="/app/.venv/bin:${PATH}"
 
 # 升级 pip 工具链
-RUN uv pip install --system --upgrade pip setuptools wheel Cython \
+RUN uv pip install --upgrade pip setuptools wheel Cython \
     && rm -rf /tmp/* /root/.cache
+
+# 添加项目路径到 venv 的 site-packages
+RUN SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])") \
+    && echo '/app/nas-tools' > "$SITE_PACKAGES/nas-tools.pth"
 
 # 安装 rclone、mc
 RUN curl -fsSL https://rclone.org/install.sh | bash \
@@ -78,7 +85,7 @@ COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 # 克隆后端代码并安装依赖（使用 uv 加速）
 RUN git clone -b main ${REPO_URL} /app/nas-tools --depth=1 --recurse-submodule \
-    && uv pip install --system -r /app/nas-tools/requirements.txt \
+    && uv pip install -r /app/nas-tools/requirements.txt \
     && rm -rf /tmp/* /root/.cache
 
 # 环境变量
@@ -91,10 +98,8 @@ ENV LANG="C.UTF-8" \
 
 WORKDIR ${WORKDIR}
 
-# 配置 Python 路径
-RUN SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])") \
-    && echo '/app/nas-tools' > "$SITE_PACKAGES/nas-tools.pth" \
-    && echo 'fs.inotify.max_user_watches=524288' >> /etc/sysctl.conf \
+# 系统配置
+RUN echo 'fs.inotify.max_user_watches=524288' >> /etc/sysctl.conf \
     && echo 'fs.inotify.max_user_instances=524288' >> /etc/sysctl.conf \
     && chmod +x /app/nas-tools/docker/entrypoint.sh
 
