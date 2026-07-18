@@ -9,8 +9,8 @@ on:
       - .github/workflows/build-windows.yml
 
 env:
-  PYTHON_VERSION: "3.14.4"
-  PYTHON_HOME: C:\hostedtoolcache\windows\Python\3.14.4\x64
+  PYTHON_VERSION: "3.14.6"
+  PYTHON_HOME: C:\hostedtoolcache\windows\Python\3.14.6\x64
 
 jobs:
   windows-build:
