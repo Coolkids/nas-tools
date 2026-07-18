@@ -1,5 +1,5 @@
 # ============================================================
-# Stage 1: Build frontend
+# Stage 1: Build desktop frontend
 # ============================================================
 FROM node:24-slim AS frontend-builder
 
@@ -12,7 +12,20 @@ RUN git clone --depth=1 ${FRONTEND_REPO} /frontend \
     && npm run build
 
 # ============================================================
-# Stage 2: Final image
+# Stage 2: Build mobile frontend
+# ============================================================
+FROM node:24-slim AS mobile-builder
+
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
+ARG MOBILE_REPO=https://github.com/Coolkids/nas-tools-mobile.git
+RUN git clone --depth=1 ${MOBILE_REPO} /mobile \
+    && cd /mobile \
+    && npm install \
+    && npm run build
+
+# ============================================================
+# Stage 3: Final image
 # ============================================================
 FROM debian:13-slim
 
@@ -71,6 +84,7 @@ RUN curl -fsSL https://rclone.org/install.sh | bash \
 
 # 复制前端构建产物
 COPY --from=frontend-builder /frontend/dist /app/web/dist
+COPY --from=mobile-builder /mobile/dist /app/mobile/dist
 
 # 创建运行用户
 RUN groupadd -r nastool && useradd -r -g nastool -d /app -s /usr/sbin/nologin nastool

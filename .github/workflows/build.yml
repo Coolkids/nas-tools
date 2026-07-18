@@ -14,7 +14,6 @@ on:
       - .github/workflows/build.yml
       - requirements.txt
 
-
 jobs:
   build:
     name: Build Docker Image
