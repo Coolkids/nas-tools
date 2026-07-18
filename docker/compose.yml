@@ -1,4 +1,3 @@
-version: "3"
 services:
   nas-tools:
     image: coolkid903/nas-tools:latest
@@ -7,9 +6,8 @@ services:
     volumes:
       - ./config:/config
       - /你的媒体目录:/你想设置的容器内能见到的目录
+    user: "1000:1000"
     environment:
-      - PUID=0
-      - PGID=0
       - UMASK=000
     restart: always
     network_mode: bridge
