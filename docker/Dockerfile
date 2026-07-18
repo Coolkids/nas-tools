@@ -1,37 +1,5 @@
 # ============================================================
-# Stage 1: Build Python 3.14 from source
-# ============================================================
-FROM debian:13-slim AS python-builder
-
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    libssl-dev \
-    zlib1g-dev \
-    libncurses5-dev \
-    libncursesw5-dev \
-    libreadline-dev \
-    libsqlite3-dev \
-    libgdbm-dev \
-    libdb5.3-dev \
-    libbz2-dev \
-    libexpat1-dev \
-    liblzma-dev \
-    tk-dev \
-    libffi-dev \
-    wget \
-    unzip \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN wget -q https://www.python.org/ftp/python/3.14.6/Python-3.14.6.tgz \
-    && tar xzf Python-3.14.6.tgz \
-    && cd Python-3.14.6 \
-    && ./configure --enable-optimizations --prefix=/usr/local \
-    && make -j$(nproc) \
-    && make install \
-    && cd / && rm -rf Python-3.14.6 Python-3.14.6.tgz
-
-# ============================================================
-# Stage 2: Build frontend
+# Stage 1: Build frontend
 # ============================================================
 FROM node:24-slim AS frontend-builder
 
@@ -44,15 +12,23 @@ RUN git clone --depth=1 ${FRONTEND_REPO} /frontend \
     && npm run build
 
 # ============================================================
-# Stage 3: Final image
+# Stage 2: Final image
 # ============================================================
 FROM debian:13-slim
+
+LABEL maintainer="Coolkids"
 
 ARG TARGETPLATFORM
 ARG REPO_URL=https://github.com/Coolkids/nas-tools.git
 
-# 系统运行时依赖
+# 系统运行时依赖 + 编译工具（部分包在 Python 3.14 下可能无预编译 wheel）
 RUN apt-get update && apt-get install -y \
+    build-essential \
+    libssl-dev \
+    libxml2-dev \
+    libxslt-dev \
+    libffi-dev \
+    libjpeg-dev \
     git \
     tzdata \
     curl \
@@ -65,18 +41,26 @@ RUN apt-get update && apt-get install -y \
     supervisor \
     && rm -rf /var/lib/apt/lists/*
 
-# 复制 Python 3.14
-COPY --from=python-builder /usr/local /usr/local
+# 安装 uv（Rust 编写的 Python 包管理器，加速构建）
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}" \
+    UV_PYTHON_INSTALL_DIR="/opt/python" \
+    UV_LINK_MODE=copy
+
+# 安装 Python 3.14（uv 下载预编译二进制，无需从源码编译）
+RUN uv python install 3.14 \
+    && ln -sf "$(uv python find 3.14)" /usr/local/bin/python3 \
+    && ln -sf "$(uv python find 3.14)" /usr/local/bin/python
+
+# 升级 pip 工具链
+RUN uv pip install --system --upgrade pip setuptools wheel Cython \
+    && rm -rf /tmp/* /root/.cache
 
 # 安装 rclone、mc
 RUN curl -fsSL https://rclone.org/install.sh | bash \
     && if [ "$TARGETPLATFORM" = "linux/amd64" ]; then ARCH=amd64; elif [ "$TARGETPLATFORM" = "linux/arm64" ]; then ARCH=arm64; else ARCH=amd64; fi \
     && curl -fsSL https://dl.min.io/client/mc/release/linux-${ARCH}/mc --create-dirs -o /usr/bin/mc \
     && chmod +x /usr/bin/mc
-
-# pip 基础升级
-RUN pip3 install --upgrade pip setuptools wheel Cython \
-    && rm -rf /tmp/* /root/.cache
 
 # 复制前端构建产物
 COPY --from=frontend-builder /frontend/dist /app/web/dist
@@ -92,9 +76,9 @@ RUN sed -i 's/^user .*/user nastool;/' /etc/nginx/nginx.conf
 RUN mkdir -p /var/run/supervisor
 COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-# 克隆后端代码并安装依赖
+# 克隆后端代码并安装依赖（使用 uv 加速）
 RUN git clone -b main ${REPO_URL} /app/nas-tools --depth=1 --recurse-submodule \
-    && pip3 install -r /app/nas-tools/requirements.txt \
+    && uv pip install --system -r /app/nas-tools/requirements.txt \
     && rm -rf /tmp/* /root/.cache
 
 # 环境变量
@@ -108,7 +92,8 @@ ENV LANG="C.UTF-8" \
 WORKDIR ${WORKDIR}
 
 # 配置 Python 路径
-RUN echo '/app/nas-tools' > /usr/local/lib/python3.14/site-packages/nas-tools.pth \
+RUN SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])") \
+    && echo '/app/nas-tools' > "$SITE_PACKAGES/nas-tools.pth" \
     && echo 'fs.inotify.max_user_watches=524288' >> /etc/sysctl.conf \
     && echo 'fs.inotify.max_user_instances=524288' >> /etc/sysctl.conf \
     && chmod +x /app/nas-tools/docker/entrypoint.sh
