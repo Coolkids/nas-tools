@@ -117,8 +117,13 @@ RUN echo 'fs.inotify.max_user_watches=524288' >> /etc/sysctl.conf \
     && echo 'fs.inotify.max_user_instances=524288' >> /etc/sysctl.conf \
     && chmod +x /app/nas-tools/docker/entrypoint.sh
 
-# 设置目录权限
-RUN chown -R nastool:nastool /app /var/run/supervisor /var/lib/nginx /var/log/nginx
+# 设置目录权限（nginx 非 root 运行需要预建临时目录）
+RUN mkdir -p /var/lib/nginx/{body,proxy,fastcgi,scgi,uwsgi} \
+    && chown -R nastool:nastool \
+        /app \
+        /var/run/supervisor \
+        /var/lib/nginx \
+        /var/log/nginx
 
 USER nastool
 
