@@ -207,13 +207,10 @@ class BuiltinIndexer(_IIndexClient):
                         page=page,
                         mtype=mtype)
         spider.start()
-        # 循环判断是否获取到数据
-        sleep_count = 0
-        while not spider.is_complete:
-            sleep_count += 1
-            time.sleep(1)
-            if sleep_count > timeout:
+        for _ in range(timeout * 2):
+            if spider.is_complete:
                 break
+            time.sleep(0.5)
         # 返回数据
         result_array = spider.torrents_info_array.copy()
         spider.torrents_info_array.clear()

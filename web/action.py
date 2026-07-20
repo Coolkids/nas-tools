@@ -43,6 +43,7 @@ from app.utils import StringUtils, EpisodeFormat, RequestUtils, PathUtils, \
 from app.utils.types import RmtMode, OsType, SearchType, DownloaderType, SyncType, MediaType, MovieTypes, TvTypes
 from config import RMT_MEDIAEXT, TMDB_IMAGE_W500_URL, RMT_SUBEXT, Config
 from web.backend.search_torrents import search_medias_for_web, search_media_by_message
+from web.backend.search_task import SearchTaskPool
 from web.backend.web_utils import WebUtils
 from version import APP_VERSION
 
@@ -159,6 +160,9 @@ class WebAction:
             "get_library_mediacount": self.get_library_mediacount,
             "get_library_playhistory": self.get_library_playhistory,
             "get_search_result": self.get_search_result,
+            "search_task_list": self.__search_task_list,
+            "search_task_result": self.__search_task_result,
+            "search_task_delete": self.__search_task_delete,
             "search_media_infos": self.search_media_infos,
             "get_movie_rss_list": self.get_movie_rss_list,
             "get_tv_rss_list": self.get_tv_rss_list,
@@ -437,9 +441,11 @@ class WebAction:
     @staticmethod
     def __search(data):
         """
-        WEB检索资源
+        WEB检索资源（通过任务池提交）
         """
         search_word = data.get("search_word")
+        if not search_word:
+            return {"code": -1, "msg": "请输入搜索关键字"}
         ident_flag = False if data.get("unident") else True
         filters = data.get("filters")
         tmdbid = data.get("tmdbid")
@@ -449,15 +455,55 @@ class WebAction:
                 media_type = MediaType.MOVIE
             else:
                 media_type = MediaType.TV
-        if search_word:
-            ret, ret_msg = search_medias_for_web(content=search_word,
-                                                 ident_flag=ident_flag,
-                                                 filters=filters,
-                                                 tmdbid=tmdbid,
-                                                 media_type=media_type)
-            if ret != 0:
-                return {"code": ret, "msg": ret_msg}
-        return {"code": 0}
+        return SearchTaskPool.submit(keyword=search_word,
+                                     ident_flag=ident_flag,
+                                     filters=filters,
+                                     tmdbid=tmdbid,
+                                     media_type=media_type)
+
+    @staticmethod
+    def __search_task_list(data):
+        """
+        查询搜索任务列表
+        """
+        tasks = SearchTaskPool.get_task_list()
+        return {"code": 0, "tasks": tasks}
+
+    @staticmethod
+    def __search_task_result(data):
+        """
+        查询指定关键词的搜索结果
+        """
+        keyword = data.get("keyword") if data else None
+        if not keyword:
+            return {"code": -1, "msg": "缺少关键词参数"}
+        result = SearchTaskPool.get_task_result(keyword)
+        if not result:
+            return {"code": 1, "msg": "任务不存在"}
+        tmdb_info = {}
+        try:
+            infos = Media().get_tmdb_infos(title=keyword)
+            if infos:
+                info = infos[0]
+                tmdb_info = {
+                    "poster": TMDB_IMAGE_W500_URL % info.get("poster_path", "") if info.get("poster_path") else "",
+                    "overview": info.get("overview", "") or "",
+                    "title": info.get("title") or info.get("name") or "",
+                    "year": (info.get("release_date") or info.get("first_air_date") or "")[:4]
+                }
+        except Exception:
+            pass
+        return {"code": 0, "task": result["task"], "results": result["results"], "tmdb_info": tmdb_info}
+
+    @staticmethod
+    def __search_task_delete(data):
+        """
+        删除搜索任务
+        """
+        keyword = data.get("keyword") if data else None
+        if not keyword:
+            return {"code": -1, "msg": "缺少关键词参数"}
+        return SearchTaskPool.delete_task(keyword)
 
     def __download(self, data):
         """

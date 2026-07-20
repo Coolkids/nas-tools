@@ -353,6 +353,18 @@ class SEARCHRESULTINFO(Base):
     UPLOAD_VOLUME_FACTOR = Column(Float)
     DOWNLOAD_VOLUME_FACTOR = Column(Float)
     NOTE = Column(Text)
+    KEYWORD = Column(Text, index=True)
+
+
+class SEARCHTASK(Base):
+    __tablename__ = 'SEARCH_TASK'
+
+    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    KEYWORD = Column(Text, unique=True, index=True)
+    STATUS = Column(Text)
+    START_TIME = Column(Text)
+    END_TIME = Column(Text)
+    MESSAGE = Column(Text)
 
 
 class SITEBRUSHDOWNLOADERS(Base):

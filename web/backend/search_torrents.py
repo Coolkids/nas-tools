@@ -20,7 +20,8 @@ SEARCH_MEDIA_CACHE = {}
 SEARCH_MEDIA_TYPE = {}
 
 
-def search_medias_for_web(content, ident_flag=True, filters=None, tmdbid=None, media_type=None):
+def search_medias_for_web(content, ident_flag=True, filters=None, tmdbid=None, media_type=None,
+                           keyword=None, cancel_event=None):
     """
     WEB资源搜索
     :param content: 关键字文本，可以包括 类型、标题、季、集、年份等信息，使用 空格分隔，也支持种子的命名格式
@@ -28,8 +29,12 @@ def search_medias_for_web(content, ident_flag=True, filters=None, tmdbid=None, m
     :param filters: 其它过滤条件
     :param tmdbid: TMDBID或DB:豆瓣ID
     :param media_type: 媒体类型，配合tmdbid传入
+    :param keyword: 任务关键词（用于关联结果和任务）
+    :param cancel_event: 取消事件，设置后任务应中止
     :return: 错误码，错误原因，成功时直接插入数据库
     """
+    if cancel_event and cancel_event.is_set():
+        return -1, "任务已取消"
     mtype, key_word, season_num, episode_num, year, content = StringUtils.get_keyword_from_string(content)
     if not key_word:
         log.info("【Web】%s 检索关键字有误！" % content)
@@ -48,6 +53,8 @@ def search_medias_for_web(content, ident_flag=True, filters=None, tmdbid=None, m
         if tmdbid:
             media_info = WebUtils.get_mediainfo_from_id(mtype=mtype, mediaid=tmdbid)
         else:
+            if cancel_event and cancel_event.is_set():
+                return -1, "任务已取消"
             # 按输入名称查
             media_info = Media().get_media_info(mtype=media_type or mtype,
                                                 title=content)
@@ -71,34 +78,19 @@ def search_medias_for_web(content, ident_flag=True, filters=None, tmdbid=None, m
             search_episode = media_info.get_episode_list()
             if search_episode and not search_season:
                 search_season = [1]
-            # 中文名
-            if media_info.cn_name:
-                search_cn_name = media_info.cn_name
-            else:
-                search_cn_name = media_info.title
-            # 英文名
-            search_en_name = None
-            if media_info.en_name:
-                search_en_name = media_info.en_name
-            else:
-                if media_info.original_language == "en":
-                    search_en_name = media_info.original_title
-                else:
-                    en_title = Media().get_tmdb_en_title(media_info)
-                    if en_title:
-                        search_en_name = en_title
-            # 两次搜索名称
+            # 始终使用原始关键词搜索，TMDB信息仅用于前端展示
+            first_search_name = key_word
             second_search_name = None
-            if Config().get_config("laboratory").get("search_en_title"):
-                if search_en_name:
-                    first_search_name = search_en_name
-                    second_search_name = search_cn_name
+            # 如果原始关键词含中文，尝试获取英文名作为后备搜索
+            if StringUtils.is_chinese(key_word):
+                if media_info.en_name:
+                    en_name = media_info.en_name
+                elif media_info.original_language == "en":
+                    en_name = media_info.original_title
                 else:
-                    first_search_name = search_cn_name
-            else:
-                first_search_name = search_cn_name
-                if search_en_name:
-                    second_search_name = search_en_name
+                    en_name = Media().get_tmdb_en_title(media_info)
+                if en_name and en_name != key_word:
+                    second_search_name = en_name
 
             filter_args = {"season": search_season,
                            "episode": search_episode,
@@ -129,6 +121,8 @@ def search_medias_for_web(content, ident_flag=True, filters=None, tmdbid=None, m
     if filters:
         filter_args.update(filters)
     # 开始检索
+    if cancel_event and cancel_event.is_set():
+        return -1, "任务已取消"
     log.info("【Web】开始检索 %s ..." % content)
     media_list = Searcher().search_medias(key_word=first_search_name,
                                           filter_args=filter_args,
@@ -147,11 +141,11 @@ def search_medias_for_web(content, ident_flag=True, filters=None, tmdbid=None, m
                                               filter_args=filter_args,
                                               match_media=media_info,
                                               in_from=SearchType.WEB)
-    # 清空缓存结果
-    dbhepler = DbHelper()
-    dbhepler.delete_all_search_torrents()
     # 结束进度
     search_process.end('search')
+    if cancel_event and cancel_event.is_set():
+        return -1, "任务已取消"
+    dbhepler = DbHelper()
     if len(media_list) == 0:
         log.info("【Web】%s 未检索到任何资源" % content)
         return 1, "%s 未检索到任何资源" % content
@@ -159,11 +153,12 @@ def search_medias_for_web(content, ident_flag=True, filters=None, tmdbid=None, m
         log.info("【Web】共检索到 %s 个有效资源" % len(media_list))
         # 插入数据库
         media_list = sorted(media_list, key=lambda x: "%s%s%s" % (str(x.res_order).rjust(3, '0'),
-                                                                  str(x.site_order).rjust(3, '0'),
-                                                                  str(x.seeders).rjust(10, '0')), reverse=True)
+                                                                   str(x.site_order).rjust(3, '0'),
+                                                                   str(x.seeders).rjust(10, '0')), reverse=True)
         dbhepler.insert_search_results(media_items=media_list,
                                        ident_flag=ident_flag,
-                                       title=content)
+                                       title=content,
+                                       keyword=keyword)
         return 0, ""
 
 

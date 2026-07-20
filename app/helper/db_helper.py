@@ -15,12 +15,14 @@ class DbHelper:
     _db = MainDb()
 
     @DbPersist(_db)
-    def insert_search_results(self, media_items: list, title=None, ident_flag=True):
+    def insert_search_results(self, media_items: list, title=None, ident_flag=True, keyword=None):
         """
         将返回信息插入数据库
         """
         if not media_items:
             return
+        if keyword:
+            self._db.query(SEARCHRESULTINFO).filter(SEARCHRESULTINFO.KEYWORD == keyword).delete()
         data_list = []
         for media_item in media_items:
             if media_item.type == MediaType.TV:
@@ -60,7 +62,8 @@ class DbHelper:
                     PAGEURL=media_item.page_url,
                     OTHERINFO=media_item.resource_team,
                     UPLOAD_VOLUME_FACTOR=media_item.upload_volume_factor,
-                    DOWNLOAD_VOLUME_FACTOR=media_item.download_volume_factor
+                    DOWNLOAD_VOLUME_FACTOR=media_item.download_volume_factor,
+                    KEYWORD=keyword
                 ))
         self._db.insert(data_list)
 
@@ -75,6 +78,12 @@ class DbHelper:
         查询检索结果的所有记录
         """
         return self._db.query(SEARCHRESULTINFO).all()
+
+    def get_search_results_by_keyword(self, keyword):
+        """
+        根据关键词查询检索结果
+        """
+        return self._db.query(SEARCHRESULTINFO).filter(SEARCHRESULTINFO.KEYWORD == keyword).all()
 
     def is_torrent_rssd(self, enclosure):
         """
@@ -105,6 +114,62 @@ class DbHelper:
         删除所有搜索的记录
         """
         self._db.query(SEARCHRESULTINFO).delete()
+
+    @DbPersist(_db)
+    def save_search_task(self, keyword, status, start_time=None, end_time=None, message=None):
+        """
+        保存或更新搜索任务
+        """
+        task = self._db.query(SEARCHTASK).filter(SEARCHTASK.KEYWORD == keyword).first()
+        if task:
+            task.STATUS = status
+            if start_time:
+                task.START_TIME = start_time
+            if end_time:
+                task.END_TIME = end_time
+            if message:
+                task.MESSAGE = message
+        else:
+            task = SEARCHTASK(KEYWORD=keyword, STATUS=status,
+                              START_TIME=start_time, END_TIME=end_time, MESSAGE=message)
+            self._db.insert(task)
+
+    def get_search_task(self, keyword):
+        """
+        根据关键词查询任务
+        """
+        return self._db.query(SEARCHTASK).filter(SEARCHTASK.KEYWORD == keyword).first()
+
+    def get_search_tasks(self, limit=20):
+        """
+        查询所有搜索任务，按开始时间倒序
+        """
+        return self._db.query(SEARCHTASK).order_by(SEARCHTASK.ID.desc()).limit(limit).all()
+
+    def get_running_tasks(self):
+        """
+        查询所有运行中的任务（用于进程恢复）
+        """
+        return self._db.query(SEARCHTASK).filter(SEARCHTASK.STATUS == 'running').all()
+
+    @DbPersist(_db)
+    def cleanup_search_tasks(self, max_tasks=20):
+        """
+        清理超出 max_tasks 的旧任务及其结果
+        """
+        tasks = self._db.query(SEARCHTASK).order_by(SEARCHTASK.ID.desc()).all()
+        if len(tasks) > max_tasks:
+            for task in tasks[max_tasks:]:
+                self._db.query(SEARCHRESULTINFO).filter(SEARCHRESULTINFO.KEYWORD == task.KEYWORD).delete()
+                self._db.query(SEARCHTASK).filter(SEARCHTASK.ID == task.ID).delete()
+
+    @DbPersist(_db)
+    def delete_search_task(self, keyword):
+        """
+        删除指定关键词的搜索任务及其结果
+        """
+        self._db.query(SEARCHRESULTINFO).filter(SEARCHRESULTINFO.KEYWORD == keyword).delete()
+        self._db.query(SEARCHTASK).filter(SEARCHTASK.KEYWORD == keyword).delete()
 
     @DbPersist(_db)
     def insert_rss_torrents(self, media_info):

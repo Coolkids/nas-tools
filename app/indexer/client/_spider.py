@@ -26,7 +26,7 @@ class TorrentSpider(feapder.AirSpider):
         LOG_LEVEL="ERROR",
         RANDOM_HEADERS=False,
         WEBDRIVER=dict(
-            pool_size=1,
+            pool_size=3,
             load_images=False,
             proxy=None,
             headless=True,

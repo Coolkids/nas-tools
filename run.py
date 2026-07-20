@@ -106,6 +106,12 @@ def init_system():
     update_config()
     # 检查配置文件
     check_config()
+    # 恢复异常中断的搜索任务
+    try:
+        from web.backend.search_task import SearchTaskPool
+        SearchTaskPool.recover_crashed_tasks()
+    except Exception as e:
+        log.error(f"恢复搜索任务失败：{e}")
 
 
 def start_service():
