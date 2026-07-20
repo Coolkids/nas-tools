@@ -14,6 +14,9 @@ on:
       - .github/workflows/build.yml
       - requirements.txt
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build Docker Image
@@ -52,3 +55,31 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/nas-tools:latest
             ${{ secrets.DOCKER_USERNAME }}/nas-tools:v3
             ${{ secrets.DOCKER_USERNAME }}/nas-tools:${{ env.app_version }}
+
+  release:
+    name: Create Tag and Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(python3 -c "exec(open('version.py').read()); print(APP_VERSION)")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "Tag $VERSION already exists, skipping"
+            exit 0
+          fi
+          git tag "$VERSION"
+          git push origin "$VERSION"
+          gh release create "$VERSION" --generate-notes
