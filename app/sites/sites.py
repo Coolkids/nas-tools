@@ -4,7 +4,6 @@ import re
 import time
 import traceback
 from datetime import datetime
-from functools import lru_cache
 from multiprocessing.dummy import Pool as ThreadPool
 from threading import Lock
 
@@ -676,15 +675,22 @@ class Sites:
         return None
 
     @staticmethod
-    @lru_cache(maxsize=1024)
     def __get_site_page_html(url, cookie, ua, render=False, proxy=False):
+        from app.utils import SitePageHtmlCache
+        cache_key = f"site_html:{url}:{cookie}:{ua}:{render}:{proxy}"
+        cached = SitePageHtmlCache.get(cache_key)
+        if cached is not None:
+            return cached
         chrome = ChromeHelper(headless=True)
         if render and chrome.get_status():
             # 开渲染
             if chrome.visit(url=url, cookie=cookie, ua=ua):
                 # 等待页面加载完成
                 time.sleep(10)
-                return chrome.get_html()
+                html = chrome.get_html()
+                if html:
+                    SitePageHtmlCache.set(cache_key, html)
+                return html
         else:
             res = RequestUtils(
                 cookies=cookie,
@@ -693,6 +699,7 @@ class Sites:
             ).get_res(url=url)
             if res and res.status_code == 200:
                 res.encoding = res.apparent_encoding
+                SitePageHtmlCache.set(cache_key, res.text)
                 return res.text
         return ""
 

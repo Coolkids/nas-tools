@@ -41,3 +41,9 @@ BuiltinSearchCache = Cache(maxsize=2000, ttl=300, timer=time.time, default=None)
 
 # T11: TMDB季详情缓存 3600s (1小时)
 TmdbSeasonDetailCache = Cache(maxsize=2000, ttl=3600, timer=time.time, default=None)
+
+# 站点页面HTML缓存 300s (替代sites.py __get_site_page_html的lru_cache)
+SitePageHtmlCache = Cache(maxsize=2000, ttl=300, timer=time.time, default=None)
+
+# 字幕搜索结果缓存 3600s (替代opensubtitles.py __parse_opensubtitles_results的lru_cache)
+SubtitleCache = Cache(maxsize=1000, ttl=3600, timer=time.time, default=None)

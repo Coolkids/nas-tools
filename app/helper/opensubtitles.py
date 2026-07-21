@@ -1,4 +1,4 @@
-from functools import lru_cache
+
 from urllib.parse import quote
 
 from pyquery import PyQuery
@@ -36,11 +36,15 @@ class OpenSubtitles:
         return self.__parse_opensubtitles_results(url=self._url_keyword % quote(keyword))
 
     @classmethod
-    @lru_cache(maxsize=1024)
     def __parse_opensubtitles_results(cls, url):
         """
         搜索并解析结果
         """
+        from app.utils import SubtitleCache
+        cache_key = f"subtitle:{url}"
+        cached = SubtitleCache.get(cache_key)
+        if cached is not None:
+            return cached
         chrome = ChromeHelper()
         if not chrome.get_status():
             log.error("【Subtitle】未找到浏览器内核，当前环境无法检索opensubtitles字幕！")
@@ -88,6 +92,7 @@ class OpenSubtitles:
                 "description": description,
                 "link": link
             })
+        SubtitleCache.set(cache_key, ret_subtitles)
         return ret_subtitles
 
     def get_cookie(self):
