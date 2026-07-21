@@ -423,7 +423,7 @@ class Media:
             log.info("【Meta】%s 在TMDB中未找到媒体信息!" % file_media_name)
             return info
 
-    @lru_cache(maxsize=128)
+    @lru_cache(maxsize=1024)
     def __search_tmdb_web(self, file_media_name, mtype: MediaType):
         """
         检索TMDB网站，直接抓取结果，结果只有一条时才返回

@@ -7,7 +7,7 @@ from app.utils import RequestUtils, ExceptionUtils
 from config import Config
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=2)
 def get_login_wallpaper(today=datetime.datetime.strftime(datetime.datetime.now(), '%Y%m%d')):
     """
     获取Base64编码的壁纸图片

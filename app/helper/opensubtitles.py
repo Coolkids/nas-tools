@@ -36,7 +36,7 @@ class OpenSubtitles:
         return self.__parse_opensubtitles_results(url=self._url_keyword % quote(keyword))
 
     @classmethod
-    @lru_cache(maxsize=128)
+    @lru_cache(maxsize=1024)
     def __parse_opensubtitles_results(cls, url):
         """
         搜索并解析结果

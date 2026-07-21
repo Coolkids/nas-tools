@@ -22,7 +22,7 @@ class TMDb(object):
     TMDB_CACHE_ENABLED = "TMDB_CACHE_ENABLED"
     TMDB_PROXIES = "TMDB_PROXIES"
     TMDB_DOMAIN = "TMDB_DOMAIN"
-    REQUEST_CACHE_MAXSIZE = 5000
+    REQUEST_CACHE_MAXSIZE = 20000
 
     def __init__(self, obj_cached=True, session=None):
         self._session = requests.Session() if session is None else session

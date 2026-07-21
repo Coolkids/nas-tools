@@ -200,7 +200,7 @@ class DoubanWeb(object):
         return obj
 
     @classmethod
-    @lru_cache(maxsize=256)
+    @lru_cache(maxsize=1024)
     def detail(cls, cookie, doubanid):
         """
         查询详情
@@ -208,7 +208,7 @@ class DoubanWeb(object):
         return cls.__get_obj("detail", cls.__invoke_web("detail", cookie, doubanid))
 
     @classmethod
-    @lru_cache(maxsize=10)
+    @lru_cache(maxsize=256)
     def user(cls, cookie, userid):
         """
         查询用户信息

@@ -676,7 +676,7 @@ class Sites:
         return None
 
     @staticmethod
-    @lru_cache(maxsize=128)
+    @lru_cache(maxsize=1024)
     def __get_site_page_html(url, cookie, ua, render=False, proxy=False):
         chrome = ChromeHelper(headless=True)
         if render and chrome.get_status():

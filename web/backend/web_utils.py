@@ -147,7 +147,7 @@ class WebUtils:
         return medias
 
     @staticmethod
-    @lru_cache(maxsize=128)
+    @lru_cache(maxsize=1024)
     def request_cache(url):
         """
         带缓存的请求

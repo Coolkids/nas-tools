@@ -61,7 +61,7 @@ class Fanart:
             ExceptionUtils.exception_traceback(e2)
 
     @classmethod
-    @lru_cache(maxsize=256)
+    @lru_cache(maxsize=2048)
     def __request_fanart(cls, media_type, queryid):
         if media_type == MediaType.MOVIE:
             image_url = FANART_MOVIE_API_URL % queryid

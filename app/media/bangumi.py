@@ -24,7 +24,7 @@ class Bangumi(object):
         pass
 
     @classmethod
-    @lru_cache(maxsize=128)
+    @lru_cache(maxsize=1024)
     def __invoke(cls, url, **kwargs):
         req_url = cls._base_url + url
         params = {}
