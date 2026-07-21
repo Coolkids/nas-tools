@@ -96,6 +96,11 @@ class _IIndexClient(metaclass=ABCMeta):
         """
         if not url:
             return []
+        from app.utils import TorznabCache
+        cache_key = f"torznab:{url}"
+        cached = TorznabCache.get(cache_key)
+        if cached is not None:
+            return cached
         try:
             ret = RequestUtils(timeout=30).get_res(url)
         except Exception as e2:
@@ -219,6 +224,7 @@ class _IIndexClient(metaclass=ABCMeta):
             ExceptionUtils.exception_traceback(e2)
             pass
 
+        TorznabCache.set(cache_key, torrents)
         return torrents
 
     def filter_search_results(self, result_array: list,

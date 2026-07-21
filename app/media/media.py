@@ -950,7 +950,14 @@ class Media:
         """
         if not self.movie:
             return []
-        return self.__dict_tmdbinfos(self.movie.popular(page), MediaType.MOVIE)
+        from app.utils import TmdbHotMoviesCache
+        cache_key = f"hot_movies:{page}"
+        cached = TmdbHotMoviesCache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = self.__dict_tmdbinfos(self.movie.popular(page), MediaType.MOVIE)
+        TmdbHotMoviesCache.set(cache_key, result)
+        return result
 
     def get_tmdb_hot_tvs(self, page):
         """
@@ -960,7 +967,14 @@ class Media:
         """
         if not self.tv:
             return []
-        return self.__dict_tmdbinfos(self.tv.popular(page), MediaType.TV)
+        from app.utils import TmdbHotTvsCache
+        cache_key = f"hot_tvs:{page}"
+        cached = TmdbHotTvsCache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = self.__dict_tmdbinfos(self.tv.popular(page), MediaType.TV)
+        TmdbHotTvsCache.set(cache_key, result)
+        return result
 
     def get_tmdb_new_movies(self, page):
         """
@@ -970,7 +984,14 @@ class Media:
         """
         if not self.movie:
             return []
-        return self.__dict_tmdbinfos(self.movie.now_playing(page), MediaType.MOVIE)
+        from app.utils import TmdbNewMoviesCache
+        cache_key = f"new_movies:{page}"
+        cached = TmdbNewMoviesCache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = self.__dict_tmdbinfos(self.movie.now_playing(page), MediaType.MOVIE)
+        TmdbNewMoviesCache.set(cache_key, result)
+        return result
 
     def get_tmdb_new_tvs(self, page):
         """
@@ -980,7 +1001,14 @@ class Media:
         """
         if not self.tv:
             return []
-        return self.__dict_tmdbinfos(self.tv.on_the_air(page), MediaType.TV)
+        from app.utils import TmdbNewTvsCache
+        cache_key = f"new_tvs:{page}"
+        cached = TmdbNewTvsCache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = self.__dict_tmdbinfos(self.tv.on_the_air(page), MediaType.TV)
+        TmdbNewTvsCache.set(cache_key, result)
+        return result
 
     def get_tmdb_upcoming_movies(self, page):
         """
@@ -990,7 +1018,14 @@ class Media:
         """
         if not self.movie:
             return []
-        return self.__dict_tmdbinfos(self.movie.upcoming(page), MediaType.MOVIE)
+        from app.utils import TmdbUpcomingMoviesCache
+        cache_key = f"upcoming_movies:{page}"
+        cached = TmdbUpcomingMoviesCache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = self.__dict_tmdbinfos(self.movie.upcoming(page), MediaType.MOVIE)
+        TmdbUpcomingMoviesCache.set(cache_key, result)
+        return result
 
     def get_tmdb_trending_all_week(self, page=1):
         """
@@ -1000,7 +1035,14 @@ class Media:
         """
         if not self.movie:
             return []
-        return self.__dict_tmdbinfos(self.trending.all_week(page=page))
+        from app.utils import TmdbTrendingCache
+        cache_key = f"trending_week:{page}"
+        cached = TmdbTrendingCache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = self.__dict_tmdbinfos(self.trending.all_week(page=page))
+        TmdbTrendingCache.set(cache_key, result)
+        return result
 
     def __get_tmdb_movie_detail(self, tmdbid, append_to_response=None):
         """
@@ -1288,68 +1330,18 @@ class Media:
         :param season: 季，数字
         :return: TMDB信息
         """
-        """
-        {
-          "_id": "5e614cd3357c00001631a6ef",
-          "air_date": "2023-01-15",
-          "episodes": [
-            {
-              "air_date": "2023-01-15",
-              "episode_number": 1,
-              "id": 2181581,
-              "name": "当你迷失在黑暗中",
-              "overview": "在一场全球性的流行病摧毁了文明之后，一个顽强的幸存者负责照顾一个 14 岁的小女孩，她可能是人类最后的希望。",
-              "production_code": "",
-              "runtime": 81,
-              "season_number": 1,
-              "show_id": 100088,
-              "still_path": "/aRquEWm8wWF1dfa9uZ1TXLvVrKD.jpg",
-              "vote_average": 8,
-              "vote_count": 33,
-              "crew": [
-                {
-                  "job": "Writer",
-                  "department": "Writing",
-                  "credit_id": "619c370063536a00619a08ee",
-                  "adult": false,
-                  "gender": 2,
-                  "id": 35796,
-                  "known_for_department": "Writing",
-                  "name": "Craig Mazin",
-                  "original_name": "Craig Mazin",
-                  "popularity": 15.211,
-                  "profile_path": "/uEhna6qcMuyU5TP7irpTUZ2ZsZc.jpg"
-                },
-              ],
-              "guest_stars": [
-                {
-                  "character": "Marlene",
-                  "credit_id": "63c4ca5e5f2b8d00aed539fc",
-                  "order": 500,
-                  "adult": false,
-                  "gender": 1,
-                  "id": 1253388,
-                  "known_for_department": "Acting",
-                  "name": "Merle Dandridge",
-                  "original_name": "Merle Dandridge",
-                  "popularity": 21.679,
-                  "profile_path": "/lKwHdTtDf6NGw5dUrSXxbfkZLEk.jpg"
-                }
-              ]
-            },
-          ],
-          "name": "第 1 季",
-          "overview": "",
-          "id": 144593,
-          "poster_path": "/aUQKIpZZ31KWbpdHMCmaV76u78T.jpg",
-          "season_number": 1
-        }
-        """
         if not self.tv:
             return {}
+        from app.utils import TmdbSeasonDetailCache
+        cache_key = f"season_detail:{tmdbid}:{season}"
+        cached = TmdbSeasonDetailCache.get(cache_key)
+        if cached is not None:
+            return cached
         try:
             log.info("【Meta】正在查询TMDB电视剧：%s，季：%s ..." % (tmdbid, season))
             tmdbinfo = self.tv.season_details(tmdbid, season)
+            if tmdbinfo:
+                TmdbSeasonDetailCache.set(cache_key, tmdbinfo)
             return tmdbinfo or {}
         except Exception as e:
             print(str(e))
@@ -1730,11 +1722,18 @@ class Media:
         """
         获取TMDB的英文名称
         """
+        from app.utils import TmdbEnTitleCache
+        cache_key = f"en_title:{media_info.type.value}:{media_info.tmdb_id}"
+        cached = TmdbEnTitleCache.get(cache_key)
+        if cached is not None:
+            return cached
         en_info = self.get_tmdb_info(mtype=media_info.type,
                                      tmdbid=media_info.tmdb_id,
                                      language="en-US")
         if en_info:
-            return en_info.get("title") if media_info.type == MediaType.MOVIE else en_info.get("name")
+            title = en_info.get("title") if media_info.type == MediaType.MOVIE else en_info.get("name")
+            TmdbEnTitleCache.set(cache_key, title)
+            return title
         return None
 
     def get_episode_title(self, media_info):

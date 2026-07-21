@@ -10,7 +10,7 @@ from app.indexer.client._render_spider import RenderSpider
 from app.indexer.client._spider import TorrentSpider
 from app.indexer.client._tnode import TNodeSpider
 from app.sites import Sites
-from app.utils import StringUtils
+from app.utils import StringUtils, BuiltinSearchCache
 from app.utils.types import SearchType, IndexerType
 from config import Config
 
@@ -148,22 +148,29 @@ class BuiltinIndexer(_IIndexClient):
             log.warn(f"【{self.index_type}】{indexer.name} 无法使用中文名搜索")
             return []
         result_array = []
-        try:
-            if indexer.parser == "Rarbg":
-                imdb_id = match_media.imdb_id if match_media else None
-                result_array = Rarbg().search(keyword=search_word, indexer=indexer, imdb_id=imdb_id)
-            elif indexer.parser == "TNodeSpider":
-                result_array = TNodeSpider(indexer=indexer).search(keyword=search_word)
-            elif indexer.parser == "RenderSpider":
-                result_array = RenderSpider().search(keyword=search_word,
-                                                     indexer=indexer,
-                                                     mtype=match_media.type if match_media else None)
-            else:
-                result_array = self.__spider_search(keyword=search_word,
-                                                    indexer=indexer,
-                                                    mtype=match_media.type if match_media else None)
-        except Exception as err:
-            print(str(err))
+        cache_key = f"builtin_search:{indexer.name}:{search_word}"
+        cached = BuiltinSearchCache.get(cache_key)
+        if cached is not None:
+            result_array = cached
+        else:
+            try:
+                if indexer.parser == "Rarbg":
+                    imdb_id = match_media.imdb_id if match_media else None
+                    result_array = Rarbg().search(keyword=search_word, indexer=indexer, imdb_id=imdb_id)
+                elif indexer.parser == "TNodeSpider":
+                    result_array = TNodeSpider(indexer=indexer).search(keyword=search_word)
+                elif indexer.parser == "RenderSpider":
+                    result_array = RenderSpider().search(keyword=search_word,
+                                                         indexer=indexer,
+                                                         mtype=match_media.type if match_media else None)
+                else:
+                    result_array = self.__spider_search(keyword=search_word,
+                                                        indexer=indexer,
+                                                        mtype=match_media.type if match_media else None)
+            except Exception as err:
+                print(str(err))
+            if result_array:
+                BuiltinSearchCache.set(cache_key, result_array)
         if len(result_array) == 0:
             log.warn(f"【{self.index_type}】{indexer.name} 未检索到数据")
             self.progress.update(ptype='search', text=f"{indexer.name} 未检索到数据")

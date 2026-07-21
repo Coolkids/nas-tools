@@ -44,6 +44,11 @@ class WebUtils:
         """
         if not mediaid:
             return None
+        from app.utils import WebMediaInfoCache
+        cache_key = f"mediainfo:{mtype}:{mediaid}"
+        cached = WebMediaInfoCache.get(cache_key)
+        if cached is not None:
+            return cached
         media_info = None
         if str(mediaid).startswith("DB:"):
             # 豆瓣
@@ -89,6 +94,7 @@ class WebUtils:
             media_info = MetaInfo(title=info.get("title") if mtype == MediaType.MOVIE else info.get("name"))
             media_info.set_tmdb_info(info)
 
+        WebMediaInfoCache.set(cache_key, media_info)
         return media_info
 
     @staticmethod
@@ -102,6 +108,11 @@ class WebUtils:
         """
         if not keyword:
             return []
+        from app.utils import WebSearchCache
+        cache_key = f"web_search:{source}:{keyword}:{page}"
+        cached = WebSearchCache.get(cache_key)
+        if cached is not None:
+            return cached
         mtype, key_word, season_num, episode_num, _, content = StringUtils.get_keyword_from_string(keyword)
         if source == "tmdb":
             use_douban_titles = False
@@ -132,6 +143,7 @@ class WebUtils:
                 if tmp_info.begin_episode:
                     tmp_info.title = "%s 第%s集" % (tmp_info.title, meta_info.begin_episode)
                 medias.append(tmp_info)
+        WebSearchCache.set(cache_key, medias)
         return medias
 
     @staticmethod

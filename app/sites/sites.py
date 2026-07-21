@@ -271,6 +271,26 @@ class Sites:
         site_url = self.__get_site_strict_url(site_info)
         if not site_url:
             return
+        from app.utils import SiteDataCache
+        cache_key = f"site_data:{site_name}:{site_url}"
+        cached = SiteDataCache.get(cache_key)
+        if cached is not None:
+            self._sites_data.update({site_name: {
+                "upload": cached.upload,
+                "username": cached.username,
+                "user_level": cached.user_level,
+                "join_at": cached.join_at,
+                "download": cached.download,
+                "ratio": cached.ratio,
+                "seeding": cached.seeding,
+                "seeding_size": cached.seeding_size,
+                "leeching": cached.leeching,
+                "bonus": cached.bonus,
+                "url": site_url,
+                "err_msg": cached.err_msg,
+                "message_unread": cached.message_unread}
+            })
+            return cached
         site_cookie = site_info.get("cookie")
         ua = site_info.get("ua")
         unread_msg_notify = site_info.get("unread_msg_notify")
@@ -313,6 +333,7 @@ class Sites:
                     "message_unread": site_user_info.message_unread}
                 })
 
+                SiteDataCache.set(cache_key, site_user_info)
                 return site_user_info
 
         except Exception as e:
