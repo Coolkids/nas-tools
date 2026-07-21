@@ -476,6 +476,35 @@ class Downloader:
         # 返回按季、集数倒序排序的列表
         download_list = self.get_download_list(media_list)
 
+        # 构建多站点备选映射，用于下载失败时从其他站点重试
+        def get_sort_str(x):
+            season_len = str(len(x.get_season_list())).rjust(2, '0')
+            episode_len = str(len(x.get_episode_list())).rjust(4, '0')
+            if self._download_order == "seeder":
+                return "%s%s%s%s%s" % (str(x.title).ljust(100, ' '),
+                                       str(x.res_order).rjust(3, '0'),
+                                       str(x.seeders).rjust(10, '0'),
+                                       str(x.site_order).rjust(3, '0'),
+                                       "%s%s" % (season_len, episode_len))
+            else:
+                return "%s%s%s%s%s" % (str(x.title).ljust(100, ' '),
+                                       str(x.res_order).rjust(3, '0'),
+                                       str(x.site_order).rjust(3, '0'),
+                                       str(x.seeders).rjust(10, '0'),
+                                       "%s%s" % (season_len, episode_len))
+
+        sorted_media_list = sorted(media_list, key=lambda x: get_sort_str(x), reverse=True)
+        media_alternatives = {}
+        for t_item in sorted_media_list:
+            if t_item.type != MediaType.MOVIE:
+                media_name = "%s%s" % (t_item.get_title_string(),
+                                       t_item.get_season_episode_string())
+            else:
+                media_name = t_item.get_title_string()
+            if media_name not in media_alternatives:
+                media_alternatives[media_name] = []
+            media_alternatives[media_name].append(t_item)
+
         def __download(download_item, torrent_file=None, tag=None, is_paused=None):
             """
             下载及发送通知
@@ -495,6 +524,24 @@ class Downloader:
             else:
                 self.message.send_download_fail_message(download_item, msg)
             return state
+
+        def __download_with_fallback(download_item, torrent_file=None, tag=None, is_paused=None):
+            if __download(download_item, torrent_file, tag, is_paused):
+                return True
+            if download_item.type != MediaType.MOVIE:
+                media_name = "%s%s" % (download_item.get_title_string(),
+                                       download_item.get_season_episode_string())
+            else:
+                media_name = download_item.get_title_string()
+            alternatives = media_alternatives.get(media_name, [])
+            for alt in alternatives:
+                if alt is download_item or alt in return_items:
+                    continue
+                log.info("【Downloader】%s 从 %s 下载失败，尝试从 %s 下载..."
+                         % (media_name, download_item.site or "未知站点", alt.site or "未知站点"))
+                if __download(alt, tag=tag, is_paused=is_paused):
+                    return True
+            return False
 
         def __update_seasons(tmdbid, need, current):
             """
@@ -536,7 +583,7 @@ class Downloader:
         # 下载掉所有的电影
         for item in download_list:
             if item.type == MediaType.MOVIE:
-                __download(item)
+                __download_with_fallback(item)
 
         # 电视剧整季匹配
         if need_tvs:
@@ -567,13 +614,14 @@ class Downloader:
                                     page_url=item.page_url)
                                 if not torrent_episodes \
                                         or len(torrent_episodes) >= __get_season_episodes(need_tmdbid, item_season[0]):
-                                    download_state = __download(download_item=item, torrent_file=torrent_path)
+                                    download_state = __download_with_fallback(
+                                        download_item=item, torrent_file=torrent_path)
                                 else:
                                     log.info(
                                         f"【Downloader】种子 {item.org_string} 未含集数信息，解析文件数为 {len(torrent_episodes)}")
                                     continue
                             else:
-                                download_state = __download(item)
+                                download_state = __download_with_fallback(item)
                             if download_state:
                                 # 更新仍需季集
                                 need_season = __update_seasons(tmdbid=need_tmdbid,
@@ -608,7 +656,7 @@ class Downloader:
                                 continue
                             # 只处理单季含集的种子，从集最多的开始下
                             if set(item_episodes).issubset(set(need_episodes)):
-                                if __download(item):
+                                if __download_with_fallback(item):
                                     # 更新仍需集数
                                     need_episodes = __update_episodes(tmdbid=need_tmdbid,
                                                                       need=need_episodes,
