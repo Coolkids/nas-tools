@@ -145,21 +145,24 @@ def search_medias_for_web(content, ident_flag=True, filters=None, tmdbid=None, m
     search_process.end('search')
     if cancel_event and cancel_event.is_set():
         return -1, "任务已取消"
-    dbhepler = DbHelper()
-    if len(media_list) == 0:
-        log.info("【Web】%s 未检索到任何资源" % content)
-        return 1, "%s 未检索到任何资源" % content
-    else:
-        log.info("【Web】共检索到 %s 个有效资源" % len(media_list))
-        # 插入数据库
-        media_list = sorted(media_list, key=lambda x: "%s%s%s" % (str(x.res_order).rjust(3, '0'),
-                                                                   str(x.site_order).rjust(3, '0'),
-                                                                   str(x.seeders).rjust(10, '0')), reverse=True)
-        dbhepler.insert_search_results(media_items=media_list,
-                                       ident_flag=ident_flag,
-                                       title=content,
-                                       keyword=keyword)
-        return 0, ""
+    dbhelper = DbHelper()
+    try:
+        if len(media_list) == 0:
+            log.info("【Web】%s 未检索到任何资源" % content)
+            return 1, "%s 未检索到任何资源" % content
+        else:
+            log.info("【Web】共检索到 %s 个有效资源" % len(media_list))
+            # 插入数据库
+            media_list = sorted(media_list, key=lambda x: "%s%s%s" % (str(x.res_order).rjust(3, '0'),
+                                                                        str(x.site_order).rjust(3, '0'),
+                                                                        str(x.seeders).rjust(10, '0')), reverse=True)
+            dbhelper.insert_search_results(media_items=media_list,
+                                           ident_flag=ident_flag,
+                                           title=content,
+                                           keyword=keyword)
+            return 0, ""
+    finally:
+        dbhelper.release_session()
 
 
 def search_media_by_message(input_str, in_from: SearchType, user_id, user_name=None):

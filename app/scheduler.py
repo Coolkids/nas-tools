@@ -7,6 +7,8 @@ from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import log
+from app.db.main_db import MainDb
+from app.db.media_db import MediaDb
 from app.doubansync import DoubanSync
 from app.downloader import Downloader
 from app.helper import MetaHelper
@@ -203,6 +205,10 @@ class Scheduler:
                                'interval',
                                hours=REFRESH_WALLPAPER_INTERVAL,
                                next_run_time=datetime.datetime.now())
+
+        # 定时 WAL checkpoint，防止 WAL 文件过度膨胀
+        self.SCHEDULER.add_job(MainDb.wal_checkpoint, 'interval', hours=6)
+        self.SCHEDULER.add_job(MediaDb.wal_checkpoint, 'interval', hours=6)
 
         self.SCHEDULER.print_jobs()
 

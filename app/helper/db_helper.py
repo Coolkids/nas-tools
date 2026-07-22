@@ -14,6 +14,11 @@ from app.utils.types import MediaType, RmtMode
 class DbHelper:
     _db = MainDb()
 
+    @staticmethod
+    def release_session():
+        from app.db import close_db
+        close_db()
+
     @DbPersist(_db)
     def insert_search_results(self, media_items: list, title=None, ident_flag=True, keyword=None):
         """

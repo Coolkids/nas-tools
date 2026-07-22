@@ -1,9 +1,10 @@
 import os
+import time
 import threading
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy.pool import QueuePool
-from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 
 from app.db.models import Base
 from app.utils import ExceptionUtils, PathUtils
@@ -15,11 +16,12 @@ _Engine = create_engine(
     echo=False,
     poolclass=QueuePool,
     pool_pre_ping=True,
-    pool_size=10,
-    pool_recycle=3600,
-    max_overflow=100,
+    pool_size=30,
+    pool_recycle=1800,
+    max_overflow=60,
+    pool_timeout=60,
     connect_args={
-        'timeout': 30,              # 等待数据库锁释放的超时时间
+        'timeout': 60,              # 等待数据库锁释放的超时时间
         'check_same_thread': False  # 允许在不同线程中复用连接
     }
 )
@@ -46,6 +48,16 @@ class MainDb:
             with _Engine.connect() as conn:
                 conn.execute(text("PRAGMA journal_mode=WAL;"))
                 conn.execute(text("PRAGMA SYNCHRONOUS=NORMAL;"))
+                conn.execute(text("PRAGMA wal_autocheckpoint=1000;"))
+        MainDb.wal_checkpoint()
+
+    @staticmethod
+    def wal_checkpoint():
+        try:
+            with _Engine.connect() as conn:
+                conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE);"))
+        except Exception as e:
+            ExceptionUtils.exception_traceback(e)
 
     def init_data(self):
         """
@@ -114,21 +126,35 @@ class MainDb:
 
 class DbPersist(object):
     """
-    数据库持久化装饰器
+    数据库持久化装饰器，写操作失败时自动重试（解决 SQLite 锁冲突）
     """
 
-    def __init__(self, db):
+    def __init__(self, db, retries=3):
         self.db = db
+        self.retries = retries
 
     def __call__(self, f):
         def persist(*args, **kwargs):
-            try:
-                ret = f(*args, **kwargs)
-                self.db.commit()
-                return True if ret is None else ret
-            except Exception as e:
-                ExceptionUtils.exception_traceback(e)
-                self.db.rollback()
-                return False
+            last_exception = None
+            for attempt in range(self.retries):
+                try:
+                    ret = f(*args, **kwargs)
+                    self.db.commit()
+                    return True if ret is None else ret
+                except OperationalError as e:
+                    last_exception = e
+                    self.db.rollback()
+                    if attempt < self.retries - 1:
+                        time.sleep(0.5 * (2 ** attempt))
+                    else:
+                        ExceptionUtils.exception_traceback(e)
+                        return False
+                except Exception as e:
+                    ExceptionUtils.exception_traceback(e)
+                    self.db.rollback()
+                    return False
+            if last_exception:
+                ExceptionUtils.exception_traceback(last_exception)
+            return False
 
         return persist

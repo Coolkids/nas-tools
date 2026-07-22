@@ -16,11 +16,12 @@ _Engine = create_engine(
     echo=False,
     poolclass=QueuePool,
     pool_pre_ping=True,
-    pool_size=10,
-    pool_recycle=3600,
-    max_overflow=100,
+    pool_size=5,
+    pool_recycle=1800,
+    max_overflow=10,
+    pool_timeout=60,
     connect_args={
-        'timeout': 30,              # 等待数据库锁释放的超时时间
+        'timeout': 60,              # 等待数据库锁释放的超时时间
         'check_same_thread': False  # 允许在不同线程中复用连接
     }
 )
@@ -46,6 +47,16 @@ class MediaDb:
             with _Engine.connect() as conn:
                 conn.execute(text("PRAGMA journal_mode=WAL;"))
                 conn.execute(text("PRAGMA SYNCHRONOUS=NORMAL;"))
+                conn.execute(text("PRAGMA wal_autocheckpoint=1000;"))
+        MediaDb.wal_checkpoint()
+
+    @staticmethod
+    def wal_checkpoint():
+        try:
+            with _Engine.connect() as conn:
+                conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE);"))
+        except Exception as e:
+            ExceptionUtils.exception_traceback(e)
 
     def insert(self, server_type, iteminfo):
         if not server_type or not iteminfo:

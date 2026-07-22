@@ -25,24 +25,29 @@ class SearchTaskPool:
             task = db.get_search_task(keyword)
             if task:
                 if task.STATUS == 'running':
+                    db.release_session()
                     return {"code": 0, "status": "running", "keyword": keyword}
                 if task.STATUS == 'success' and task.END_TIME:
                     try:
                         end = datetime.datetime.strptime(task.END_TIME, "%Y-%m-%d %H:%M:%S")
                         if datetime.datetime.now() - end < datetime.timedelta(hours=6):
+                            db.release_session()
                             return {"code": 0, "status": "cached", "keyword": keyword}
                     except Exception:
                         pass
 
             if keyword in cls._running:
+                db.release_session()
                 return {"code": 0, "status": "running", "keyword": keyword}
             for qk, _, _, _, _ in cls._queue:
                 if qk == keyword:
+                    db.release_session()
                     return {"code": 0, "status": "queued", "keyword": keyword}
 
             db.save_search_task(keyword=keyword, status='pending',
                                 start_time=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 message='等待执行')
+            db.release_session()
 
             if len(cls._running) < _MAX_WORKERS:
                 cls._start_task(keyword, ident_flag, filters, tmdbid, media_type)
@@ -67,6 +72,8 @@ class SearchTaskPool:
         db = DbHelper()
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         db.save_search_task(keyword=keyword, status='running', start_time=now_str, message='搜索中...')
+        db.release_session()
+        db = None
         result = []
         try:
             search_thread = threading.Thread(target=lambda: result.append(
@@ -82,6 +89,7 @@ class SearchTaskPool:
             search_thread.start()
             search_thread.join(timeout=_TASK_TIMEOUT)
 
+            db = DbHelper()
             if search_thread.is_alive():
                 cancel_event.set()
                 db.save_search_task(keyword=keyword, status='failed',
@@ -107,10 +115,13 @@ class SearchTaskPool:
                                         message='搜索完成')
                     db.cleanup_search_tasks(_MAX_RESULTS)
         except Exception as e:
+            db = DbHelper()
             db.save_search_task(keyword=keyword, status='failed',
                                 end_time=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 message=str(e))
         finally:
+            if db:
+                db.release_session()
             with cls._lock:
                 cls._running.pop(keyword, None)
                 cls._queue[:] = [q for q in cls._queue if q[0] != keyword]
@@ -134,17 +145,21 @@ class SearchTaskPool:
         db = DbHelper()
         with cls._lock:
             if keyword in cls._running:
+                db.release_session()
                 return "running"
             for qk, _, _, _, _ in cls._queue:
                 if qk == keyword:
+                    db.release_session()
                     return "queued"
         task = db.get_search_task(keyword)
+        db.release_session()
         return task.STATUS if task else None
 
     @classmethod
     def get_task_list(cls):
         db = DbHelper()
         tasks = db.get_search_tasks(_MAX_RESULTS)
+        db.release_session()
         queue_keywords = {q[0] for q in cls._queue}
         result = []
         for t in tasks:
@@ -169,8 +184,10 @@ class SearchTaskPool:
         db = DbHelper()
         task = db.get_search_task(keyword)
         if not task:
+            db.release_session()
             return None
         raw_results = db.get_search_results_by_keyword(keyword)
+        db.release_session()
         results = []
         for r in raw_results:
             results.append({
@@ -221,16 +238,21 @@ class SearchTaskPool:
         db = DbHelper()
         with cls._lock:
             if keyword in cls._running:
+                db.release_session()
                 return {"code": -1, "msg": "任务正在运行，无法删除"}
             for qk, _, _, _, _ in cls._queue:
                 if qk == keyword:
+                    db.release_session()
                     return {"code": -1, "msg": "任务正在排队，无法删除"}
             task = db.get_search_task(keyword)
             if not task:
+                db.release_session()
                 return {"code": 1, "msg": "任务不存在"}
             if task.STATUS not in ('success', 'failed'):
+                db.release_session()
                 return {"code": -1, "msg": "只能删除已完成或已失败的任务"}
             db.delete_search_task(keyword)
+            db.release_session()
             return {"code": 0, "msg": "任务已删除"}
 
     @classmethod
@@ -241,5 +263,6 @@ class SearchTaskPool:
         for task in running:
             db.save_search_task(keyword=task.KEYWORD, status='failed',
                                 end_time=now_str, message='进程异常退出')
+        db.release_session()
         if running:
             log.info(f"【Task】已恢复 {len(running)} 个异常中断的搜索任务")

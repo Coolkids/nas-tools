@@ -693,8 +693,15 @@ def backup():
         # 把现有的相关文件进行copy备份
         shutil.copy(f'{config_path}/config.yaml', backup_path)
         shutil.copy(f'{config_path}/default-category.yaml', backup_path)
-        shutil.copy(f'{config_path}/user.db', backup_path)
-        conn = sqlite3.connect(f'{backup_path}/user.db')
+        # 使用 sqlite3.backup() API 创建一致性快照,避免 WAL 模式下的数据丢失
+        src_db = str(config_path / 'user.db')
+        dest_db = str(backup_path / 'user.db')
+        src_conn = sqlite3.connect(src_db)
+        dest_conn = sqlite3.connect(dest_db)
+        src_conn.backup(dest_conn, pages=0)
+        dest_conn.close()
+        src_conn.close()
+        conn = sqlite3.connect(dest_db)
         cursor = conn.cursor()
         # 执行操作删除不需要备份的表
         table_list = [
