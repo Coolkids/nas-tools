@@ -535,8 +535,8 @@ class WebAction:
                 Message().send_download_message(in_from=SearchType.WEB,
                                                 can_item=media)
             else:
-                return {"retcode": -1, "retmsg": ret_msg}
-        return {"retcode": 0, "retmsg": ""}
+                return {"retcode": -1, "code": -1, "retmsg": ret_msg}
+        return {"retcode": 0, "code": 0, "retmsg": ""}
 
     @staticmethod
     def __download_link(data):
@@ -633,7 +633,7 @@ class WebAction:
         tid = data.get("id")
         if id:
             Downloader().start_torrents(ids=tid)
-        return {"retcode": 0, "id": tid}
+        return {"retcode": 0, "code": 0, "id": tid}
 
     @staticmethod
     def __pt_stop(data):
@@ -643,7 +643,7 @@ class WebAction:
         tid = data.get("id")
         if id:
             Downloader().stop_torrents(ids=tid)
-        return {"retcode": 0, "id": tid}
+        return {"retcode": 0, "code": 0, "id": tid}
 
     @staticmethod
     def __pt_remove(data):
@@ -653,7 +653,7 @@ class WebAction:
         tid = data.get("id")
         if id:
             Downloader().delete_torrents(ids=tid, delete_file=True)
-        return {"retcode": 0, "id": tid}
+        return {"retcode": 0, "code": 0, "id": tid}
 
     @staticmethod
     def __pt_info(data):
@@ -735,7 +735,7 @@ class WebAction:
                             'state': state, 'progress': progress}
             if torrent_info not in DispTorrents:
                 DispTorrents.append(torrent_info)
-        return {"retcode": 0, "torrents": DispTorrents}
+        return {"retcode": 0, "code": 0, "torrents": DispTorrents}
 
     def __del_unknown_path(self, data):
         """
@@ -747,10 +747,10 @@ class WebAction:
                 if not tid:
                     continue
                 self.dbhelper.delete_transfer_unknown(tid)
-            return {"retcode": 0}
+            return {"retcode": 0, "code": 0}
         else:
             retcode = self.dbhelper.delete_transfer_unknown(tids)
-            return {"retcode": retcode}
+            return {"retcode": retcode, "code": retcode}
 
     def __rename(self, data):
         """
@@ -766,7 +766,7 @@ class WebAction:
                     paths[0].SOURCE_PATH, paths[0].SOURCE_FILENAME)
                 dest_dir = paths[0].DEST
             else:
-                return {"retcode": -1, "retmsg": "未查询到转移日志记录"}
+                return {"retcode": -1, "code": -1, "retmsg": "未查询到转移日志记录"}
         else:
             unknown_id = data.get("unknown_id")
             if unknown_id:
@@ -775,11 +775,11 @@ class WebAction:
                     path = paths[0].PATH
                     dest_dir = paths[0].DEST
                 else:
-                    return {"retcode": -1, "retmsg": "未查询到未识别记录"}
+                    return {"retcode": -1, "code": -1, "retmsg": "未查询到未识别记录"}
         if not dest_dir:
             dest_dir = ""
         if not path:
-            return {"retcode": -1, "retmsg": "输入路径有误"}
+            return {"retcode": -1, "code": -1, "retmsg": "输入路径有误"}
         tmdbid = data.get("tmdb")
         mtype = data.get("type")
         season = data.get("season")
@@ -814,9 +814,9 @@ class WebAction:
             if not need_fix_all and not logid:
                 # 更新记录状态
                 self.dbhelper.update_transfer_unknown_state(path)
-            return {"retcode": 0, "retmsg": "转移成功"}
+            return {"retcode": 0, "code": 0, "retmsg": "转移成功"}
         else:
-            return {"retcode": 2, "retmsg": ret_msg}
+            return {"retcode": 2, "code": 2, "retmsg": ret_msg}
 
     def __rename_udf(self, data):
         """
@@ -824,7 +824,7 @@ class WebAction:
         """
         inpath = data.get("inpath")
         if not os.path.exists(inpath):
-            return {"retcode": -1, "retmsg": "输入路径不存在"}
+            return {"retcode": -1, "code": -1, "retmsg": "输入路径不存在"}
         outpath = data.get("outpath")
         syncmod = ModuleConf.RMT_MODES.get(data.get("syncmod"))
         tmdbid = data.get("tmdb")
@@ -852,9 +852,9 @@ class WebAction:
                                                     tmdbid=tmdbid,
                                                     season=season)
         if succ_flag:
-            return {"retcode": 0, "retmsg": "转移成功"}
+            return {"retcode": 0, "code": 0, "retmsg": "转移成功"}
         else:
-            return {"retcode": 2, "retmsg": ret_msg}
+            return {"retcode": 2, "code": 2, "retmsg": ret_msg}
 
     @staticmethod
     def __manual_transfer(inpath,
@@ -996,7 +996,7 @@ class WebAction:
                                     shutil.rmtree(os.path.dirname(dest_path))
                                 except Exception as e:
                                     ExceptionUtils.exception_traceback(e)
-        return {"retcode": 0}
+        return {"retcode": 0, "code": 0}
 
     @staticmethod
     def delete_media_file(filedir, filename):
@@ -1461,11 +1461,11 @@ class WebAction:
                     rmt_mode = ModuleConf.get_enum_item(
                         RmtMode, paths[0].MODE) if paths[0].MODE else None
                 else:
-                    return {"retcode": -1, "retmsg": "未查询到未识别记录"}
+                    return {"retcode": -1, "code": -1, "retmsg": "未查询到未识别记录"}
                 if not dest_dir:
                     dest_dir = ""
                 if not path:
-                    return {"retcode": -1, "retmsg": "未识别路径有误"}
+                    return {"retcode": -1, "code": -1, "retmsg": "未识别路径有误"}
                 succ_flag, msg = FileTransfer().transfer_media(in_from=SyncType.MAN,
                                                                rmt_mode=rmt_mode,
                                                                in_path=path,
@@ -1486,11 +1486,11 @@ class WebAction:
                     rmt_mode = ModuleConf.get_enum_item(
                         RmtMode, paths[0].MODE) if paths[0].MODE else None
                 else:
-                    return {"retcode": -1, "retmsg": "未查询到转移日志记录"}
+                    return {"retcode": -1, "code": -1, "retmsg": "未查询到转移日志记录"}
                 if not dest_dir:
                     dest_dir = ""
                 if not path:
-                    return {"retcode": -1, "retmsg": "未识别路径有误"}
+                    return {"retcode": -1, "code": -1, "retmsg": "未识别路径有误"}
                 succ_flag, msg = FileTransfer().transfer_media(in_from=SyncType.MAN,
                                                                rmt_mode=rmt_mode,
                                                                in_path=path,
@@ -1500,9 +1500,9 @@ class WebAction:
                     if msg not in ret_msg:
                         ret_msg.append(msg)
         if ret_flag:
-            return {"retcode": 0, "retmsg": "转移成功"}
+            return {"retcode": 0, "code": 0, "retmsg": "转移成功"}
         else:
-            return {"retcode": 2, "retmsg": "、".join(ret_msg)}
+            return {"retcode": 2, "code": 2, "retmsg": "、".join(ret_msg)}
 
     def __media_info(self, data):
         """
@@ -3775,25 +3775,25 @@ class WebAction:
         """
         logid = data.get("logid")
         if not logid:
-            return {"retcode": 1, "msg": "参数错误"}
+            return {"retcode": 1, "code": 1, "msg": "参数错误"}
         paths = self.dbhelper.get_transfer_path_by_id(logid)
         if not paths:
-            return {"retcode": 1, "msg": "记录不存在"}
+            return {"retcode": 1, "code": 1, "msg": "记录不存在"}
         record = paths[0]
         if record.MODE != ModuleConf.RMT_MODES.get("move").value:
-            return {"retcode": 1, "msg": "非move类型记录，无法还原"}
+            return {"retcode": 1, "code": 1, "msg": "非move类型记录，无法还原"}
         dest_path = record.DEST_PATH
         dest_filename = record.DEST_FILENAME
         source_path = record.SOURCE_PATH
         source_filename = record.SOURCE_FILENAME
         dest_full = os.path.join(dest_path, dest_filename)
         if not os.path.exists(dest_full):
-            return {"retcode": 1, "msg": f"转移后的文件不存在: {dest_full}"}
+            return {"retcode": 1, "code": 1, "msg": f"转移后的文件不存在: {dest_full}"}
         retcode, retmsg = SystemUtils.move(dest_full, os.path.join(source_path, source_filename))
         if retcode != 0:
-            return {"retcode": 1, "msg": f"还原失败: {retmsg}"}
+            return {"retcode": 1, "code": 1, "msg": f"还原失败: {retmsg}"}
         self.dbhelper.delete_transfer_log_by_id(logid)
-        return {"retcode": 0, "msg": "还原成功"}
+        return {"retcode": 0, "code": 0, "msg": "还原成功"}
 
     def get_unknown_list(self, data=None):
         """
