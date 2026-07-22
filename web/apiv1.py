@@ -755,6 +755,19 @@ class TransferHistoryList(ClientResource):
         return WebAction().api_action(cmd='get_transfer_history', data=self.parser.parse_args())
 
 
+@organization.route('/history/restore')
+class TransferHistoryRestore(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('logid', type=int, help='记录ID', location='form', required=True)
+
+    @organization.doc(parser=parser)
+    def post(self):
+        """
+        还原move类型转移的文件
+        """
+        return WebAction().api_action(cmd='restore_transfer_history', data=self.parser.parse_args())
+
+
 @organization.route('/history/statistics')
 class HistoryStatistics(ClientResource):
 

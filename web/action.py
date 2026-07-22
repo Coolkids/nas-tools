@@ -177,6 +177,7 @@ class WebAction:
             "get_downloading": self.get_downloading,
             "test_site": self.__test_site,
             "get_sub_path": self.__get_sub_path,
+            "restore_transfer_history": self.__restore_transfer_history,
             "rename_file": self.__rename_file,
             "delete_files": self.__delete_files,
             "download_subtitle": self.__download_subtitle,
@@ -3767,6 +3768,32 @@ class WebAction:
             "pageNum": PageNum,
             "currentPage": CurrentPage
         }
+
+    def __restore_transfer_history(self, data):
+        """
+        还原move类型的转移文件
+        """
+        logid = data.get("logid")
+        if not logid:
+            return {"retcode": 1, "msg": "参数错误"}
+        paths = self.dbhelper.get_transfer_path_by_id(logid)
+        if not paths:
+            return {"retcode": 1, "msg": "记录不存在"}
+        record = paths[0]
+        if record.MODE != ModuleConf.RMT_MODES.get("move").value:
+            return {"retcode": 1, "msg": "非move类型记录，无法还原"}
+        dest_path = record.DEST_PATH
+        dest_filename = record.DEST_FILENAME
+        source_path = record.SOURCE_PATH
+        source_filename = record.SOURCE_FILENAME
+        dest_full = os.path.join(dest_path, dest_filename)
+        if not os.path.exists(dest_full):
+            return {"retcode": 1, "msg": f"转移后的文件不存在: {dest_full}"}
+        retcode, retmsg = SystemUtils.move(dest_full, os.path.join(source_path, source_filename))
+        if retcode != 0:
+            return {"retcode": 1, "msg": f"还原失败: {retmsg}"}
+        self.dbhelper.delete_transfer_log_by_id(logid)
+        return {"retcode": 0, "msg": "还原成功"}
 
     def get_unknown_list(self, data=None):
         """
