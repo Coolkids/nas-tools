@@ -4271,19 +4271,29 @@ class WebAction:
         file_dir = data.get("dir")
         if not files:
             return []
-        if not file_dir and os.name != "nt":
-            # 取根目录下一级为查找目录
-            file_dir = os.path.commonpath(files).replace("\\", "/")
-            if file_dir != "/":
-                file_dir = "/" + str(file_dir).split("/")[1]
-            else:
-                return []
+        if os.name != "nt":
+            media = Config().get_config('media')
+            media_dirs = []
+            for key in ['movie_path', 'tv_path', 'anime_path', 'unknown_path']:
+                val = media.get(key)
+                if isinstance(val, list):
+                    media_dirs.extend([v for v in val if v])
+                elif val:
+                    media_dirs.append(val)
+            if media_dirs:
+                file_dir = list(set(media_dirs))
+            elif not file_dir:
+                file_dir = os.path.commonpath(files).replace("\\", "/")
+                if file_dir != "/":
+                    file_dir = "/" + str(file_dir).split("/")[1]
+                else:
+                    return []
         hardlinks = {}
         if files:
             try:
                 for file in files:
                     hardlinks[os.path.basename(file)] = SystemUtils(
-                    ).find_hardlinks(file=file, fdir=file_dir)
+                    ).find_hardlinks(file=file, fdrs=file_dir if isinstance(file_dir, list) else [file_dir] if file_dir else None)
             except Exception as e:
                 ExceptionUtils.exception_traceback(e)
                 return {"code": 1}

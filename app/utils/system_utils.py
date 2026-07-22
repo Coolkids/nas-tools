@@ -252,7 +252,7 @@ class SystemUtils:
                 vols.append(vol)
         return vols
 
-    def find_hardlinks(self, file, fdir=None):
+    def find_hardlinks(self, file, fdrs=None):
         """
         查找文件的所有硬链接
         """
@@ -282,17 +282,22 @@ class SystemUtils:
                         })
         else:
             inode = os.stat(file).st_ino
-            if not fdir:
-                fdir = os.path.dirname(file)
+            if not fdrs:
+                fdrs = [os.path.dirname(file)]
             stdout = subprocess.run(
-                ['find', fdir, '-inum', str(inode)],
+                ['find'] + fdrs + ['-inum', str(inode)],
                 stdout=subprocess.PIPE
             ).stdout
             if stdout:
                 link_files = stdout.decode('utf-8').split('\n')
+                seen = set()
                 for link_file in link_files:
                     if link_file \
                             and os.path.normpath(file) != os.path.normpath(link_file):
+                        norm = os.path.normpath(link_file)
+                        if norm in seen:
+                            continue
+                        seen.add(norm)
                         file_name = os.path.basename(link_file)
                         file_path = os.path.dirname(link_file)
                         ret_files.append({
