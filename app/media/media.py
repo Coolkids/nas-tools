@@ -2,6 +2,7 @@ import difflib
 import os
 import random
 import re
+import time
 import traceback
 from functools import lru_cache
 
@@ -894,6 +895,68 @@ class Media:
                 log.error("【Rmt】发生错误：%s - %s" % (str(err), traceback.format_exc()))
         # 循环结束
         return return_media_infos
+
+    def search_media_info_force(self, meta_info):
+        """
+        强制重新搜索媒体信息，跳过缓存，针对网络问题或API限流进行重试
+        :param meta_info: 已解析但识别失败的 MetaInfo 对象
+        :return: TMDB info dict 或 None
+        """
+        name = meta_info.get_name()
+        year = meta_info.year
+        mtype = meta_info.type
+        season = meta_info.begin_season
+        if not name:
+            return None
+
+        # 清除缓存，强制重新搜索
+        cache_key = self.__make_cache_key(meta_info)
+        if cache_key:
+            self.meta.delete_meta_data(cache_key)
+
+        file_media_info = None
+
+        # 策略1：立即重试（解决网络抖动问题）
+        file_media_info = self.__search_tmdb(
+            file_media_name=name,
+            first_media_year=year,
+            search_type=mtype,
+            media_year=year,
+            season_number=season
+        )
+
+        # 策略2：等待2秒后重试（解决API限流问题）
+        if not file_media_info:
+            time.sleep(2)
+            file_media_info = self.__search_tmdb(
+                file_media_name=name,
+                first_media_year=year,
+                search_type=mtype,
+                media_year=year,
+                season_number=season
+            )
+
+        # 策略3：去掉年份再查一次（解决年份信息有误的问题，仅在严格模式下有意义）
+        if not file_media_info and self._rmt_match_mode == MatchMode.STRICT:
+            file_media_info = self.__search_tmdb(
+                file_media_name=name,
+                search_type=mtype
+            )
+
+        # 补全TMDB信息
+        if file_media_info and not file_media_info.get("genres"):
+            file_media_info = self.get_tmdb_info(
+                mtype=file_media_info.get("media_type"),
+                tmdbid=file_media_info.get("id")
+            )
+
+        # 缓存结果
+        self.__insert_media_cache(cache_key, file_media_info)
+
+        if file_media_info:
+            log.info("【Meta】额外重试成功，识别到媒体信息")
+
+        return file_media_info
 
     @staticmethod
     def __dict_tmdbinfos(infos, mtype=None):

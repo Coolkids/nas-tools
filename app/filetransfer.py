@@ -594,33 +594,45 @@ class FileTransfer:
                     reg_path = file_item
                 # 未识别
                 if not media or not media.tmdb_info or not media.get_title_string():
-                    log.error("【Rmt】%s 无法识别媒体信息！ media:%s Medias:%s" % (file_name, media, Medias))
-                    success_flag = False
-                    error_message = "无法识别媒体信息"
-                    self.progress.update(ptype="filetransfer", text=error_message)
-                    if udf_flag:
-                        return __finish_transfer(success_flag, error_message)
-                    # 记录未识别
-                    is_need_insert_unknown = self.dbhelper.is_need_insert_transfer_unknown(reg_path)
-                    if is_need_insert_unknown:
-                        self.dbhelper.insert_transfer_unknown(reg_path, target_dir, rmt_mode)
-                        alert_count += 1
-                    failed_count += 1
-                    if error_message not in alert_messages and is_need_insert_unknown:
-                        alert_messages.append(error_message)
-                    # 原样转移过去
-                    if unknown_dir:
-                        log.warn("【Rmt】%s 按原文件名转移到未识别目录：%s" % (file_name, unknown_dir))
-                        self.__transfer_origin_file(file_item=file_item, target_dir=unknown_dir, rmt_mode=rmt_mode)
-                    elif self._unknown_path:
-                        unknown_path = self.__get_best_unknown_path(in_path)
-                        if not unknown_path:
-                            continue
-                        log.warn("【Rmt】%s 按原文件名转移到未识别目录：%s" % (file_name, unknown_path))
-                        self.__transfer_origin_file(file_item=file_item, target_dir=unknown_path, rmt_mode=rmt_mode)
-                    else:
-                        log.error("【Rmt】%s 无法识别媒体信息！" % file_name)
-                    continue
+                    # 额外尝试：强制重新搜索媒体信息
+                    if not udf_flag:
+                        log.warn("【Rmt】%s 首次识别失败，进行额外尝试..." % file_name)
+                        file_media_info = self.media.search_media_info_force(media)
+                        if file_media_info:
+                            media.set_tmdb_info(file_media_info)
+                            log.info("【Rmt】%s 额外尝试识别成功！" % file_name)
+                            # 更新进度
+                            self.progress.update(ptype="filetransfer",
+                                                 text="额外尝试识别成功：%s ..." % file_name)
+                    # 仍然未识别
+                    if not media or not media.tmdb_info or not media.get_title_string():
+                        log.error("【Rmt】%s 无法识别媒体信息！ media:%s Medias:%s" % (file_name, media, Medias))
+                        success_flag = False
+                        error_message = "无法识别媒体信息"
+                        self.progress.update(ptype="filetransfer", text=error_message)
+                        if udf_flag:
+                            return __finish_transfer(success_flag, error_message)
+                        # 记录未识别
+                        is_need_insert_unknown = self.dbhelper.is_need_insert_transfer_unknown(reg_path)
+                        if is_need_insert_unknown:
+                            self.dbhelper.insert_transfer_unknown(reg_path, target_dir, rmt_mode)
+                            alert_count += 1
+                        failed_count += 1
+                        if error_message not in alert_messages and is_need_insert_unknown:
+                            alert_messages.append(error_message)
+                        # 原样转移过去
+                        if unknown_dir:
+                            log.warn("【Rmt】%s 按原文件名转移到未识别目录：%s" % (file_name, unknown_dir))
+                            self.__transfer_origin_file(file_item=file_item, target_dir=unknown_dir, rmt_mode=rmt_mode)
+                        elif self._unknown_path:
+                            unknown_path = self.__get_best_unknown_path(in_path)
+                            if not unknown_path:
+                                continue
+                            log.warn("【Rmt】%s 按原文件名转移到未识别目录：%s" % (file_name, unknown_path))
+                            self.__transfer_origin_file(file_item=file_item, target_dir=unknown_path, rmt_mode=rmt_mode)
+                        else:
+                            log.error("【Rmt】%s 无法识别媒体信息！" % file_name)
+                        continue
                 # 当前文件大小
                 media.size = os.path.getsize(file_item)
                 # 目的目录，有输入target_dir时，往这个目录放
