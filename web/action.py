@@ -3753,9 +3753,25 @@ class WebAction:
             sync_mode = history.get("MODE")
             rmt_mode = ModuleConf.get_dictenum_key(
                 ModuleConf.RMT_MODES, sync_mode) if sync_mode else ""
+            image = ""
+            tmdbid = history.get("TMDBID")
+            mtype = history.get("TYPE")
+            if tmdbid and mtype:
+                try:
+                    if mtype == MediaType.MOVIE.value:
+                        tmdb_info = Media().get_tmdb_info(mtype=MediaType.MOVIE, tmdbid=tmdbid)
+                    else:
+                        tmdb_info = Media().get_tmdb_info(mtype=MediaType.TV, tmdbid=tmdbid)
+                    if tmdb_info:
+                        poster = tmdb_info.get('poster_path')
+                        if poster:
+                            image = TMDB_IMAGE_W500_URL % poster
+                except Exception:
+                    pass
             history.update({
                 "SYNC_MODE": sync_mode,
-                "RMT_MODE": rmt_mode
+                "RMT_MODE": rmt_mode,
+                "image": image
             })
             historys_list.append(history)
         TotalPage = floor(totalCount / PageNum) + 1
@@ -3880,8 +3896,22 @@ class WebAction:
                               "enabled": word_info.ENABLED,
                               "regex": word_info.REGEX,
                               "help": word_info.HELP, })
+            image = ""
+            if group_info.TMDBID:
+                try:
+                    if gtype == 1:
+                        tmdb_info = Media().get_tmdb_info(mtype=MediaType.MOVIE, tmdbid=group_info.TMDBID)
+                    else:
+                        tmdb_info = Media().get_tmdb_info(mtype=MediaType.TV, tmdbid=group_info.TMDBID)
+                    if tmdb_info:
+                        poster = tmdb_info.get('poster_path')
+                        if poster:
+                            image = TMDB_IMAGE_W500_URL % poster
+                except Exception:
+                    pass
             groups.append({"id": gid,
                            "name": name,
+                           "image": image,
                            "link": link,
                            "type": group_info.TYPE,
                            "seasons": group_info.SEASON_COUNT,
