@@ -3757,17 +3757,28 @@ class WebAction:
             tmdbid = history.get("TMDBID")
             mtype = history.get("TYPE")
             if tmdbid and mtype:
-                try:
-                    if mtype == MediaType.MOVIE.value:
-                        tmdb_info = Media().get_tmdb_info(mtype=MediaType.MOVIE, tmdbid=tmdbid)
-                    else:
-                        tmdb_info = Media().get_tmdb_info(mtype=MediaType.TV, tmdbid=tmdbid)
-                    if tmdb_info:
-                        poster = tmdb_info.get('poster_path')
-                        if poster:
-                            image = TMDB_IMAGE_W500_URL % poster
-                except Exception:
-                    pass
+                cache_key = f"[{'电影' if mtype == MediaType.MOVIE.value else '电视剧'}]{tmdbid}"
+                cache_info = MetaHelper().get_meta_data_by_key(cache_key)
+                if cache_info and cache_info.get("poster_path"):
+                    image = TMDB_IMAGE_W500_URL % cache_info.get("poster_path")
+                elif not cache_info or not cache_info.get("id"):
+                    try:
+                        if mtype == MediaType.MOVIE.value:
+                            tmdb_info = Media().get_tmdb_info(mtype=MediaType.MOVIE, tmdbid=tmdbid)
+                        else:
+                            tmdb_info = Media().get_tmdb_info(mtype=MediaType.TV, tmdbid=tmdbid)
+                        if tmdb_info:
+                            poster = tmdb_info.get('poster_path')
+                            MetaHelper().update_meta_data({
+                                cache_key: {
+                                    "id": tmdbid,
+                                    "poster_path": poster or ""
+                                }
+                            })
+                            if poster:
+                                image = TMDB_IMAGE_W500_URL % poster
+                    except Exception:
+                        pass
             history.update({
                 "SYNC_MODE": sync_mode,
                 "RMT_MODE": rmt_mode,
@@ -3871,6 +3882,7 @@ class WebAction:
                    "link": "",
                    "type": "1",
                    "seasons": "0",
+                   "image": "",
                    "words": words}]
         groups_info = self.dbhelper.get_custom_word_groups()
         for group_info in groups_info:
@@ -3898,17 +3910,28 @@ class WebAction:
                               "help": word_info.HELP, })
             image = ""
             if group_info.TMDBID:
-                try:
-                    if gtype == 1:
-                        tmdb_info = Media().get_tmdb_info(mtype=MediaType.MOVIE, tmdbid=group_info.TMDBID)
-                    else:
-                        tmdb_info = Media().get_tmdb_info(mtype=MediaType.TV, tmdbid=group_info.TMDBID)
-                    if tmdb_info:
-                        poster = tmdb_info.get('poster_path')
-                        if poster:
-                            image = TMDB_IMAGE_W500_URL % poster
-                except Exception:
-                    pass
+                cache_key = f"[{'电影' if gtype == 1 else '电视剧'}]{group_info.TMDBID}"
+                cache_info = MetaHelper().get_meta_data_by_key(cache_key)
+                if cache_info and cache_info.get("poster_path"):
+                    image = TMDB_IMAGE_W500_URL % cache_info.get("poster_path")
+                elif not cache_info or not cache_info.get("id"):
+                    try:
+                        if gtype == 1:
+                            tmdb_info = Media().get_tmdb_info(mtype=MediaType.MOVIE, tmdbid=group_info.TMDBID)
+                        else:
+                            tmdb_info = Media().get_tmdb_info(mtype=MediaType.TV, tmdbid=group_info.TMDBID)
+                        if tmdb_info:
+                            poster = tmdb_info.get('poster_path')
+                            MetaHelper().update_meta_data({
+                                cache_key: {
+                                    "id": group_info.TMDBID,
+                                    "poster_path": poster or ""
+                                }
+                            })
+                            if poster:
+                                image = TMDB_IMAGE_W500_URL % poster
+                    except Exception:
+                        pass
             groups.append({"id": gid,
                            "name": name,
                            "image": image,
