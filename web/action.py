@@ -6,6 +6,7 @@ import os.path
 import re
 import shutil
 import signal
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from math import floor
 from urllib.parse import unquote
 
@@ -3748,43 +3749,53 @@ class WebAction:
         totalCount, historys = self.dbhelper.get_transfer_history(
             SearchStr, CurrentPage, PageNum)
         historys_list = []
+        tmdb_tasks = []
         for history in historys:
             history = history.as_dict()
             sync_mode = history.get("MODE")
             rmt_mode = ModuleConf.get_dictenum_key(
                 ModuleConf.RMT_MODES, sync_mode) if sync_mode else ""
-            image = ""
             tmdbid = history.get("TMDBID")
             mtype = history.get("TYPE")
+            image = ""
             if tmdbid and mtype:
                 cache_key = f"[{'电影' if mtype == MediaType.MOVIE.value else '电视剧'}]{tmdbid}"
                 cache_info = MetaHelper().get_meta_data_by_key(cache_key)
                 if cache_info and cache_info.get("poster_path"):
                     image = TMDB_IMAGE_W500_URL % cache_info.get("poster_path")
                 elif not cache_info or not cache_info.get("id"):
-                    try:
-                        if mtype == MediaType.MOVIE.value:
-                            tmdb_info = Media().get_tmdb_info(mtype=MediaType.MOVIE, tmdbid=tmdbid)
-                        else:
-                            tmdb_info = Media().get_tmdb_info(mtype=MediaType.TV, tmdbid=tmdbid)
-                        if tmdb_info:
-                            poster = tmdb_info.get('poster_path')
-                            MetaHelper().update_meta_data({
-                                cache_key: {
-                                    "id": tmdbid,
-                                    "poster_path": poster or ""
-                                }
-                            })
-                            if poster:
-                                image = TMDB_IMAGE_W500_URL % poster
-                    except Exception:
-                        pass
+                    tmdb_tasks.append((history, tmdbid, mtype, cache_key))
             history.update({
                 "SYNC_MODE": sync_mode,
                 "RMT_MODE": rmt_mode,
                 "image": image
             })
             historys_list.append(history)
+        if tmdb_tasks:
+            def _query_poster(tmdbid, mtype, cache_key):
+                try:
+                    if mtype == MediaType.MOVIE.value:
+                        tmdb_info = Media().get_tmdb_info(mtype=MediaType.MOVIE, tmdbid=tmdbid)
+                    else:
+                        tmdb_info = Media().get_tmdb_info(mtype=MediaType.TV, tmdbid=tmdbid)
+                    if tmdb_info:
+                        poster = tmdb_info.get('poster_path')
+                        MetaHelper().update_meta_data({
+                            cache_key: {
+                                "id": tmdbid,
+                                "poster_path": poster or ""
+                            }
+                        })
+                        if poster:
+                            return TMDB_IMAGE_W500_URL % poster
+                except Exception:
+                    pass
+                return ""
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                future_map = {executor.submit(_query_poster, tmdbid, mtype, cache_key): history
+                              for history, tmdbid, mtype, cache_key in tmdb_tasks}
+                for future in as_completed(future_map):
+                    future_map[future]["image"] = future.result()
         TotalPage = floor(totalCount / PageNum) + 1
 
         return {
@@ -3885,6 +3896,8 @@ class WebAction:
                    "image": "",
                    "words": words}]
         groups_info = self.dbhelper.get_custom_word_groups()
+        group_dicts = []
+        tmdb_tasks = []
         for group_info in groups_info:
             gid = group_info.ID
             name = "%s (%s)" % (group_info.TITLE, group_info.YEAR)
@@ -3908,37 +3921,47 @@ class WebAction:
                               "enabled": word_info.ENABLED,
                               "regex": word_info.REGEX,
                               "help": word_info.HELP, })
-            image = ""
+            group_dict = {"id": gid,
+                          "name": name,
+                          "image": "",
+                          "link": link,
+                          "type": group_info.TYPE,
+                          "seasons": group_info.SEASON_COUNT,
+                          "words": words}
             if group_info.TMDBID:
                 cache_key = f"[{'电影' if gtype == 1 else '电视剧'}]{group_info.TMDBID}"
                 cache_info = MetaHelper().get_meta_data_by_key(cache_key)
                 if cache_info and cache_info.get("poster_path"):
-                    image = TMDB_IMAGE_W500_URL % cache_info.get("poster_path")
+                    group_dict["image"] = TMDB_IMAGE_W500_URL % cache_info.get("poster_path")
                 elif not cache_info or not cache_info.get("id"):
-                    try:
-                        if gtype == 1:
-                            tmdb_info = Media().get_tmdb_info(mtype=MediaType.MOVIE, tmdbid=group_info.TMDBID)
-                        else:
-                            tmdb_info = Media().get_tmdb_info(mtype=MediaType.TV, tmdbid=group_info.TMDBID)
-                        if tmdb_info:
-                            poster = tmdb_info.get('poster_path')
-                            MetaHelper().update_meta_data({
-                                cache_key: {
-                                    "id": group_info.TMDBID,
-                                    "poster_path": poster or ""
-                                }
-                            })
-                            if poster:
-                                image = TMDB_IMAGE_W500_URL % poster
-                    except Exception:
-                        pass
-            groups.append({"id": gid,
-                           "name": name,
-                           "image": image,
-                           "link": link,
-                           "type": group_info.TYPE,
-                           "seasons": group_info.SEASON_COUNT,
-                           "words": words})
+                    tmdb_tasks.append((group_dict, group_info.TMDBID, gtype, cache_key))
+            group_dicts.append(group_dict)
+        if tmdb_tasks:
+            def _query_poster(tmdbid, gtype, cache_key):
+                try:
+                    if gtype == 1:
+                        tmdb_info = Media().get_tmdb_info(mtype=MediaType.MOVIE, tmdbid=tmdbid)
+                    else:
+                        tmdb_info = Media().get_tmdb_info(mtype=MediaType.TV, tmdbid=tmdbid)
+                    if tmdb_info:
+                        poster = tmdb_info.get('poster_path')
+                        MetaHelper().update_meta_data({
+                            cache_key: {
+                                "id": tmdbid,
+                                "poster_path": poster or ""
+                            }
+                        })
+                        if poster:
+                            return TMDB_IMAGE_W500_URL % poster
+                except Exception:
+                    pass
+                return ""
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                future_map = {executor.submit(_query_poster, tmdbid, gtype, cache_key): group_dict
+                              for group_dict, tmdbid, gtype, cache_key in tmdb_tasks}
+                for future in as_completed(future_map):
+                    future_map[future]["image"] = future.result()
+        groups.extend(group_dicts)
         return {
             "code": 0,
             "result": groups
