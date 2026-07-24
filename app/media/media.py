@@ -4,7 +4,6 @@ import random
 import re
 import time
 import traceback
-from functools import lru_cache
 
 import zhconv
 from lxml import etree
@@ -13,11 +12,14 @@ import log
 from app.helper import MetaHelper
 from app.media.meta.metainfo import MetaInfo
 from app.media.tmdbv3api import TMDb, Search, Movie, TV, Person, Find, TMDbException, Discover, Trending, Episode, Genre
-from app.utils import PathUtils, EpisodeFormat, RequestUtils, NumberUtils, StringUtils, cacheman
+from app.utils import PathUtils, EpisodeFormat, RequestUtils, NumberUtils, StringUtils, cacheman, TmdbWebSearchCache
 from app.utils.types import MediaType, MatchMode
 from config import Config, KEYWORD_BLACKLIST, KEYWORD_SEARCH_WEIGHT_3, KEYWORD_SEARCH_WEIGHT_2, KEYWORD_SEARCH_WEIGHT_1, \
     KEYWORD_STR_SIMILARITY_THRESHOLD, KEYWORD_DIFF_SCORE_THRESHOLD, TMDB_IMAGE_ORIGINAL_URL, DEFAULT_TMDB_PROXY, \
     TMDB_IMAGE_FACE_URL, TMDB_PEOPLE_PROFILE_URL, TMDB_IMAGE_W500_URL
+
+
+_TmdbWebSearchCache_SENTINEL = object()
 
 
 class Media:
@@ -424,7 +426,6 @@ class Media:
             log.info("【Meta】%s 在TMDB中未找到媒体信息!" % file_media_name)
             return info
 
-    @lru_cache(maxsize=1024)
     def __search_tmdb_web(self, file_media_name, mtype: MediaType):
         """
         检索TMDB网站，直接抓取结果，结果只有一条时才返回
@@ -434,50 +435,59 @@ class Media:
             return None
         if StringUtils.is_chinese(file_media_name):
             return {}
+        # 缓存键：避免mtype枚举无法哈希的问题
+        cache_key = (file_media_name, mtype.value if mtype else None)
+        cached = TmdbWebSearchCache.get(cache_key, _TmdbWebSearchCache_SENTINEL)
+        if cached is not _TmdbWebSearchCache_SENTINEL:
+            log.info("【Meta】正在从TheDbMovie缓存查询：%s ..." % file_media_name)
+            return cached
+        result = None
         log.info("【Meta】正在从TheDbMovie网站查询：%s ..." % file_media_name)
         tmdb_url = "https://www.themoviedb.org/search?query=%s" % file_media_name
         res = RequestUtils(timeout=5).get_res(url=tmdb_url)
         if res and res.status_code == 200:
             html_text = res.text
-            if not html_text:
-                return None
-            try:
-                tmdb_links = []
-                html = etree.HTML(html_text)
-                links = html.xpath("//a[@data-id]/@href")
-                for link in links:
-                    if not link or (not link.startswith("/tv") and not link.startswith("/movie")):
-                        continue
-                    if link not in tmdb_links:
-                        tmdb_links.append(link)
-                if len(tmdb_links) == 1:
-                    tmdbinfo = self.get_tmdb_info(
-                        mtype=MediaType.TV if tmdb_links[0].startswith("/tv") else MediaType.MOVIE,
-                        tmdbid=tmdb_links[0].split("/")[-1])
-                    if tmdbinfo:
-                        if mtype == MediaType.TV and tmdbinfo.get('media_type') != MediaType.TV:
-                            return {}
-                        if tmdbinfo.get('media_type') == MediaType.MOVIE:
-                            log.info("【Meta】%s 从WEB识别到 电影：TMDBID=%s, 名称=%s, 上映日期=%s" % (
-                                file_media_name,
-                                tmdbinfo.get('id'),
-                                tmdbinfo.get('title'),
-                                tmdbinfo.get('release_date')))
+            if html_text:
+                try:
+                    tmdb_links = []
+                    html = etree.HTML(html_text)
+                    links = html.xpath("//a[@data-id]/@href")
+                    for link in links:
+                        if not link or (not link.startswith("/tv") and not link.startswith("/movie")):
+                            continue
+                        if link not in tmdb_links:
+                            tmdb_links.append(link)
+                    if len(tmdb_links) == 1:
+                        tmdbinfo = self.get_tmdb_info(
+                            mtype=MediaType.TV if tmdb_links[0].startswith("/tv") else MediaType.MOVIE,
+                            tmdbid=tmdb_links[0].split("/")[-1])
+                        if tmdbinfo:
+                            if mtype == MediaType.TV and tmdbinfo.get('media_type') != MediaType.TV:
+                                result = {}
+                            else:
+                                if tmdbinfo.get('media_type') == MediaType.MOVIE:
+                                    log.info("【Meta】%s 从WEB识别到 电影：TMDBID=%s, 名称=%s, 上映日期=%s" % (
+                                        file_media_name,
+                                        tmdbinfo.get('id'),
+                                        tmdbinfo.get('title'),
+                                        tmdbinfo.get('release_date')))
+                                else:
+                                    log.info("【Meta】%s 从WEB识别到 电视剧：TMDBID=%s, 名称=%s, 首播日期=%s" % (
+                                        file_media_name,
+                                        tmdbinfo.get('id'),
+                                        tmdbinfo.get('name'),
+                                        tmdbinfo.get('first_air_date')))
+                                result = tmdbinfo
                         else:
-                            log.info("【Meta】%s 从WEB识别到 电视剧：TMDBID=%s, 名称=%s, 首播日期=%s" % (
-                                file_media_name,
-                                tmdbinfo.get('id'),
-                                tmdbinfo.get('name'),
-                                tmdbinfo.get('first_air_date')))
-                    return tmdbinfo
-                elif len(tmdb_links) > 1:
-                    log.info("【Meta】%s TMDB网站返回数据过多：%s" % (file_media_name, len(tmdb_links)))
-                else:
-                    log.info("【Meta】%s TMDB网站未查询到媒体信息！" % file_media_name)
-            except Exception as err:
-                print(str(err))
-                return None
-        return None
+                            result = tmdbinfo
+                    elif len(tmdb_links) > 1:
+                        log.info("【Meta】%s TMDB网站返回数据过多：%s" % (file_media_name, len(tmdb_links)))
+                    else:
+                        log.info("【Meta】%s TMDB网站未查询到媒体信息！" % file_media_name)
+                except Exception as err:
+                    print(str(err))
+        TmdbWebSearchCache.set(cache_key, result)
+        return result
 
     def get_tmdb_info(self, mtype: MediaType,
                       tmdbid,

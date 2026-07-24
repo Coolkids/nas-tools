@@ -14,6 +14,6 @@ from .cache_manager import cacheman, TokenCache, ConfigLoadCache, \
     TmdbHotMoviesCache, TmdbHotTvsCache, TmdbNewMoviesCache, TmdbNewTvsCache, \
     TmdbUpcomingMoviesCache, TmdbTrendingCache, \
     BuiltinSearchCache, TmdbSeasonDetailCache, \
-    SitePageHtmlCache, SubtitleCache
+    SitePageHtmlCache, SubtitleCache, TmdbWebSearchCache
 from .exception_utils import ExceptionUtils
 from .rsstitle_utils import RssTitleUtils

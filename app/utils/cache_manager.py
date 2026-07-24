@@ -9,6 +9,9 @@ CACHES = {
 
 cacheman = CacheManager(CACHES, cache_class=LRUCache)
 
+# T12: TMDB网站搜索结果缓存 86400s (1天)
+TmdbWebSearchCache = Cache(maxsize=1024, ttl=86400, timer=time.time, default=None)
+
 TokenCache = Cache(maxsize=2048, ttl=4*3600, timer=time.time, default=None)
 
 ConfigLoadCache = Cache(maxsize=1, ttl=10, timer=time.time, default=None)
