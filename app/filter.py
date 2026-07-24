@@ -276,7 +276,7 @@ class Filter:
                 else:
                     meta_info.resource_team = resource_team
             elif not re.search(r"%s" % team, meta_info.resource_team, re.I):
-                return False, 0, f"{meta_info.org_string} 不符合制作组/字幕组 {team} 要求"
+                return False, 0, f"{meta_info.org_string} {meta_info.resource_team} 不符合制作组/字幕组 {team} 要求"
         # 过滤促销
         if filter_args.get("sp_state"):
             ul_factor, dl_factor = filter_args.get("sp_state").split()

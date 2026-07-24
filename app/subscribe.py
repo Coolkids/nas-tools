@@ -107,10 +107,13 @@ class Subscribe:
                     title = "%s %s 第%s季".strip() % (name, year, season)
                 else:
                     title = "%s %s".strip() % (name, year)
-                media_info = self.media.get_media_info(title=title,
-                                                       mtype=mtype,
-                                                       strict=True if year else False,
-                                                       cache=False)
+                media_info = self.media.get_media_info_original_title(title=title,
+                                                    name=name,
+                                                    year=year,
+                                                    season=season,
+                                                    mtype=mtype,
+                                                    strict=True if year else False,
+                                                    cache=False)
             # 检查TMDB信息
             if not media_info or not media_info.tmdb_info:
                 return 1, "无法TMDB查询到媒体信息", None

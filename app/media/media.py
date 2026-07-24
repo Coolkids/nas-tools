@@ -735,6 +735,111 @@ class Media:
         meta_info.set_tmdb_info(file_media_info)
         return meta_info
 
+    def get_media_info_original_title(self, title,
+                        name=None,
+                        subtitle=None,
+                        year=None,
+                        season=None,
+                        mtype=None,
+                        strict=None,
+                        cache=True,
+                        chinese=True,
+                        append_to_response=None):
+        """
+        只有名称信息，判别是电影还是电视剧并搜刮TMDB信息，用于种子名称识别
+        :param title: 用于格式化查询的名称
+        :param name: 原始名称
+        :param subtitle: 种子副标题
+        :param year: 年份
+        :param season: 季
+        :param mtype: 类型：电影、电视剧、动漫
+        :param strict: 是否严格模式，为true时，不会再去掉年份再查一次
+        :param cache: 是否使用缓存，默认TRUE
+        :param chinese: 原标题为英文时是否从别名中检索中文名称
+        :param append_to_response: 额外查询的信息
+        :return: 带有TMDB信息的MetaInfo对象
+        """
+        if not self.tmdb:
+            log.error("【Meta】TMDB API Key 未设置！")
+            return None
+        if not title:
+            return None
+        meta_info = MetaInfo(title, subtitle=subtitle)
+        meta_info.cn_name = name
+
+        media_key = self.__make_cache_key(meta_info)
+        if not cache or not self.meta.get_meta_data_by_key(media_key):
+            # 缓存没有或者强制不使用缓存
+            if mtype != MediaType.TV and not year:
+                file_media_info = self.__search_multi_tmdb(file_media_name=name)
+            else:
+                if mtype == MediaType.TV:
+                    # 确定是电视
+                    file_media_info = self.__search_tmdb(file_media_name=name,
+                                                         first_media_year=year,
+                                                         search_type=mtype,
+                                                         media_year=year,
+                                                         season_number=season
+                                                         )
+                    if not file_media_info and year and self._rmt_match_mode == MatchMode.NORMAL and not strict:
+                        # 非严格模式下去掉年份再查一次
+                        file_media_info = self.__search_tmdb(file_media_name=name,
+                                                             search_type=mtype
+                                                             )
+                else:
+                    # 有年份先按电影查
+                    file_media_info = self.__search_tmdb(file_media_name=name,
+                                                         first_media_year=year,
+                                                         search_type=MediaType.MOVIE
+                                                         )
+                    # 没有再按电视剧查
+                    if not file_media_info:
+                        file_media_info = self.__search_tmdb(file_media_name=name,
+                                                             first_media_year=year,
+                                                             search_type=MediaType.TV
+                                                             )
+                    if not file_media_info and self._rmt_match_mode == MatchMode.NORMAL and not strict:
+                        # 非严格模式下去掉年份和类型再查一次
+                        file_media_info = self.__search_multi_tmdb(file_media_name=name)
+            if not file_media_info and self._search_tmdbweb:
+                file_media_info = self.__search_tmdb_web(file_media_name=name,
+                                                         mtype=mtype)
+            if not file_media_info and self._search_keyword:
+                cache_name = cacheman["tmdb_supply"].get(name)
+                is_movie = False
+                if not cache_name:
+                    cache_name, is_movie = self.__search_engine(name)
+                    cacheman["tmdb_supply"].set(name, cache_name)
+                if cache_name:
+                    log.info("【Meta】开始辅助查询：%s ..." % cache_name)
+                    if is_movie:
+                        file_media_info = self.__search_tmdb(file_media_name=cache_name, search_type=MediaType.MOVIE)
+                    else:
+                        file_media_info = self.__search_multi_tmdb(file_media_name=cache_name)
+            # 补充全量信息
+            if file_media_info and not file_media_info.get("genres"):
+                file_media_info = self.get_tmdb_info(mtype=file_media_info.get("media_type"),
+                                                     tmdbid=file_media_info.get("id"),
+                                                     chinese=chinese,
+                                                     append_to_response=append_to_response)
+                # 保存到缓存
+            if file_media_info is not None:
+                    self.__insert_media_cache(media_key=media_key,
+                                              file_media_info=file_media_info)
+        else:
+            # 使用缓存信息
+            cache_info = self.meta.get_meta_data_by_key(media_key)
+            if cache_info.get("id"):
+                file_media_info = self.get_tmdb_info(mtype=cache_info.get("type"),
+                                                     tmdbid=cache_info.get("id"),
+                                                     chinese=chinese,
+                                                     append_to_response=append_to_response)
+            else:
+                file_media_info = None
+        # 赋值TMDB信息并返回
+        meta_info.set_tmdb_info(file_media_info)
+        return meta_info
+
     def __insert_media_cache(self, media_key, file_media_info):
         """
         将TMDB信息插入缓存
