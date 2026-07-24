@@ -1,0 +1,12 @@
+/config/nginx.log
+/config/nas-tools.log
+{
+    size 10M
+    rotate 5
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0644 nastool nastool
+}

@@ -52,6 +52,7 @@ RUN apt-get update && apt-get install -y \
     unzip \
     7zip \
     supervisor \
+    logrotate \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装 uv（Rust 编写的 Python 包管理器，加速构建）
@@ -96,6 +97,10 @@ RUN sed -i 's/^user /# user /; s|pid /run/nginx.pid|pid /tmp/nginx.pid|' /etc/ng
 # supervisor 配置
 RUN mkdir -p /var/run/supervisor
 COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+# logrotate 配置
+RUN mkdir -p /etc/logrotate.d
+COPY docker/nastool /etc/logrotate.d/nastool
 
 # 克隆后端代码并安装依赖（使用 uv 加速）
 RUN git clone -b main ${REPO_URL} /app/nas-tools --depth=1 --recurse-submodule \

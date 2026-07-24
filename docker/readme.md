@@ -19,7 +19,7 @@ docker run -d \
     -p 3010:3010 \
     -v $(pwd)/config:/config \
     -v /你的媒体目录:/你想设置的容器内能见到的目录 \
-    --user 1000:1000
+    --user 1000:1000 \
     -e UMASK=000 \
     coolkid903/nas-tools
 ```
