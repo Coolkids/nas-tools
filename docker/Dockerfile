@@ -67,6 +67,7 @@ RUN uv python install 3.14 \
 
 # 激活 venv（后续 RUN 层通过 PATH 继承 venv 优先）
 ENV VIRTUAL_ENV=/app/.venv \
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
     PATH="/app/.venv/bin:${PATH}"
 
 # 升级 pip 工具链
@@ -104,7 +105,8 @@ COPY docker/nastool /etc/logrotate.d/nastool
 
 # 克隆后端代码并安装依赖（使用 uv 加速）
 RUN git clone -b main ${REPO_URL} /app/nas-tools --depth=1 --recurse-submodule \
-    && uv pip install -r /app/nas-tools/requirements.txt \
+    && cd /app/nas-tools \
+    && uv sync --locked --no-dev --inexact \
     && rm -rf /tmp/* /root/.cache
 
 # 环境变量

@@ -44,13 +44,16 @@ docker pull coolkid903/nas-tools:latest
 教程见 [这里](docker/readme.md) 。
 
 ### 2、本地运行
-python3.14版本，需要预安装cython，如发现缺少依赖包需额外安装
+推荐使用 uv 管理虚拟环境和项目依赖（需要 Python 3.14）：
 ```
 git clone -b master https://github.com/coolkid903/nas-tools --recurse-submodule 
-python3 -m pip install -r requirements.txt
+cd nas-tools
+uv sync
 export NASTOOL_CONFIG="/xxx/config/config.yaml"
-nohup python3 run.py & 
+nohup uv run python run.py &
 ```
+
+`requirements.txt` 由 `pyproject.toml` 和 `uv.lock` 导出，仅用于兼容旧的 pip 安装流程。
 
 ### 3、Windows
 下载exe文件，双击运行即可，会自动生成配置文件目录

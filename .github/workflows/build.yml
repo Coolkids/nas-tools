@@ -12,6 +12,8 @@ on:
       - docker/supervisord.conf
       - docker/entrypoint.sh
       - .github/workflows/build.yml
+      - pyproject.toml
+      - uv.lock
       - requirements.txt
 
 permissions:

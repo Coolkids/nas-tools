@@ -6,6 +6,7 @@ test.py
 media.db
 user.db
 venv
+.venv
 
 ### IntelliJ IDEA ###
 .idea
