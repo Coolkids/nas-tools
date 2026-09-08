@@ -106,6 +106,7 @@ COPY docker/nastool /etc/logrotate.d/nastool
 # 克隆后端代码并安装依赖（使用 uv 加速）
 RUN git clone -b main ${REPO_URL} /app/nas-tools --depth=1 --recurse-submodule \
     && cd /app/nas-tools \
+    && uv lock \
     && uv sync --locked --no-dev --inexact \
     && rm -rf /tmp/* /root/.cache
 
