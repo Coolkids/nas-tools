@@ -160,10 +160,25 @@ class MetaVideo(MetaBase):
         # 回收标题
         if self._unknown_name_str:
             if not self.cn_name:
-                if not self.en_name:
+                # 数字在中文标题前时也属于标题的一部分，例如“3 体”。
+                # 四位数字仍保留给年份解析，避免把年份拼到名称中。
+                if StringUtils.is_chinese(token) and len(self._unknown_name_str) < 4:
+                    self.cn_name = "%s %s" % (self._unknown_name_str, token)
+                    self._last_token_type = "cnname"
+                    self._unknown_name_str = ""
+                    return
+                elif not self.en_name:
                     self.en_name = self._unknown_name_str
                 elif self._unknown_name_str != self.year:
                     self.en_name = "%s %s" % (self.en_name, self._unknown_name_str)
+            elif len(self._unknown_name_str) < 4 \
+                    and not self.en_name \
+                    and re.search(r"[a-zA-Z]", token):
+                # 中文标题已经带有该数字时，数字可能是后续英文别名的前缀，
+                # 例如“3体 3 Body Problem”。
+                self.en_name = self._unknown_name_str
+                self._last_token_type = "enname"
+            if not self.cn_name:
                 self._last_token_type = "enname"
             self._unknown_name_str = ""
         if self._stop_name_flag:
@@ -206,6 +221,25 @@ class MetaVideo(MetaBase):
                     if not is_roman_digit \
                             and self._last_token_type == "cnname" \
                             and int(token) < 1900:
+                        # 保留明确处于标题上下文的单个数字，例如“流浪地球 2”。
+                        # 以 0 开头、季集和清晰度等上下文仍按原有规则作为集号处理。
+                        next_token = self.tokens.cur()
+                        if token in self.cn_name:
+                            if next_token and re.search(r"[a-zA-Z]", next_token):
+                                self._unknown_name_str = token
+                            return
+                        is_title_number = len(token) == 1 and next_token \
+                            and next_token not in self._name_se_words \
+                            and (".%s" % next_token.lower()) not in RMT_MEDIAEXT \
+                            and not re.search(r"%s" % self._season_re, next_token, re.IGNORECASE) \
+                            and not re.search(r"%s" % self._episode_re, next_token, re.IGNORECASE) \
+                            and not re.search(r"(%s)" % self._resources_type_re, next_token, re.IGNORECASE) \
+                            and not re.search(r"%s" % self._resources_pix_re, next_token, re.IGNORECASE) \
+                            and not re.search(r"(%s)" % self._video_encode_re, next_token, re.IGNORECASE) \
+                            and not re.search(r"(%s)" % self._audio_encode_re, next_token, re.IGNORECASE)
+                        if is_title_number:
+                            self.cn_name = "%s %s" % (self.cn_name, token)
+                            self._continue_flag = False
                         return
                     if (token.isdigit() and len(token) < 4) or is_roman_digit:
                         # 4位以下的数字或者罗马数字，拼装到已有标题中

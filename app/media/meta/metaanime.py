@@ -18,6 +18,8 @@ class MetaAnime(MetaBase):
 
     def __init__(self, title, subtitle=None, fileflag=False):
         super().__init__(title, subtitle, fileflag)
+        # 保留 / 分隔的所有标题别名，供媒体检索依次尝试。
+        self.alternative_names = []
         if not title:
             return
         # 调用第三方模块识别动漫
@@ -29,20 +31,23 @@ class MetaAnime(MetaBase):
             anitopy_info = anitopy.parse(title)
             if anitopy_info:
                 # 名称
-                name = anitopy_info.get("anime_title")
-                if name and name.find("/") != -1:
-                    name = name.split("/")[-1].strip()
+                raw_name = anitopy_info.get("anime_title")
+                name = self.__get_primary_name(raw_name)
                 if not name or name in self._anime_no_words or (len(name) < 5 and not StringUtils.is_chinese(name)):
                     anitopy_info = anitopy.parse("[ANIME]" + title)
                     if anitopy_info:
-                        name = anitopy_info.get("anime_title")
+                        raw_name = anitopy_info.get("anime_title")
+                        name = self.__get_primary_name(raw_name)
                 if not name or name in self._anime_no_words or (len(name) < 5 and not StringUtils.is_chinese(name)):
                     name_match = re.search(r'\[(.+?)]', title)
                     if name_match and name_match.group(1):
-                        name = name_match.group(1).strip()
+                        raw_name = name_match.group(1).strip()
+                        name = self.__get_primary_name(raw_name)
+                self.alternative_names = self.__get_title_aliases(raw_name)
                 # 拆份中英文名称
                 if name:
                     lastword_type = ""
+                    leading_numbers = []
                     for word in name.split():
                         if not word:
                             continue
@@ -53,12 +58,20 @@ class MetaAnime(MetaBase):
                                 self.cn_name = "%s %s" % (self.cn_name or "", word)
                             elif lastword_type == "en":
                                 self.en_name = "%s %s" % (self.en_name or "", word)
+                            else:
+                                # 数字可能是英文或中文标题的前缀，例如“20 Seiki”。
+                                leading_numbers.append(word)
                         elif StringUtils.is_chinese(word):
-                            self.cn_name = "%s %s" % (self.cn_name or "", word)
+                            self.cn_name = "%s %s" % (self.cn_name or "", " ".join(leading_numbers + [word]))
+                            leading_numbers = []
                             lastword_type = "cn"
                         else:
-                            self.en_name = "%s %s" % (self.en_name or "", word)
+                            self.en_name = "%s %s" % (self.en_name or "", " ".join(leading_numbers + [word]))
+                            leading_numbers = []
                             lastword_type = "en"
+                    # 纯数字标题（例如“24”）也不能被静默丢弃。
+                    if leading_numbers:
+                        self.en_name = "%s %s" % (self.en_name or "", " ".join(leading_numbers))
                 if self.cn_name:
                     _, self.cn_name, _, _, _, _ = StringUtils.get_keyword_from_string(self.cn_name)
                     if self.cn_name:
@@ -162,6 +175,24 @@ class MetaAnime(MetaBase):
                 self.type = MediaType.TV
         except Exception as e:
             ExceptionUtils.exception_traceback(e)
+
+    @staticmethod
+    def __get_title_aliases(name):
+        """返回 / 分隔的非空动漫标题别名，保持原始顺序。"""
+        if not name:
+            return []
+        names = []
+        for item in name.split("/"):
+            item = item.strip()
+            if item and item not in names:
+                names.append(item)
+        return names
+
+    @classmethod
+    def __get_primary_name(cls, name):
+        """保持既有显示策略：多别名时优先最后一个标题。"""
+        aliases = cls.__get_title_aliases(name)
+        return aliases[-1] if aliases else name
 
     @staticmethod
     def __prepare_title(title):

@@ -97,10 +97,10 @@ class StringUtils:
     @staticmethod
     def is_all_chinese(word):
         """
-        判断是否全是中文
+        判断是否仅由中文、数字和空白组成
         """
         for ch in word:
-            if ch == ' ':
+            if ch.isspace() or ch.isdigit():
                 continue
             if '\u4e00' <= ch <= '\u9fff':
                 continue

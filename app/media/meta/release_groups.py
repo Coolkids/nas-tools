@@ -1,4 +1,6 @@
-import re
+import regex as re
+
+import log
 from config import Config
 
 
@@ -6,6 +8,7 @@ class ReleaseGroupsMatcher(object):
     """
     识别制作组、字幕组
     """
+    _MATCH_TIMEOUT_SECONDS = 0.1
     __config = None
     __release_groups = None
     RELEASE_GROUPS = {
@@ -99,5 +102,11 @@ class ReleaseGroupsMatcher(object):
         if not groups:
             groups = self.__release_groups
         title = f"{title} "
-        groups_re = re.compile(r"(?<=[-@\[￡【])(?:%s)(?=[@.\s\]\[】])" % groups, re.I)
-        return '@'.join(re.findall(groups_re, title))
+        try:
+            groups_re = re.compile(r"(?<=[-@\[￡【])(?:%s)(?=[@.\s\]\[】])" % groups, re.I)
+            return '@'.join(groups_re.findall(title, timeout=self._MATCH_TIMEOUT_SECONDS))
+        except TimeoutError:
+            log.warn("【Meta】制作组正则匹配超时，已跳过本次识别")
+        except re.error as err:
+            log.warn("【Meta】制作组正则格式错误，已跳过本次识别：%s" % err)
+        return ""

@@ -199,12 +199,20 @@ def update_config():
     if not _config.get("laboratory"):
         _config['laboratory'] = {
             'search_keyword': False,
+            'search_tmdbweb': False,
             'tmdb_cache_expire': True,
             'use_douban_titles': False,
             'search_en_title': True,
             'chrome_browser': False
         }
         overwrite_cofig = True
+    else:
+        # 新增实验室开关时补齐旧配置，避免 get() 返回 None 让设置不可见。
+        laboratory = _config['laboratory']
+        for key in ('search_keyword', 'search_tmdbweb'):
+            if key not in laboratory:
+                laboratory[key] = False
+                overwrite_cofig = True
 
     # 安全配置初始化
     if not _config.get("security"):

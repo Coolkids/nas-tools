@@ -4,6 +4,7 @@ import random
 import re
 import time
 import traceback
+from urllib.parse import urlencode
 
 import zhconv
 from lxml import etree
@@ -428,13 +429,13 @@ class Media:
 
     def __search_tmdb_web(self, file_media_name, mtype: MediaType):
         """
-        检索TMDB网站，直接抓取结果，结果只有一条时才返回
+        检索TMDB网站，直接抓取结果；仅结果唯一时才返回。
+
+        中英文混合标题同样允许查询，由调用方依次提供解析出的标题别名。
         :param file_media_name: 名称
         """
         if not file_media_name:
             return None
-        if StringUtils.is_chinese(file_media_name):
-            return {}
         # 缓存键：避免mtype枚举无法哈希的问题
         cache_key = (file_media_name, mtype.value if mtype else None)
         cached = TmdbWebSearchCache.get(cache_key, _TmdbWebSearchCache_SENTINEL)
@@ -443,7 +444,7 @@ class Media:
             return cached
         result = None
         log.info("【Meta】正在从TheDbMovie网站查询：%s ..." % file_media_name)
-        tmdb_url = "https://www.themoviedb.org/search?query=%s" % file_media_name
+        tmdb_url = "https://www.themoviedb.org/search?%s" % urlencode({"query": file_media_name})
         res = RequestUtils(timeout=5).get_res(url=tmdb_url)
         if res and res.status_code == 200:
             html_text = res.text
@@ -488,6 +489,142 @@ class Media:
                     print(str(err))
         TmdbWebSearchCache.set(cache_key, result)
         return result
+
+    @staticmethod
+    def __get_search_names(meta_info, primary_name=None):
+        """
+        返回用于兜底检索的标题候选，保留中英文别名和其中的数字。
+
+        主标题未命中后，常规 TMDB 查询和实验室回退都会依次尝试这些候选，
+        避免中英文混合发布名只留下其中一部分。
+        """
+        names = []
+        candidates = [primary_name]
+        if meta_info:
+            candidates.extend([
+                meta_info.get_name(),
+                meta_info.cn_name,
+                meta_info.en_name
+            ])
+            alternative_names = getattr(meta_info, "alternative_names", []) or []
+            if isinstance(alternative_names, str):
+                candidates.append(alternative_names)
+            else:
+                candidates.extend(alternative_names)
+        for name in candidates:
+            name = name.strip() if isinstance(name, str) else name
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def __search_by_title_aliases(self, meta_info):
+        """
+        主标题未命中 TMDB 时，依次按解析出的中英文和动漫别名查询。
+
+        这属于同一发布名的别名兜底，不依赖搜索引擎或 TMDB WEB 实验室开关。
+        """
+        if not meta_info:
+            return None
+        primary_name = meta_info.get_name()
+        for search_name in self.__get_search_names(meta_info):
+            if search_name == primary_name:
+                continue
+            if meta_info.type == MediaType.MOVIE:
+                media_info = self.__search_tmdb(file_media_name=search_name,
+                                                search_type=MediaType.MOVIE)
+            elif meta_info.type == MediaType.TV:
+                media_info = self.__search_tmdb(file_media_name=search_name,
+                                                search_type=MediaType.TV)
+            else:
+                media_info = self.__search_multi_tmdb(file_media_name=search_name)
+            if media_info:
+                return media_info
+        # 动漫的罗马字标题可能没有被 TMDB 收录为别名，但 API 仍会返回唯一
+        # 候选。此时采用该唯一同类型结果，和 TMDB WEB 的唯一结果策略一致。
+        if getattr(meta_info, "alternative_names", None):
+            for search_name in self.__get_search_names(meta_info):
+                media_info = self.__search_single_tmdb_result(search_name, meta_info.type)
+                if media_info:
+                    return media_info
+        return None
+
+    def __search_single_tmdb_result(self, file_media_name, mtype):
+        """返回 TMDB API 的唯一媒体结果，避免把模糊查询结果误认为匹配。"""
+        if not self.search or not file_media_name:
+            return None
+        try:
+            if mtype == MediaType.MOVIE:
+                results = self.search.movies({"query": file_media_name}) or []
+                media_type = MediaType.MOVIE
+            elif mtype == MediaType.TV:
+                results = self.search.tv_shows({"query": file_media_name}) or []
+                media_type = MediaType.TV
+            else:
+                results = [result for result in (self.search.multi({"query": file_media_name}) or [])
+                           if result.get("media_type") in ("movie", "tv")]
+                media_type = MediaType.MOVIE if results and results[0].get("media_type") == "movie" else MediaType.TV
+        except TMDbException as err:
+            log.error(f"【Meta】连接TMDB出错：{str(err)}")
+            return None
+        except Exception as err:
+            log.error(f"【Meta】连接TMDB出错：{str(err)}")
+            return None
+        if len(results) != 1:
+            return None
+        result = results[0]
+        if not result:
+            return None
+        if mtype not in (MediaType.MOVIE, MediaType.TV):
+            media_type = MediaType.MOVIE if result.get("media_type") == "movie" else MediaType.TV
+        result["media_type"] = media_type
+        log.info("【Meta】%s 从TMDB唯一结果识别到%s：TMDBID=%s, 名称=%s" % (
+            file_media_name,
+            media_type.value,
+            result.get("id"),
+            result.get("title") if media_type == MediaType.MOVIE else result.get("name")
+        ))
+        return result
+
+    def __search_by_keyword(self, feature_name):
+        """通过搜索引擎推断标题后再查询 TMDB。"""
+        cache_value = cacheman["tmdb_supply"].get(feature_name)
+        cache_name = None
+        is_movie = False
+        if isinstance(cache_value, tuple):
+            cache_name, is_movie = cache_value
+        elif cache_value:
+            # 兼容进程升级前缓存的字符串值。
+            cache_name = cache_value
+        else:
+            cache_name, is_movie = self.__search_engine(feature_name)
+            if cache_name:
+                cacheman["tmdb_supply"].set(feature_name, (cache_name, is_movie))
+        if not cache_name:
+            return None
+        log.info("【Meta】开始辅助查询：%s ..." % cache_name)
+        if is_movie:
+            return self.__search_tmdb(file_media_name=cache_name, search_type=MediaType.MOVIE)
+        return self.__search_multi_tmdb(file_media_name=cache_name)
+
+    def __search_fallback(self, meta_info, mtype=None, primary_name=None):
+        """
+        执行实验室中的识别增强回退。
+
+        先使用 TMDB 网页的唯一结果，再使用搜索引擎关键词推断；每种方式
+        都会尝试中英文标题候选，以免数字或另一种语言在分词时丢失。
+        """
+        search_names = self.__get_search_names(meta_info, primary_name)
+        if self._search_tmdbweb:
+            for search_name in search_names:
+                media_info = self.__search_tmdb_web(file_media_name=search_name, mtype=mtype)
+                if media_info:
+                    return media_info
+        if self._search_keyword:
+            for search_name in search_names:
+                media_info = self.__search_by_keyword(search_name)
+                if media_info:
+                    return media_info
+        return None
 
     def get_tmdb_info(self, mtype: MediaType,
                       tmdbid,
@@ -622,7 +759,15 @@ class Media:
         """
         if not meta_info:
             return None
-        return f"[{meta_info.type.value}]{meta_info.get_name()}-{meta_info.year}-{meta_info.begin_season}"
+        cache_name = meta_info.get_name()
+        alternative_names = getattr(meta_info, "alternative_names", []) or []
+        if isinstance(alternative_names, str):
+            alternative_names = [alternative_names]
+        if len(alternative_names) > 1:
+            # 多别名标题此前只以最后一个别名建缓存；将完整候选写入新键，
+            # 使历史的“未识别”缓存不会阻止本次别名重试。
+            cache_name = "|".join(alternative_names)
+        return f"[{meta_info.type.value}]{cache_name}-{meta_info.year}-{meta_info.begin_season}"
 
     def get_cache_info(self, meta_info):
         """
@@ -696,21 +841,11 @@ class Media:
                     if not file_media_info and self._rmt_match_mode == MatchMode.NORMAL and not strict:
                         # 非严格模式下去掉年份和类型再查一次
                         file_media_info = self.__search_multi_tmdb(file_media_name=meta_info.get_name())
-            if not file_media_info and self._search_tmdbweb:
-                file_media_info = self.__search_tmdb_web(file_media_name=meta_info.get_name(),
+            if not file_media_info and not strict:
+                file_media_info = self.__search_by_title_aliases(meta_info)
+            if not file_media_info and (self._search_tmdbweb or self._search_keyword):
+                file_media_info = self.__search_fallback(meta_info=meta_info,
                                                          mtype=meta_info.type)
-            if not file_media_info and self._search_keyword:
-                cache_name = cacheman["tmdb_supply"].get(meta_info.get_name())
-                is_movie = False
-                if not cache_name:
-                    cache_name, is_movie = self.__search_engine(meta_info.get_name())
-                    cacheman["tmdb_supply"].set(meta_info.get_name(), cache_name)
-                if cache_name:
-                    log.info("【Meta】开始辅助查询：%s ..." % cache_name)
-                    if is_movie:
-                        file_media_info = self.__search_tmdb(file_media_name=cache_name, search_type=MediaType.MOVIE)
-                    else:
-                        file_media_info = self.__search_multi_tmdb(file_media_name=cache_name)
             # 补充全量信息
             if file_media_info and not file_media_info.get("genres"):
                 file_media_info = self.get_tmdb_info(mtype=file_media_info.get("media_type"),
@@ -801,21 +936,10 @@ class Media:
                     if not file_media_info and self._rmt_match_mode == MatchMode.NORMAL and not strict:
                         # 非严格模式下去掉年份和类型再查一次
                         file_media_info = self.__search_multi_tmdb(file_media_name=name)
-            if not file_media_info and self._search_tmdbweb:
-                file_media_info = self.__search_tmdb_web(file_media_name=name,
-                                                         mtype=mtype)
-            if not file_media_info and self._search_keyword:
-                cache_name = cacheman["tmdb_supply"].get(name)
-                is_movie = False
-                if not cache_name:
-                    cache_name, is_movie = self.__search_engine(name)
-                    cacheman["tmdb_supply"].set(name, cache_name)
-                if cache_name:
-                    log.info("【Meta】开始辅助查询：%s ..." % cache_name)
-                    if is_movie:
-                        file_media_info = self.__search_tmdb(file_media_name=cache_name, search_type=MediaType.MOVIE)
-                    else:
-                        file_media_info = self.__search_multi_tmdb(file_media_name=cache_name)
+            if not file_media_info and (self._search_tmdbweb or self._search_keyword):
+                file_media_info = self.__search_fallback(meta_info=meta_info,
+                                                         mtype=mtype,
+                                                         primary_name=name)
             # 补充全量信息
             if file_media_info and not file_media_info.get("genres"):
                 file_media_info = self.get_tmdb_info(mtype=file_media_info.get("media_type"),
@@ -951,23 +1075,11 @@ class Media:
                                 # 去掉年份再查一次，有可能是年份错误
                                 file_media_info = self.__search_tmdb(file_media_name=meta_info.get_name(),
                                                                      search_type=meta_info.type)
-                        if not file_media_info and self._search_tmdbweb:
-                            # 从网站查询
-                            file_media_info = self.__search_tmdb_web(file_media_name=meta_info.get_name(),
+                        if not file_media_info:
+                            file_media_info = self.__search_by_title_aliases(meta_info)
+                        if not file_media_info and (self._search_tmdbweb or self._search_keyword):
+                            file_media_info = self.__search_fallback(meta_info=meta_info,
                                                                      mtype=meta_info.type)
-                        if not file_media_info and self._search_keyword:
-                            cache_name = cacheman["tmdb_supply"].get(meta_info.get_name())
-                            is_movie = False
-                            if not cache_name:
-                                cache_name, is_movie = self.__search_engine(meta_info.get_name())
-                                cacheman["tmdb_supply"].set(meta_info.get_name(), cache_name)
-                            if cache_name:
-                                log.info("【Meta】开始辅助查询：%s ..." % cache_name)
-                                if is_movie:
-                                    file_media_info = self.__search_tmdb(file_media_name=cache_name,
-                                                                         search_type=MediaType.MOVIE)
-                                else:
-                                    file_media_info = self.__search_multi_tmdb(file_media_name=cache_name)
                         # 补全TMDB信息
                         if file_media_info and not file_media_info.get("genres"):
                             file_media_info = self.get_tmdb_info(mtype=file_media_info.get("media_type"),
@@ -2033,6 +2145,29 @@ class Media:
         return []
 
     @staticmethod
+    def __get_search_result_texts(elements):
+        """将搜索页中同一标题内被拆开的高亮词合并为完整标题。"""
+        result_texts = []
+        for element in elements:
+            context = element
+            for parent in element.iterancestors():
+                if str(parent.tag).lower() in ["h1", "h2", "h3"]:
+                    context = parent
+                    break
+            if context is element:
+                text = "".join(element.itertext())
+            else:
+                # 标题的其余文字常包含站点名、简介等。只合并标题中的高亮词，
+                # 既保留“Title 2”里的数字，也不把“ - Wikipedia”带入检索词。
+                highlights = ["".join(highlight.itertext()).strip()
+                              for highlight in context.xpath(".//strong | .//em")]
+                text = " ".join(highlight for highlight in highlights if highlight)
+            text = re.sub(r"\s+", " ", text).strip()
+            if text and text not in result_texts:
+                result_texts.append(text)
+        return result_texts
+
+    @staticmethod
     def __search_engine(feature_name):
         """
         辅助识别关键字
@@ -2075,8 +2210,17 @@ class Media:
                     continue
                 r_dict[s.lower()] = score
 
-        bing_url = "https://www.cn.bing.com/search?q=%s&qs=n&form=QBRE&sp=-1" % feature_name
-        baidu_url = "https://www.baidu.com/s?ie=utf-8&tn=baiduhome_pg&wd=%s" % feature_name
+        bing_url = "https://www.cn.bing.com/search?%s" % urlencode({
+            "q": feature_name,
+            "qs": "n",
+            "form": "QBRE",
+            "sp": "-1"
+        })
+        baidu_url = "https://www.baidu.com/s?%s" % urlencode({
+            "ie": "utf-8",
+            "tn": "baiduhome_pg",
+            "wd": feature_name
+        })
         res_bing = RequestUtils(timeout=5).get_res(url=bing_url)
         res_baidu = RequestUtils(timeout=5).get_res(url=baidu_url)
         ret_dict = {}
@@ -2084,11 +2228,11 @@ class Media:
             html_text = res_bing.text
             if html_text:
                 html = etree.HTML(html_text)
-                strongs_bing = list(
-                    filter(lambda x: (0 if not x else difflib.SequenceMatcher(None, feature_name,
-                                                                              x).ratio()) > KEYWORD_STR_SIMILARITY_THRESHOLD,
-                           map(lambda x: x.text, html.cssselect(
-                               "#sp_requery strong, #sp_recourse strong, #tile_link_cn strong, .b_ad .ad_esltitle~div strong, h2 strong, .b_caption p strong, .b_snippetBigText strong, .recommendationsTableTitle+.b_slideexp strong, .recommendationsTableTitle+table strong, .recommendationsTableTitle+ul strong, .pageRecoContainer .b_module_expansion_control strong, .pageRecoContainer .b_title>strong, .b_rs strong, .b_rrsr strong, #dict_ans strong, .b_listnav>.b_ans_stamp>strong, #b_content #ans_nws .na_cnt strong, .adltwrnmsg strong"))))
+                strongs_bing = [
+                    text for text in Media.__get_search_result_texts(html.cssselect(
+                        "#sp_requery strong, #sp_recourse strong, #tile_link_cn strong, .b_ad .ad_esltitle~div strong, h2 strong, .b_caption p strong, .b_snippetBigText strong, .recommendationsTableTitle+.b_slideexp strong, .recommendationsTableTitle+table strong, .recommendationsTableTitle+ul strong, .pageRecoContainer .b_module_expansion_control strong, .pageRecoContainer .b_title>strong, .b_rs strong, .b_rrsr strong, #dict_ans strong, .b_listnav>.b_ans_stamp>strong, #b_content #ans_nws .na_cnt strong, .adltwrnmsg strong"))
+                    if difflib.SequenceMatcher(None, feature_name, text).ratio() > KEYWORD_STR_SIMILARITY_THRESHOLD
+                ]
                 if strongs_bing:
                     title = html.xpath("//aside//h2[@class = \" b_entityTitle\"]/text()")
                     if len(title) > 0:
@@ -2102,10 +2246,10 @@ class Media:
             html_text = res_baidu.text
             if html_text:
                 html = etree.HTML(html_text)
-                ems = list(
-                    filter(lambda x: (0 if not x else difflib.SequenceMatcher(None, feature_name,
-                                                                              x).ratio()) > KEYWORD_STR_SIMILARITY_THRESHOLD,
-                           map(lambda x: x.text, html.cssselect("em"))))
+                ems = [
+                    text for text in Media.__get_search_result_texts(html.cssselect("em"))
+                    if difflib.SequenceMatcher(None, feature_name, text).ratio() > KEYWORD_STR_SIMILARITY_THRESHOLD
+                ]
                 if len(ems) > 0:
                     cal_score(ems, ret_dict)
         if not ret_dict:
