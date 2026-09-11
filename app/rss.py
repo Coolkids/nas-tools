@@ -1,4 +1,5 @@
 import re
+import time
 import xml.dom.minidom
 from threading import Lock
 
@@ -46,6 +47,7 @@ class Rss:
             return
 
         with lock:
+            started_at = time.perf_counter()
             log.info("【Rss】开始RSS订阅...")
 
             # 读取电影订阅
@@ -281,8 +283,6 @@ class Rss:
                         # 设置下载参数
                         media_info.set_download_info(download_setting=match_info.get("download_setting"),
                                                      save_path=match_info.get("save_path"))
-                        # 插入数据库历史记录
-                        self.dbhelper.insert_rss_torrents(media_info)
                         # 加入下载列表
                         if media_info not in rss_download_torrents:
                             rss_download_torrents.append(media_info)
@@ -293,9 +293,14 @@ class Rss:
                         continue
                 log.info("【Rss】%s 处理结束，匹配到 %s 个有效资源" % (site_name, res_num))
             log.info("【Rss】所有RSS处理结束，共 %s 个有效资源" % len(rss_download_torrents))
+            self.dbhelper.insert_rss_torrents_many(rss_download_torrents)
             # 开始择优下载
             self.download_rss_torrent(rss_download_torrents=rss_download_torrents,
                                       rss_no_exists=rss_no_exists)
+            elapsed = time.perf_counter() - started_at
+            average = elapsed / len(rss_download_torrents) if rss_download_torrents else 0
+            log.info("【Rss】阶段耗时：拉取/解析/识别/数据库/下载总计 %.3fs，处理 %s 条，平均 %.6fs"
+                     % (elapsed, len(rss_download_torrents), average))
 
     @staticmethod
     def parse_rssxml(url):

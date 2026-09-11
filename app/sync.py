@@ -338,8 +338,11 @@ class Sync(object):
             sync_mode = target_dirs.get('syncmod')
             # 只做硬链接，不做识别重命名
             if onlylink:
+                synced_paths = self.dbhelper.get_sync_history_set(target_path)
+                pending_history = []
                 for link_file in PathUtils.get_dir_files(monpath):
-                    if self.dbhelper.is_sync_in_history(link_file, target_path):
+                    normalized_file = os.path.normpath(link_file)
+                    if normalized_file in synced_paths:
                         continue
                     log.info("【Sync】开始同步 %s" % link_file)
                     ret, msg = self.filetransfer.link_sync_file(src_path=monpath,
@@ -349,8 +352,11 @@ class Sync(object):
                     if ret != 0:
                         log.warn("【Sync】%s 同步失败，错误码：%s" % (link_file, ret))
                     elif not msg:
-                        self.dbhelper.insert_sync_history(link_file, monpath, target_path)
+                        synced_paths.add(normalized_file)
+                        pending_history.append((link_file, monpath, target_path))
                         log.info("【Sync】%s 同步完成" % link_file)
+                if pending_history:
+                    self.dbhelper.insert_sync_history_many(pending_history)
             else:
                 for path in PathUtils.get_dir_level1_medias(monpath, RMT_MEDIAEXT):
                     if PathUtils.is_invalid_path(path):

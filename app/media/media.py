@@ -4,6 +4,7 @@ import random
 import re
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlencode
 
 import zhconv
@@ -39,11 +40,15 @@ class Media:
     _rmt_match_mode = None
     _search_keyword = None
     _search_tmdbweb = None
+    _tmdb_clients = None
+    _tmdb_query_cache = None
 
     def __init__(self):
         self.init_config()
 
     def init_config(self):
+        self._tmdb_query_cache = {}
+        self._tmdb_clients = []
         app = Config().get_config('app')
         laboratory = Config().get_config('laboratory')
         if app:
@@ -58,15 +63,18 @@ class Media:
                 self.tmdb.language = 'zh'
                 self.tmdb.proxies = Config().get_proxies()
                 self.tmdb.debug = True
-                self.search = Search()
-                self.movie = Movie()
-                self.tv = TV()
-                self.episode = Episode()
-                self.find = Find()
-                self.person = Person()
-                self.trending = Trending()
-                self.discover = Discover()
-                self.genre = Genre()
+                clients = [Search, Movie, TV, Episode, Find, Person, Trending, Discover, Genre]
+                instances = []
+                for client_type in clients:
+                    client = client_type(session=self.tmdb._session)
+                    client.api_key = app.get('rmt_tmdbkey')
+                    client.domain = self.tmdb.domain
+                    client.proxies = Config().get_proxies()
+                    client.cache = True
+                    instances.append(client)
+                (self.search, self.movie, self.tv, self.episode, self.find,
+                 self.person, self.trending, self.discover, self.genre) = instances
+                self._tmdb_clients = [self.tmdb, *instances]
                 self.meta = MetaHelper()
             rmt_match_mode = app.get('rmt_match_mode', 'normal')
             if rmt_match_mode:
@@ -158,10 +166,39 @@ class Media:
             return None
         if not file_media_name:
             return None
+        language = language or 'zh-CN'
+        cache_key = (file_media_name, search_type, first_media_year,
+                     media_year, season_number, language)
+        if cache_key in self._tmdb_query_cache:
+            return self._tmdb_query_cache[cache_key]
+        try:
+            result = self.__search_tmdb_uncached(
+                file_media_name, search_type, first_media_year,
+                media_year, season_number, language)
+        except TMDbException:
+            # 网络、限流等暂态失败不能污染批次缓存。
+            raise
+        self._tmdb_query_cache[cache_key] = result
+        return result
+
+    def _set_tmdb_language(self, language):
+        for client in self._tmdb_clients or []:
+            client.language = language
+
+    def __search_tmdb_uncached(self, file_media_name,
+                      search_type,
+                      first_media_year=None,
+                      media_year=None,
+                      season_number=None,
+                      language=None):
+        if not self.search:
+            return None
+        if not file_media_name:
+            return None
         if language:
-            self.tmdb.language = language
+            self._set_tmdb_language(language)
         else:
-            self.tmdb.language = 'zh-CN'
+            self._set_tmdb_language('zh-CN')
         # TMDB检索
         info = {}
         if search_type == MediaType.MOVIE:
@@ -643,9 +680,9 @@ class Media:
             log.error("【Meta】TMDB API Key 未设置！")
             return None
         if language:
-            self.tmdb.language = language
+            self._set_tmdb_language(language)
         else:
-            self.tmdb.language = 'zh-CN'
+            self._set_tmdb_language('zh-CN')
         if mtype == MediaType.MOVIE:
             tmdb_info = self.__get_tmdb_movie_detail(tmdbid, append_to_response)
             if tmdb_info:
@@ -670,7 +707,7 @@ class Media:
         # 查找中文名
         org_title = tmdb_info.get("title") if tmdb_info.get("media_type") == MediaType.MOVIE else tmdb_info.get(
             "name")
-        if not StringUtils.is_chinese(org_title) and self.tmdb.language == 'zh-CN':
+        if not StringUtils.is_chinese(org_title) and (self.tmdb.language == 'zh-CN'):
             cn_title = self.__get_tmdb_chinese_title(tmdbinfo=tmdb_info)
             if cn_title and cn_title != org_title:
                 if tmdb_info.get("media_type") == MediaType.MOVIE:
@@ -1195,7 +1232,7 @@ class Media:
         ret_infos = []
         for info in infos:
             tmdbid = info.get("id")
-            vote = round(float(info.get("vote_average")), 1) if info.get("vote_average") else 0,
+            vote = round(float(info.get("vote_average")), 1) if info.get("vote_average") else 0
             image = TMDB_IMAGE_W500_URL % info.get("poster_path")
             overview = info.get("overview")
             if mtype:
@@ -2221,8 +2258,12 @@ class Media:
             "tn": "baiduhome_pg",
             "wd": feature_name
         })
-        res_bing = RequestUtils(timeout=5).get_res(url=bing_url)
-        res_baidu = RequestUtils(timeout=5).get_res(url=baidu_url)
+        # 两个搜索引擎相互独立，固定两个 I/O worker 避免回退阶段串行等待。
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="media-search") as executor:
+            bing_future = executor.submit(RequestUtils(timeout=5).get_res, url=bing_url)
+            baidu_future = executor.submit(RequestUtils(timeout=5).get_res, url=baidu_url)
+            res_bing = bing_future.result()
+            res_baidu = baidu_future.result()
         ret_dict = {}
         if res_bing and res_bing.status_code == 200:
             html_text = res_bing.text
@@ -2444,13 +2485,13 @@ class Media:
         if revenue:
             result.append({"收入": StringUtils.str_amount(revenue)})
         budget = media_info.tmdb_info.get("budget")
-        if media_info.vote_average:
-            result.append({"成本": StringUtils.str_amount(budget)})
         if budget:
+            result.append({"成本": StringUtils.str_amount(budget)})
+        if media_info.original_language:
             result.append({"原始语言": media_info.original_language})
         production_country = self.get_get_production_country_names(tmdbinfo=media_info.tmdb_info)
         if production_country:
-            result.append({"出品国家": production_country}),
+            result.append({"出品国家": production_country})
         production_company = self.get_tmdb_production_company_names(tmdbinfo=media_info.tmdb_info)
         if production_company:
             result.append({"制作公司": production_company})

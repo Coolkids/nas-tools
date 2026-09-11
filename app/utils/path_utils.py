@@ -6,49 +6,47 @@ import hashlib
 class PathUtils:
 
     @staticmethod
-    def get_dir_files(in_path, exts="", filesize=0, episode_format=None):
+    def iter_dir_files(in_path, exts="", filesize=0, episode_format=None):
         """
-        获得目录下的媒体文件列表List ，按后缀、大小、格式过滤
+        生成目录下的媒体文件，按后缀、大小、格式过滤。
         """
         if not in_path:
-            return []
+            return
         if not os.path.exists(in_path):
-            return []
-        ret_list = []
+            return
+        extensions = {ext.lower() for ext in exts} if not isinstance(exts, str) else None
+
+        def matches(path, filename):
+            if PathUtils.is_invalid_path(path):
+                return False
+            if episode_format and not episode_format.match(filename):
+                return False
+            suffix = os.path.splitext(filename)[-1].lower()
+            if exts and ((suffix not in extensions) if extensions is not None else suffix not in exts):
+                return False
+            return not filesize or os.path.getsize(path) >= filesize
+
         if os.path.isdir(in_path):
             for root, dirs, files in os.walk(in_path):
+                dirs[:] = [name for name in dirs
+                           if not PathUtils.is_invalid_path(os.path.join(root, name))]
                 for file in files:
                     cur_path = os.path.join(root, file)
-                    # 检查路径是否合法
-                    if PathUtils.is_invalid_path(cur_path):
-                        continue
-                    # 检查格式匹配
-                    if episode_format and not episode_format.match(file):
-                        continue
-                    # 检查后缀
-                    if exts and os.path.splitext(file)[-1].lower() not in exts:
-                        continue
-                    # 检查文件大小
-                    if filesize and os.path.getsize(cur_path) < filesize:
-                        continue
-                    # 命中
-                    if cur_path not in ret_list:
-                        ret_list.append(cur_path)
+                    if matches(cur_path, file):
+                        yield cur_path
         else:
-            # 检查路径是否合法
-            if PathUtils.is_invalid_path(in_path):
-                return []
-            # 检查后缀
-            if exts and os.path.splitext(in_path)[-1].lower() not in exts:
-                return []
-            # 检查格式
-            if episode_format and not episode_format.match(os.path.basename(in_path)):
-                return []
-            # 检查文件大小
-            if filesize and os.path.getsize(in_path) < filesize:
-                return []
-            ret_list.append(in_path)
-        return ret_list
+            if matches(in_path, os.path.basename(in_path)):
+                yield in_path
+
+    @staticmethod
+    def get_dir_files(in_path, exts="", filesize=0, episode_format=None):
+        """获得目录下的媒体文件列表，保留旧的列表接口。"""
+        return list(PathUtils.iter_dir_files(in_path, exts, filesize, episode_format))
+
+    @staticmethod
+    def has_matching_file(in_path, exts="", filesize=0, episode_format=None):
+        """只判断是否存在匹配文件，命中后立即停止遍历。"""
+        return next(PathUtils.iter_dir_files(in_path, exts, filesize, episode_format), None) is not None
 
     @staticmethod
     def get_dir_level1_files(in_path, exts=""):
@@ -58,11 +56,11 @@ class PathUtils:
         ret_list = []
         if not os.path.exists(in_path):
             return []
-        for file in os.listdir(in_path):
-            path = os.path.join(in_path, file)
-            if os.path.isfile(path):
-                if not exts or os.path.splitext(file)[-1].lower() in exts:
-                    ret_list.append(path)
+        with os.scandir(in_path) as entries:
+            for entry in entries:
+                if entry.is_file():
+                    if not exts or os.path.splitext(entry.name)[-1].lower() in exts:
+                        ret_list.append(entry.path)
         return ret_list
 
     @staticmethod

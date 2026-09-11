@@ -49,7 +49,9 @@ class Scheduler:
                                                  'default': ThreadPoolExecutor(20)
                                              },
                                              job_defaults={
-                                                 'max_instances': 3  # 允许最多3个实例同时运行
+                                                 'max_instances': 1,
+                                                 'coalesce': True,
+                                                 'misfire_grace_time': 300
                                              })
         if not self.SCHEDULER:
             return

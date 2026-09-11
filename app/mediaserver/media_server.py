@@ -1,8 +1,9 @@
 import threading
+import time
 
 import log
 from app.conf import ModuleConf
-from app.db import MediaDb
+from app.db import MediaDb, get_db_metrics
 from app.helper import ProgressHelper, SubmoduleHelper
 from app.utils import ExceptionUtils
 from app.utils.commons import singleton
@@ -167,6 +168,9 @@ class MediaServer:
         if not self.server:
             return
         with lock:
+            started_at = time.perf_counter()
+            fetch_started_at = started_at
+            all_items = []
             # 开始进度条
             log.info("【MediaServer】开始同步媒体库数据...")
             self.progress.start("mediasync")
@@ -177,25 +181,33 @@ class MediaServer:
             total_count = 0
             movie_count = 0
             tv_count = 0
-            # 清空登记薄
-            self.mediadb.empty()
+            # 完整拉取成功后再替换旧索引，避免网络失败导致旧数据被清空。
             for library in self.get_libraries():
-                # 获取媒体库所有项目
                 self.progress.update(ptype="mediasync",
                                      text="正在获取 %s 数据..." % (library.get("name")))
-                for item in self.get_items(library.get("id")):
-                    if not item:
-                        continue
-                    if self.mediadb.insert(self._server_type.value, item):
-                        total_count += 1
-                        if item.get("type") in ['Movie', 'movie']:
-                            movie_count += 1
-                        elif item.get("type") in ['Series', 'show']:
-                            tv_count += 1
-                        self.progress.update(ptype="mediasync",
-                                             text="正在同步 %s，已完成：%s / %s ..." % (
-                                                 library.get("name"), total_count, total_media_count),
-                                             value=round(100 * total_count / total_media_count, 1))
+                items = self.get_items(library.get("id")) or []
+                for item in items:
+                    if item:
+                        item.setdefault("library", library.get("name"))
+                        all_items.append(item)
+                self.progress.update(
+                    ptype="mediasync",
+                    text="已拉取 %s，累计：%s ..." % (library.get("name"), len(all_items)))
+            fetch_elapsed = time.perf_counter() - fetch_started_at
+
+            db_started_at = time.perf_counter()
+            replaced_count = self.mediadb.replace(self._server_type.value, all_items)
+            if replaced_count is False:
+                log.error("【MediaServer】媒体库索引替换失败，保留旧索引")
+                self.progress.end("mediasync")
+                return
+            total_count = replaced_count
+            for item in all_items:
+                if item.get("type") in ['Movie', 'movie']:
+                    movie_count += 1
+                elif item.get("type") in ['Series', 'show']:
+                    tv_count += 1
+            db_elapsed = time.perf_counter() - db_started_at
             # 更新总体同步情况
             self.mediadb.statistics(server_type=self._server_type.value,
                                     total_count=total_count,
@@ -207,6 +219,13 @@ class MediaServer:
                                  text="媒体库数据同步完成，同步数量：%s" % total_count)
             self.progress.end("mediasync")
             log.info("【MediaServer】媒体库数据同步完成，同步数量：%s" % total_count)
+            total_elapsed = time.perf_counter() - started_at
+            avg_elapsed = total_elapsed / total_count if total_count else 0
+            log.info("【MediaServer】同步阶段耗时：拉取 %.3fs，数据库写入 %.3fs，总计 %.3fs，"
+                     "条数 %s，单条 %.6fs" %
+                     (fetch_elapsed, db_elapsed, total_elapsed, total_count, avg_elapsed))
+            log.info("【MediaServer】SQLite 指标：提交 %s 次，重试 %s 次" %
+                     (get_db_metrics().get("commits", 0), get_db_metrics().get("retries", 0)))
 
     def check_item_exists(self, title, year=None, tmdbid=None):
         """

@@ -255,6 +255,7 @@ class RSSTORRENTS(Base):
     __tablename__ = 'RSS_TORRENTS'
     __table_args__ = (
         Index('INDX_RSS_TORRENTS_NAME', 'TITLE', 'YEAR', 'SEASON', 'EPISODE'),
+        Index('UN_INDX_RSS_TORRENTS_ENCLOSURE', 'ENCLOSURE', unique=True),
     )
 
     ID = Column(Integer, Sequence('ID'), primary_key=True)
@@ -409,6 +410,12 @@ class SITEBRUSHTASK(Base):
 
 class SITEBRUSHTORRENTS(Base):
     __tablename__ = 'SITE_BRUSH_TORRENTS'
+    __table_args__ = (
+        Index('UN_INDX_SITE_BRUSH_TORRENTS_TASK_NAME_ENCLOSURE',
+              'TASK_ID', 'TORRENT_NAME', 'ENCLOSURE', unique=True),
+        Index('INDX_SITE_BRUSH_TORRENTS_TASK_DOWNLOAD',
+              'TASK_ID', 'DOWNLOAD_ID'),
+    )
 
     ID = Column(Integer, Sequence('ID'), primary_key=True)
     TASK_ID = Column(Text, index=True)
@@ -426,8 +433,7 @@ class SITEBRUSHTORRENTS(Base):
 class SITESTATISTICSHISTORY(Base):
     __tablename__ = 'SITE_STATISTICS_HISTORY'
     __table_args__ = (
-        Index('INDX_SITE_STATISTICS_HISTORY_DS', 'DATE', 'URL'),
-        Index('UN_INDX_SITE_STATISTICS_HISTORY_DS', 'DATE', 'URL', unique=True)
+        Index('UN_INDX_SITE_STATISTICS_HISTORY_DS', 'DATE', 'URL', unique=True),
     )
 
     ID = Column(Integer, Sequence('ID'), primary_key=True)
@@ -488,6 +494,9 @@ class SITEUSERSEEDINGINFO(Base):
 
 class SYNCHISTORY(Base):
     __tablename__ = 'SYNC_HISTORY'
+    __table_args__ = (
+        Index('UN_INDX_SYNC_HISTORY_PATH_DEST', 'PATH', 'DEST', unique=True),
+    )
 
     ID = Column(Integer, Sequence('ID'), primary_key=True)
     PATH = Column(Text, index=True)
@@ -517,6 +526,10 @@ class TRANSFERBLACKLIST(Base):
 
 class TRANSFERHISTORY(Base):
     __tablename__ = 'TRANSFER_HISTORY'
+    __table_args__ = (
+        Index('INDX_TRANSFER_HISTORY_SOURCE_DEST',
+              'SOURCE_PATH', 'SOURCE_FILENAME', 'DEST_PATH', 'DEST_FILENAME'),
+    )
 
     ID = Column(Integer, Sequence('ID'), primary_key=True)
     MODE = Column(Text)
@@ -562,6 +575,7 @@ class MEDIASYNCITEMS(BaseMedia):
     __tablename__ = 'MEDIASYNC_ITEMS'
     __table_args__ = (
         Index('INDX_MEDIASYNC_ITEMS_SL', 'SERVER', 'LIBRARY'),
+        Index('UN_INDX_MEDIASYNC_ITEMS_SERVER_ITEM', 'SERVER', 'ITEM_ID', unique=True),
     )
 
     ID = Column(Integer, Sequence('ID'), primary_key=True)

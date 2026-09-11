@@ -8,8 +8,10 @@ class SecurityHelper:
     media_server_webhook_allow_ip = {}
     telegram_webhook_allow_ip = {}
     synology_webhook_allow_ip = {}
+    _network_cache = {}
 
     def __init__(self):
+        self._network_cache = {}
         security = Config().get_config('security')
         if security:
             self.media_server_webhook_allow_ip = security.get('media_server_webhook_allow_ip') or {}
@@ -44,22 +46,29 @@ class SecurityHelper:
                     return True
                 allow_ipv4s = allow_ips.get('ipv4').split(",")
                 for allow_ipv4 in allow_ipv4s:
-                    if ipaddr in ipaddress.ip_network(allow_ipv4):
+                    if ipaddr in SecurityHelper._get_network(allow_ipv4):
                         return True
             elif ipaddr.ipv4_mapped:
                 if not allow_ips.get('ipv4'):
                     return True
                 allow_ipv4s = allow_ips.get('ipv4').split(",")
                 for allow_ipv4 in allow_ipv4s:
-                    if ipaddr.ipv4_mapped in ipaddress.ip_network(allow_ipv4):
+                    if ipaddr.ipv4_mapped in SecurityHelper._get_network(allow_ipv4):
                         return True
             else:
                 if not allow_ips.get('ipv6'):
                     return True
                 allow_ipv6s = allow_ips.get('ipv6').split(",")
                 for allow_ipv6 in allow_ipv6s:
-                    if ipaddr in ipaddress.ip_network(allow_ipv6):
+                    if ipaddr in SecurityHelper._get_network(allow_ipv6):
                         return True
         except Exception as e:
             ExceptionUtils.exception_traceback(e)
         return False
+
+    @staticmethod
+    def _get_network(cidr):
+        cidr = cidr.strip()
+        if cidr not in SecurityHelper._network_cache:
+            SecurityHelper._network_cache[cidr] = ipaddress.ip_network(cidr)
+        return SecurityHelper._network_cache[cidr]

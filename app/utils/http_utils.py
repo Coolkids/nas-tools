@@ -16,6 +16,7 @@ class RequestUtils:
     _proxies = None
     _timeout = 5
     _session = None
+    _shared_session = requests.Session()
 
     def __init__(self,
                  headers=None,
@@ -56,6 +57,11 @@ class RequestUtils:
         if timeout:
             self._timeout = timeout
 
+    @property
+    def session(self):
+        """优先使用显式传入的会话，否则使用进程级连接池。"""
+        return self._session or self._shared_session
+
     def _retry_callback(self, retry_state):
         """重试失败后的回调函数，返回None而不是抛出异常,避免修改后续逻辑"""
         logger.warning(f"所有重试都失败了，最后异常: {retry_state.outcome.exception()}")
@@ -75,8 +81,8 @@ class RequestUtils:
         if json is None:
             json = {}
         try:
-            if self._session:
-                response = self._session.post(url,
+            if self.session:
+                response = self.session.post(url,
                                           data=params,
                                           verify=False,
                                           headers=self._headers,
@@ -84,13 +90,9 @@ class RequestUtils:
                                           timeout=self._timeout,
                                           json=json)
             else:
-                response = requests.post(url,
-                                     data=params,
-                                     verify=False,
-                                     headers=self._headers,
-                                     proxies=self._proxies,
-                                     timeout=self._timeout,
-                                     json=json)
+                response = requests.post(url, data=params, verify=False,
+                                         headers=self._headers, proxies=self._proxies,
+                                         timeout=self._timeout, json=json)
             if response.status_code >= 500:
                 response.raise_for_status()
             return response
@@ -110,19 +112,16 @@ class RequestUtils:
     )
     def get(self, url, params=None):
         try:
-            if self._session:
-                r = self._session.get(url,
+            if self.session:
+                r = self.session.get(url,
                                       verify=False,
                                       headers=self._headers,
                                       proxies=self._proxies,
                                       timeout=self._timeout,
                                       params=params)
             else:
-                r = requests.get(url,
-                                 verify=False,
-                                 headers=self._headers,
-                                 proxies=self._proxies,
-                                 timeout=self._timeout,
+                r = requests.get(url, verify=False, headers=self._headers,
+                                 proxies=self._proxies, timeout=self._timeout,
                                  params=params)
             if r.status_code >= 500:
                 r.raise_for_status()
@@ -143,24 +142,15 @@ class RequestUtils:
     )
     def get_res(self, url, params=None, allow_redirects=True):
         try:
-            if self._session:
-                return self._session.get(url,
-                                         params=params,
-                                         verify=False,
-                                         headers=self._headers,
-                                         proxies=self._proxies,
-                                         cookies=self._cookies,
-                                         timeout=self._timeout,
-                                         allow_redirects=allow_redirects)
-            else:
-                return requests.get(url,
-                                    params=params,
-                                    verify=False,
-                                    headers=self._headers,
-                                    proxies=self._proxies,
-                                    cookies=self._cookies,
-                                    timeout=self._timeout,
-                                    allow_redirects=allow_redirects)
+            response = self.session.get(
+                url,
+                params=params,
+                verify=False,
+                headers=self._headers,
+                proxies=self._proxies,
+                cookies=self._cookies,
+                timeout=self._timeout,
+                allow_redirects=allow_redirects)
             if response.status_code >= 500:
                 response.raise_for_status()
             return response

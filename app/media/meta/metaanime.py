@@ -160,9 +160,17 @@ class MetaAnime(MetaBase):
                     anitopy_info_origin.get("release_group") or \
                     ReleaseGroupsMatcher().match(title=original_title) or None
                 # 视频编码
-                self.video_encode = anitopy_info.get("video_term")
-                if isinstance(self.video_encode, list):
-                    self.video_encode = self.video_encode[0]
+                video_terms = anitopy_info.get("video_term") or []
+                if not isinstance(video_terms, list):
+                    video_terms = [video_terms]
+                # AniList 偶尔会把 1080P/2160P 作为视频术语返回。
+                # 将其归一化为分辨率，同时保留真正的视频编码。
+                for video_term in video_terms:
+                    if re.fullmatch(r"\d{3,4}p", str(video_term), re.IGNORECASE):
+                        if not self.resource_pix:
+                            self.resource_pix = str(video_term).lower()
+                    elif not self.video_encode:
+                        self.video_encode = video_term
                 # 音频编码
                 self.audio_encode = anitopy_info.get("audio_term")
                 if isinstance(self.audio_encode, list):

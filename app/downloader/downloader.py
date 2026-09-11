@@ -473,6 +473,7 @@ class Downloader:
 
         # 已下载的项目
         return_items = []
+        downloaded_item_ids = set()
         # 返回按季、集数倒序排序的列表
         download_list = self.get_download_list(media_list)
 
@@ -505,6 +506,17 @@ class Downloader:
                 media_alternatives[media_name] = []
             media_alternatives[media_name].append(t_item)
 
+        # 一次构建候选索引，避免每个 TMDB/季集组合重复扫描全量种子。
+        tv_candidates = {}
+        season_candidates = {}
+        for item in download_list:
+            if item.type == MediaType.MOVIE:
+                continue
+            tv_candidates.setdefault(item.tmdb_id, []).append(item)
+            seasons = item.get_season_list()
+            if len(seasons) == 1:
+                season_candidates.setdefault((item.tmdb_id, seasons[0]), []).append(item)
+
         def __download(download_item, torrent_file=None, tag=None, is_paused=None):
             """
             下载及发送通知
@@ -518,8 +530,9 @@ class Downloader:
                 tag=tag,
                 is_paused=is_paused)
             if state:
-                if download_item not in return_items:
+                if id(download_item) not in downloaded_item_ids:
                     return_items.append(download_item)
+                    downloaded_item_ids.add(id(download_item))
                 self.message.send_download_message(in_from, download_item)
             else:
                 self.message.send_download_fail_message(download_item, msg)
@@ -535,7 +548,7 @@ class Downloader:
                 media_name = download_item.get_title_string()
             alternatives = media_alternatives.get(media_name, [])
             for alt in alternatives:
-                if alt is download_item or alt in return_items:
+                if alt is download_item or id(alt) in downloaded_item_ids:
                     continue
                 log.info("【Downloader】%s 从 %s 下载失败，尝试从 %s 下载..."
                          % (media_name, download_item.site or "未知站点", alt.site or "未知站点"))
@@ -599,7 +612,7 @@ class Downloader:
                         need_seasons[need_tmdbid].append(tv.get("season") or 1)
             # 查找整季包含的种子，只处理整季没集的种子或者是集数超过季的种子
             for need_tmdbid, need_season in need_seasons.items():
-                for item in download_list:
+                for item in tv_candidates.get(need_tmdbid, ()):
                     if item.type == MediaType.MOVIE:
                         continue
                     item_season = item.get_season_list()
@@ -642,11 +655,11 @@ class Downloader:
                     # 缺失整季的转化为缺失集进行比较
                     if not need_episodes:
                         need_episodes = list(range(1, total_episodes + 1))
-                    for item in download_list:
+                    for item in season_candidates.get((need_tmdbid, need_season), ()):
                         if item.type == MediaType.MOVIE:
                             continue
                         if item.tmdb_id == need_tmdbid:
-                            if item in return_items:
+                            if id(item) in downloaded_item_ids:
                                 continue
                             item_season = item.get_season_list()
                             if len(item_season) != 1 or item_season[0] != need_season:
@@ -677,10 +690,10 @@ class Downloader:
                     need_episodes = tv.get("episodes")
                     if not need_episodes:
                         continue
-                    for item in download_list:
+                    for item in season_candidates.get((need_tmdbid, need_season), ()):
                         if item.type == MediaType.MOVIE:
                             continue
-                        if item in return_items:
+                        if id(item) in downloaded_item_ids:
                             continue
                         if not need_episodes:
                             break
@@ -737,6 +750,7 @@ class Downloader:
                             _client.start_torrents(torrent_id)
                             # 记录下载项
                             return_items.append(item)
+                            downloaded_item_ids.add(id(item))
                 index += 1
 
         # 返回下载的资源，剩下没下完的

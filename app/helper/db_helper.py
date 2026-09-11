@@ -181,27 +181,57 @@ class DbHelper:
         """
         将RSS的记录插入数据库
         """
-        self._db.insert(
-            RSSTORRENTS(
-                TORRENT_NAME=media_info.org_string,
-                ENCLOSURE=media_info.enclosure,
-                TYPE=media_info.type.value,
-                TITLE=media_info.title,
-                YEAR=media_info.year,
-                SEASON=media_info.get_season_string(),
-                EPISODE=media_info.get_episode_string()
-            ))
+        self._db.upsert_many(RSSTORRENTS, [{
+            "TORRENT_NAME": media_info.org_string,
+            "ENCLOSURE": media_info.enclosure,
+            "TYPE": media_info.type.value,
+            "TITLE": media_info.title,
+            "YEAR": media_info.year,
+            "SEASON": media_info.get_season_string(),
+            "EPISODE": media_info.get_episode_string()
+        }], ("ENCLOSURE",),
+            ("TORRENT_NAME", "TYPE", "TITLE", "YEAR", "SEASON", "EPISODE"))
+
+    @DbPersist(_db)
+    def insert_rss_torrents_many(self, media_infos):
+        """批量插入 RSS 历史，去重和提交都在批次级别完成。"""
+        rows = []
+        seen = set()
+        for media_info in media_infos or []:
+            if not media_info:
+                continue
+            key = media_info.enclosure or media_info.org_string
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            rows.append({
+                "TORRENT_NAME": media_info.org_string,
+                "ENCLOSURE": media_info.enclosure,
+                "TYPE": media_info.type.value,
+                "TITLE": media_info.title,
+                "YEAR": media_info.year,
+                "SEASON": media_info.get_season_string(),
+                "EPISODE": media_info.get_episode_string()
+            })
+        return self._db.upsert_many(
+            RSSTORRENTS,
+            rows,
+            ("ENCLOSURE",),
+            ("TORRENT_NAME", "TYPE", "TITLE", "YEAR", "SEASON", "EPISODE")
+        )
 
     @DbPersist(_db)
     def simple_insert_rss_torrents(self, title, enclosure):
         """
         将RSS的记录插入数据库
         """
-        self._db.insert(
-            RSSTORRENTS(
-                TORRENT_NAME=title,
-                ENCLOSURE=enclosure
-            ))
+        if enclosure:
+            self._db.upsert_many(RSSTORRENTS, [{
+                "TORRENT_NAME": title,
+                "ENCLOSURE": enclosure
+            }], ("ENCLOSURE",))
+        else:
+            self._db.insert(RSSTORRENTS(TORRENT_NAME=title, ENCLOSURE=enclosure))
 
     @DbPersist(_db)
     def simple_delete_rss_torrents(self, title, enclosure):
@@ -1173,14 +1203,32 @@ class DbHelper:
         """
         if not path or not dest:
             return
-        if self.is_sync_in_history(path, dest):
-            return
-        else:
-            self._db.insert(SYNCHISTORY(
-                PATH=os.path.normpath(path),
-                SRC=os.path.normpath(src),
-                DEST=os.path.normpath(dest)
-            ))
+        self._db.upsert_many(SYNCHISTORY, [{
+            "PATH": os.path.normpath(path),
+            "SRC": os.path.normpath(src),
+            "DEST": os.path.normpath(dest)
+        }], ("PATH", "DEST"), ("SRC",))
+
+    def get_sync_history_set(self, dest):
+        """按目标目录预加载已同步的规范化路径。"""
+        if not dest:
+            return set()
+        return {os.path.normpath(path) for path, in self._db.query(SYNCHISTORY.PATH)
+                .filter(SYNCHISTORY.DEST == os.path.normpath(dest)).all()}
+
+    @DbPersist(_db)
+    def insert_sync_history_many(self, records):
+        rows = []
+        seen = set()
+        for path, src, dest in records or []:
+            if not path or not dest:
+                continue
+            key = (os.path.normpath(path), os.path.normpath(dest))
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({"PATH": key[0], "SRC": os.path.normpath(src), "DEST": key[1]})
+        return self._db.upsert_many(SYNCHISTORY, rows, ("PATH", "DEST"), ("SRC",))
 
     def get_users(self, ):
         """
@@ -1457,6 +1505,8 @@ class DbHelper:
         if not site_user_infos:
             return
         date_now = time.strftime('%Y-%m-%d', time.localtime(time.time()))
+        rows = []
+        seen_urls = set()
         for site_user_info in site_user_infos:
             site = site_user_info.site_name
             upload = site_user_info.upload
@@ -1468,35 +1518,22 @@ class DbHelper:
             leeching = site_user_info.leeching
             bonus = site_user_info.bonus
             url = site_user_info.site_url
-            if not self.is_site_statistics_history_exists(date=date_now, url=url):
-                self._db.insert(SITESTATISTICSHISTORY(
-                    SITE=site,
-                    USER_LEVEL=user_level,
-                    DATE=date_now,
-                    UPLOAD=upload,
-                    DOWNLOAD=download,
-                    RATIO=ratio,
-                    SEEDING=seeding,
-                    LEECHING=leeching,
-                    SEEDING_SIZE=seeding_size,
-                    BONUS=bonus,
-                    URL=url
-                ))
-            else:
-                self._db.query(SITESTATISTICSHISTORY).filter(SITESTATISTICSHISTORY.DATE == date_now,
-                                                             SITESTATISTICSHISTORY.URL == url).update(
-                    {
-                        "SITE": site,
-                        "USER_LEVEL": user_level,
-                        "UPLOAD": upload,
-                        "DOWNLOAD": download,
-                        "RATIO": ratio,
-                        "SEEDING": seeding,
-                        "LEECHING": leeching,
-                        "SEEDING_SIZE": seeding_size,
-                        "BONUS": bonus
-                    }
-                )
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            rows.append({
+                "SITE": site, "USER_LEVEL": user_level, "DATE": date_now,
+                "UPLOAD": upload, "DOWNLOAD": download, "RATIO": ratio,
+                "SEEDING": seeding, "LEECHING": leeching,
+                "SEEDING_SIZE": seeding_size, "BONUS": bonus, "URL": url
+            })
+        self._db.upsert_many(
+            SITESTATISTICSHISTORY,
+            rows,
+            ("DATE", "URL"),
+            ("SITE", "USER_LEVEL", "UPLOAD", "DOWNLOAD", "RATIO", "SEEDING",
+             "LEECHING", "SEEDING_SIZE", "BONUS")
+        )
 
     def get_site_statistics_history(self, site, days=30):
         """
@@ -1801,17 +1838,16 @@ class DbHelper:
         """
         if not brush_id:
             return
-        if self.is_brushtask_torrent_exists(brush_id, title, enclosure):
-            return
-        self._db.insert(SITEBRUSHTORRENTS(
-            TASK_ID=brush_id,
-            TORRENT_NAME=title,
-            TORRENT_SIZE=size,
-            ENCLOSURE=enclosure,
-            DOWNLOADER=downloader,
-            DOWNLOAD_ID=download_id,
-            LST_MOD_DATE=time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))
-        ))
+        self._db.upsert_many(SITEBRUSHTORRENTS, [{
+            "TASK_ID": brush_id,
+            "TORRENT_NAME": title,
+            "TORRENT_SIZE": size,
+            "ENCLOSURE": enclosure,
+            "DOWNLOADER": downloader,
+            "DOWNLOAD_ID": download_id,
+            "LST_MOD_DATE": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))
+        }], ("TASK_ID", "TORRENT_NAME", "ENCLOSURE"),
+            ("TORRENT_SIZE", "DOWNLOADER", "DOWNLOAD_ID", "LST_MOD_DATE"))
 
     def get_brushtask_torrents(self, brush_id, active=True):
         """

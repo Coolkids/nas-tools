@@ -3,11 +3,11 @@
 import log
 import os
 import time
-from functools import lru_cache
-
 import random
 import requests
 import requests.exceptions
+import threading
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from .as_obj import AsObj
@@ -23,16 +23,25 @@ class TMDb(object):
     TMDB_PROXIES = "TMDB_PROXIES"
     TMDB_DOMAIN = "TMDB_DOMAIN"
     REQUEST_CACHE_MAXSIZE = 20000
+    _parsed_cache = {}
+    _parsed_cache_lock = threading.Lock()
+    _cache_session = requests.Session()
+    _cache_hits = 0
+    _cache_misses = 0
 
     def __init__(self, obj_cached=True, session=None):
         self._session = requests.Session() if session is None else session
         self._remaining = 40
         self._reset = None
         self.obj_cached = obj_cached
-        if os.environ.get(self.TMDB_LANGUAGE) is None:
-            os.environ[self.TMDB_LANGUAGE] = "zh-CN"
-        if not os.environ.get(self.TMDB_DOMAIN):
-            os.environ[self.TMDB_DOMAIN] = "https://api.themoviedb.org/3"
+        self._language = "zh-CN"
+        self._domain = "https://api.themoviedb.org/3"
+        self._api_key = None
+        self._proxies = None
+        self._wait_on_rate_limit = True
+        self._debug = False
+        self._cache = True
+        self._metadata = {}
 
         self._api_keys = []
         self._load_api_keys()
@@ -52,25 +61,27 @@ class TMDb(object):
 
     @property
     def page(self):
-        return os.environ["page"]
+        return self._metadata.get("page")
 
     @property
     def total_results(self):
-        return os.environ["total_results"]
+        return self._metadata.get("total_results")
 
     @property
     def total_pages(self):
-        return os.environ["total_pages"]
+        return self._metadata.get("total_pages")
 
     @property
     def api_key(self):
+        if not self._api_keys and self._api_key:
+            self._api_keys = [key.strip() for key in str(self._api_key).split(";") if key.strip()]
         if not self._api_keys:
             self._load_api_keys()
         return self._random_api_key()
 
     @property
     def domain(self):
-        return os.environ.get(self.TMDB_DOMAIN)
+        return self._domain
 
     @domain.setter
     def domain(self, domain):
@@ -79,13 +90,13 @@ class TMDb(object):
                 domain = "https://%s" % domain
             if not str(domain).endswith('/3'):
                 domain = "%s/3" % domain
-            os.environ[self.TMDB_DOMAIN] = str(domain)
+            self._domain = str(domain)
         else:
-            os.environ[self.TMDB_DOMAIN] = ''
+            self._domain = ''
 
     @property
     def proxies(self):
-        return os.environ.get(self.TMDB_PROXIES)
+        return self._proxies
 
     @proxies.setter
     def proxies(self, proxies):
@@ -96,54 +107,49 @@ class TMDb(object):
                     continue
                 proxies_strs.append("'%s': '%s'" % (key, value))
             if proxies_strs:
-                os.environ[self.TMDB_PROXIES] = "{%s}" % ",".join(proxies_strs)
+                self._proxies = "{%s}" % ",".join(proxies_strs)
             else:
-                os.environ[self.TMDB_PROXIES] = 'None'
+                self._proxies = 'None'
+        else:
+            self._proxies = None
 
     @api_key.setter
     def api_key(self, api_key):
-        os.environ[self.TMDB_API_KEY] = str(api_key)
+        self._api_key = str(api_key) if api_key else None
+        self._api_keys = [key.strip() for key in str(api_key).split(";") if key.strip()] if api_key else []
+        self.cache_clear()
 
     @property
     def language(self):
-        return os.environ.get(self.TMDB_LANGUAGE)
+        return self._language
 
     @language.setter
     def language(self, language):
-        os.environ[self.TMDB_LANGUAGE] = language
+        self._language = language or "zh-CN"
 
     @property
     def wait_on_rate_limit(self):
-        if os.environ.get(self.TMDB_WAIT_ON_RATE_LIMIT) == "False":
-            return False
-        else:
-            return True
+        return self._wait_on_rate_limit
 
     @wait_on_rate_limit.setter
     def wait_on_rate_limit(self, wait_on_rate_limit):
-        os.environ[self.TMDB_WAIT_ON_RATE_LIMIT] = str(wait_on_rate_limit)
+        self._wait_on_rate_limit = bool(wait_on_rate_limit)
 
     @property
     def debug(self):
-        if os.environ.get(self.TMDB_DEBUG_ENABLED) == "True":
-            return True
-        else:
-            return False
+        return self._debug
 
     @debug.setter
     def debug(self, debug):
-        os.environ[self.TMDB_DEBUG_ENABLED] = str(debug)
+        self._debug = bool(debug)
 
     @property
     def cache(self):
-        if os.environ.get(self.TMDB_CACHE_ENABLED) == "False":
-            return False
-        else:
-            return True
+        return self._cache
 
     @cache.setter
     def cache(self, cache):
-        os.environ[self.TMDB_CACHE_ENABLED] = str(cache)
+        self._cache = bool(cache)
 
     @staticmethod
     def _get_obj(result, key="results", all_details=False):
@@ -154,9 +160,14 @@ class TMDb(object):
         else:
             return [AsObj(**res) for res in result[key]]
 
-    @staticmethod
-    @lru_cache(maxsize=REQUEST_CACHE_MAXSIZE)
-    def cached_request(method, url, data, proxies):
+    @classmethod
+    def cached_request(cls, cache_key, method, url, data, proxies):
+        with cls._parsed_cache_lock:
+            cached = cls._parsed_cache.get(cache_key)
+        if cached is not None:
+            cls._cache_hits += 1
+            return cached
+        cls._cache_misses += 1
         @retry(
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1, min=2, max=10),
@@ -171,7 +182,7 @@ class TMDb(object):
             proxies_dict = eval(proxies) if proxies else None
 
             # 发送请求
-            response = requests.request(
+            response = cls._cache_session.request(
                 method=method,
                 url=url,
                 data=data,
@@ -182,7 +193,13 @@ class TMDb(object):
 
             if response.status_code >= 500:
                 response.raise_for_status()
-            return response
+            # 缓存解析后的普通数据，避免保留连接、请求头和 Response 对象。
+            payload = response.json()
+            with cls._parsed_cache_lock:
+                if len(cls._parsed_cache) >= cls.REQUEST_CACHE_MAXSIZE:
+                    cls._parsed_cache.pop(next(iter(cls._parsed_cache)))
+                cls._parsed_cache[cache_key] = payload
+            return payload
 
         try:
             return _request_with_retry()
@@ -191,7 +208,26 @@ class TMDb(object):
             raise
 
     def cache_clear(self):
-        return self.cached_request.cache_clear()
+        with self._parsed_cache_lock:
+            self._parsed_cache.clear()
+
+    @classmethod
+    def cache_info(cls):
+        with cls._parsed_cache_lock:
+            return {
+                "size": len(cls._parsed_cache),
+                "hits": cls._cache_hits,
+                "misses": cls._cache_misses,
+            }
+
+    @staticmethod
+    def _cache_key(url, data, proxies):
+        parsed = urlsplit(url)
+        query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                 if key != "api_key"]
+        normalized = urlunsplit((parsed.scheme, parsed.netloc, parsed.path,
+                                 urlencode(sorted(query)), ""))
+        return normalized, data, proxies
 
     @retry(
         stop=stop_after_attempt(3),
@@ -225,11 +261,13 @@ class TMDb(object):
         )
 
         if self.cache and self.obj_cached and call_cached and method != "POST":
-            req = self.cached_request(method, url, data, self.proxies)
+            req = self.cached_request(self._cache_key(url, data, self.proxies),
+                                      method, url, data, self.proxies)
         else:
-            req = self.session_request(self._session, method, url, data, self.proxies)
+            response = self.session_request(self._session, method, url, data, self.proxies)
+            req = response.json()
 
-        headers = req.headers
+        headers = response.headers if 'response' in locals() else {}
 
         if "X-RateLimit-Remaining" in headers:
             self._remaining = int(headers["X-RateLimit-Remaining"])
@@ -244,22 +282,22 @@ class TMDb(object):
             if self.wait_on_rate_limit:
                 log.warn("【TMDB-API】 Rate limit reached. Sleeping for: %d" % sleep_time)
                 time.sleep(abs(sleep_time))
-                self._call(action, append_to_response, call_cached, method, data)
+                return self._call(action, append_to_response, call_cached, method, data)
             else:
                 raise TMDbException(
                     "Rate limit reached. Try again in %d seconds." % sleep_time
                 )
 
-        json = req.json()
+        json = req
 
         if "page" in json:
-            os.environ["page"] = str(json["page"])
+            self._metadata["page"] = str(json["page"])
 
         if "total_results" in json:
-            os.environ["total_results"] = str(json["total_results"])
+            self._metadata["total_results"] = str(json["total_results"])
 
         if "total_pages" in json:
-            os.environ["total_pages"] = str(json["total_pages"])
+            self._metadata["total_pages"] = str(json["total_pages"])
 
         # if self.debug:
         #     log.debug(json)

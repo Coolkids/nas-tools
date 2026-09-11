@@ -1,4 +1,5 @@
 import json
+import time
 import traceback
 
 import jsonpath
@@ -121,9 +122,18 @@ class RssChecker(object):
         if not self._rss_tasks:
             return
         # 启动RSS任务
+        try:
+            rss_workers = max(1, int(Config().get_config("pt").get("rss_concurrency", 10)))
+        except (TypeError, ValueError):
+            rss_workers = 10
         self._scheduler = BackgroundScheduler(timezone=Config().get_timezone(),
                                               executors={
-                                                  'default': ThreadPoolExecutor(30)
+                                                  'default': ThreadPoolExecutor(rss_workers)
+                                              },
+                                              job_defaults={
+                                                  'max_instances': 1,
+                                                  'coalesce': True,
+                                                  'misfire_grace_time': 300
                                               })
         rss_flag = False
         for task in self._rss_tasks:
@@ -159,6 +169,7 @@ class RssChecker(object):
         """
         if not taskid:
             return
+        started_at = time.perf_counter()
         # 需要下载的项目
         rss_download_torrents = []
         # 需要订阅的项目
@@ -306,7 +317,6 @@ class RssChecker(object):
                         log.info(f"【RssChecker】{match_msg}")
                         continue
                     # 添加订阅列表
-                    self.dbhelper.insert_rss_torrents(media_info)
                     if media_info not in rss_subscribe_torrents:
                         rss_subscribe_torrents.append(media_info)
                         res_num = res_num + 1
@@ -317,6 +327,7 @@ class RssChecker(object):
                 log.error("【RssChecker】处理RSS发生错误：%s - %s" % (str(e), traceback.format_exc()))
                 continue
         log.info("【RssChecker】%s 处理结束，匹配到 %s 个有效资源" % (taskinfo.get("name"), res_num))
+        self.dbhelper.insert_rss_torrents_many(rss_download_torrents + rss_subscribe_torrents)
         # 添加下载
         if rss_download_torrents:
             for media in rss_download_torrents:
@@ -367,6 +378,9 @@ class RssChecker(object):
         counter = len(rss_download_torrents) + len(rss_subscribe_torrents) + len(rss_search_torrents)
         if counter:
             self.dbhelper.update_userrss_task_info(taskid, counter)
+        elapsed = time.perf_counter() - started_at
+        log.info("【RssChecker】阶段耗时：拉取/解析/识别/数据库/下载总计 %.3fs，处理 %s 条，平均 %.6fs"
+                 % (elapsed, counter, elapsed / counter if counter else 0))
 
     def __parse_userrss_result(self, taskinfo):
         """

@@ -3,6 +3,7 @@ import log
 from config import Config
 from .main_db import MainDb
 from .main_db import DbPersist
+from .main_db import get_db_metrics
 from .media_db import MediaDb
 from alembic.config import Config as AlembicConfig
 from alembic.command import upgrade as alembic_upgrade

@@ -4,6 +4,7 @@ import random
 import re
 import shutil
 import traceback
+import time
 from enum import Enum
 from threading import Lock
 from time import sleep
@@ -457,6 +458,9 @@ class FileTransfer:
         :return: 处理状态，错误信息
         """
 
+        started_at = time.perf_counter()
+        total_count = 0
+
         def __finish_transfer(status, message):
             if status:
                 self.progress.update(ptype="filetransfer",
@@ -467,6 +471,10 @@ class FileTransfer:
                                      value=100,
                                      text=f"{in_path} 转移失败：{message}！")
             self.progress.end('filetransfer')
+            elapsed = time.perf_counter() - started_at
+            average = elapsed / total_count if total_count else 0
+            log.info("【Rmt】阶段耗时：文件遍历/识别/转移总计 %.3fs，处理 %s 个文件，"
+                     "平均 %.6fs" % (elapsed, total_count, average))
             return status, message
 
         # 开始进度
@@ -562,7 +570,6 @@ class FileTransfer:
         failed_count = 0
         alert_count = 0
         alert_messages = []
-        total_count = 0
         # 电视剧可能有多集，如果在循环里发消息就太多了，要在外面发消息
         message_medias = {}
         # 需要刷新媒体库的清单
@@ -1079,7 +1086,7 @@ class FileTransfer:
             # 总需要的集
             total_episodes = [episode for episode in range(1, total_num + 1)]
             # 已存在的集
-            exists_episodes = []
+            exists_episodes = set()
             for dest_path in dest_paths:
                 if category_flag:
                     dest_path = os.path.join(dest_path, meta_info.category, dir_name, season_name)
@@ -1097,8 +1104,8 @@ class FileTransfer:
                         continue
                     if not file_meta_info.is_in_season(season):
                         continue
-                    exists_episodes = list(set(exists_episodes).union(set(file_meta_info.get_episode_list())))
-            return list(set(total_episodes).difference(set(exists_episodes)))
+                    exists_episodes.update(file_meta_info.get_episode_list())
+            return [episode for episode in total_episodes if episode not in exists_episodes]
 
     def __get_best_target_path(self, mtype, in_path=None, size=0):
         """

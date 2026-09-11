@@ -1,6 +1,7 @@
 import os
 import time
 import threading
+from contextlib import contextmanager
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy.pool import QueuePool
@@ -11,6 +12,10 @@ from app.utils import ExceptionUtils, PathUtils
 from config import Config
 
 lock = threading.Lock()
+_db_metrics = {
+    "commits": 0,
+    "retries": 0,
+}
 _Engine = create_engine(
     f"sqlite:///{os.path.join(Config().get_config_path(), 'user.db')}?check_same_thread=False",
     echo=False,
@@ -44,6 +49,23 @@ class MainDb:
     @staticmethod
     def init_db():
         with lock:
+            # 新增唯一索引必须兼容旧数据库中的重复历史记录。
+            # 迁移脚本会再次执行该步骤，init_db 则保证 create_all 本身安全。
+            with _Engine.begin() as conn:
+                for table, columns in (
+                        ("RSS_TORRENTS", ("ENCLOSURE",)),
+                        ("SYNC_HISTORY", ("PATH", "DEST")),
+                        ("SITE_BRUSH_TORRENTS", ("TASK_ID", "TORRENT_NAME", "ENCLOSURE")),
+                        ("SITE_STATISTICS_HISTORY", ("DATE", "URL"))):
+                    try:
+                        joined = ", ".join(columns)
+                        predicate = "ENCLOSURE IS NOT NULL AND " if table == "RSS_TORRENTS" else ""
+                        conn.execute(text(
+                            f"DELETE FROM {table} WHERE {predicate}ID NOT IN "
+                            f"(SELECT MIN(ID) FROM {table} GROUP BY {joined})"))
+                    except Exception:
+                        # 表可能需要在下面首次创建。
+                        pass
             Base.metadata.create_all(_Engine)
             with _Engine.connect() as conn:
                 conn.execute(text("PRAGMA journal_mode=WAL;"))
@@ -93,6 +115,46 @@ class MainDb:
         else:
             self.session.add(data)
 
+    def insert_many(self, model, rows):
+        """批量插入数据，不逐条刷写或提交。"""
+        if not rows:
+            return 0
+        if all(isinstance(row, model) for row in rows):
+            self.session.add_all(rows)
+        else:
+            self.session.bulk_insert_mappings(model, rows)
+        return len(rows)
+
+    def upsert_many(self, model, rows, conflict_columns, update_columns=None):
+        """执行 SQLite 批量 upsert，事务由调用方负责。"""
+        if not rows:
+            return 0
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        statement = sqlite_insert(model.__table__).values(rows)
+        if update_columns:
+            statement = statement.on_conflict_do_update(
+                index_elements=list(conflict_columns),
+                set_={column: getattr(statement.excluded, column)
+                      for column in update_columns}
+            )
+        else:
+            statement = statement.on_conflict_do_nothing(
+                index_elements=list(conflict_columns)
+            )
+        self.session.execute(statement)
+        return len(rows)
+
+    @contextmanager
+    def transaction(self):
+        """成功时只提交一次，失败时回滚整个批次。"""
+        try:
+            yield self.session
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+
     def query(self, *obj):
         """
         查询对象
@@ -116,6 +178,7 @@ class MainDb:
         提交事务
         """
         self.session.commit()
+        _db_metrics["commits"] += 1
 
     def rollback(self):
         """
@@ -143,6 +206,7 @@ class DbPersist(object):
                     return True if ret is None else ret
                 except OperationalError as e:
                     last_exception = e
+                    _db_metrics["retries"] += 1
                     self.db.rollback()
                     if attempt < self.retries - 1:
                         time.sleep(0.5 * (2 ** attempt))
@@ -158,3 +222,8 @@ class DbPersist(object):
             return False
 
         return persist
+
+
+def get_db_metrics():
+    """返回用于性能日志和诊断的指标快照。"""
+    return dict(_db_metrics)

@@ -14,6 +14,7 @@ class Filter:
     dbhelper = None
     _groups = []
     _rules = []
+    _rule_index = {}
 
     def __init__(self):
         self.init_config()
@@ -23,6 +24,31 @@ class Filter:
         self.rg_matcher = ReleaseGroupsMatcher()
         self._groups = self.dbhelper.get_config_filter_group()
         self._rules = self.dbhelper.get_config_filter_rule()
+        self._rule_index = {}
+        for rule in self._rules:
+            def compile_patterns(value):
+                patterns = []
+                for item in (value.split("\n") if value else []):
+                    if not item:
+                        continue
+                    patterns.append(re.compile(item.strip(), re.IGNORECASE))
+                return patterns
+
+            self._rule_index[rule.ID] = {
+                "include": compile_patterns(rule.INCLUDE),
+                "exclude": compile_patterns(rule.EXCLUDE),
+                "size": self._parse_size_limit(rule.SIZE_LIMIT),
+            }
+
+    @staticmethod
+    def _parse_size_limit(size):
+        if not size:
+            return None
+        values = str(size).split(",", 1)
+        begin = int(values[0].strip()) if values[0].strip().isdigit() else 0
+        end_value = values[-1].strip()
+        end = int(end_value) if end_value.isdigit() else 0
+        return begin, end
 
     def get_rule_groups(self, groupid=None, default=False):
         """
@@ -120,6 +146,7 @@ class Filter:
         # 当前规则组是否命中
         group_match = True
         for filter_info in filters:
+            compiled = self._rule_index.get(filter_info.get("id"), {})
             # 当前规则是否命中
             rule_match = True
             # 命中规则的序号
@@ -128,10 +155,8 @@ class Filter:
             includes = filter_info.get('include')
             if includes and rule_match:
                 include_flag = True
-                for include in includes:
-                    if not include:
-                        continue
-                    if not re.search(r'%s' % include.strip(), title, re.IGNORECASE):
+                for include in compiled.get("include", ()):
+                    if not include.search(title):
                         include_flag = False
                         break
                 if not include_flag:
@@ -142,11 +167,9 @@ class Filter:
             if excludes and rule_match:
                 exclude_flag = False
                 exclude_count = 0
-                for exclude in excludes:
-                    if not exclude:
-                        continue
+                for exclude in compiled.get("exclude", ()):
                     exclude_count += 1
-                    if not re.search(r'%s' % exclude.strip(), title, re.IGNORECASE):
+                    if not exclude.search(title):
                         exclude_flag = True
                 if exclude_count > 0 and not exclude_flag:
                     rule_match = False
@@ -154,22 +177,7 @@ class Filter:
             sizes = filter_info.get('size')
             if sizes and rule_match and meta_info.size:
                 meta_info.size = StringUtils.num_filesize(meta_info.size)
-                if sizes.find(',') != -1:
-                    sizes = sizes.split(',')
-                    if sizes[0].isdigit():
-                        begin_size = int(sizes[0].strip())
-                    else:
-                        begin_size = 0
-                    if sizes[1].isdigit():
-                        end_size = int(sizes[1].strip())
-                    else:
-                        end_size = 0
-                else:
-                    begin_size = 0
-                    if sizes.isdigit():
-                        end_size = int(sizes.strip())
-                    else:
-                        end_size = 0
+                begin_size, end_size = compiled.get("size") or (0, 0)
                 if meta_info.type == MediaType.MOVIE:
                     if not begin_size * 1024 ** 3 <= int(meta_info.size) <= end_size * 1024 ** 3:
                         rule_match = False

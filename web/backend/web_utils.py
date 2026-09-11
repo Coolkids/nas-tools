@@ -152,10 +152,15 @@ class WebUtils:
         """
         带缓存的请求
         """
-        if url.find('douban'):
+        if 'douban' in url:
             ret = RequestUtils(referer="https://movie.douban.com").get_res(url)
         else:
             ret = RequestUtils().get_res(url)
         if ret:
             return ret.content
         return None
+
+    @staticmethod
+    def clear_request_cache():
+        """显式失效图片/网页请求缓存，供配置更新和手动刷新调用。"""
+        WebUtils.request_cache.cache_clear()
