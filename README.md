@@ -53,17 +53,6 @@ export NASTOOL_CONFIG="/xxx/config/config.yaml"
 nohup uv run python run.py &
 ```
 
-`requirements.txt` 由 `pyproject.toml` 和 `uv.lock` 导出，仅用于兼容旧的 pip 安装流程。
-
-### 3、Windows
-下载exe文件，双击运行即可，会自动生成配置文件目录
-
-https://github.com/Coolkids/nas-tools/releases
-
-### 4、群晖套件
-<span style="color:red">无</span>
-
-
 ## 配置
 ### 1、申请相关API KEY
 * 申请TMDB用户，在 https://www.themoviedb.org/ 申请用户，得到API KEY。
@@ -208,7 +197,7 @@ https://github.com/Coolkids/nas-tools/releases
   * 同时支持Jackett/Prowlarr，需额外搭建对应服务并获取API Key以及地址等信息，配置到设置->索引器->Jackett/Prowlarr中。
 
 ### 7、配置站点
-本工具的电影电视剧订阅、资源搜索、站点数据统计、刷流、自动签到等功能均依赖于正确配置站点信息，需要在“站点管理->站点维护”中维护好站点RSS链接以及Cookie等。
+本工具的电影电视剧订阅、资源搜索等功能均依赖于正确配置站点信息。
 
 其中站点RSS链接生成时请尽量选择影视类资源分类，且勾选副标题。
 
@@ -224,11 +213,6 @@ https://github.com/Coolkids/nas-tools/releases
    docker exec -it nas-tools sh
    python3 /nas-tools/app/filetransfer.py -m link -s /from/path -d /to/path
    ```
-* 群晖套件版本，ssh到后台运行以下命令，同样修改配置文件路径以及源目录、目的目录参数。
-   ```
-   export NASTOOL_CONFIG=/var/packages/NASTool/target/config/config.yaml
-   /var/packages/py3k/target/usr/local/bin/python3 /var/packages/NASTool/target/app/filetransfer.py -m link -s /from/path -d /to/path
-   ```
 * 本地直接运行的，cd 到程序根目录，执行以下命令，修改配置文件、源目录和目的目录参数。
    ```
    export NASTOOL_CONFIG=config/config.yaml
@@ -236,7 +220,4 @@ https://github.com/Coolkids/nas-tools/releases
    ```
 
 ## 鸣谢
-* 程序UI模板及图标来源于开源项目<a href="https://github.com/tabler/tabler">tabler</a>，此外项目中还使用到了开源模块：<a href="https://github.com/igorcmoura/anitopy" target="_blank">anitopy</a>、<a href="https://github.com/AnthonyBloomer/tmdbv3api" target="_blank">tmdbv3api</a>、<a href="https://github.com/pkkid/python-plexapi" target="_blank">python-plexapi</a>、<a href="https://github.com/rmartin16/qbittorrent-api">qbittorrent-api</a>、<a href="https://github.com/Trim21/transmission-rpc">transmission-rpc</a>等
-* 感谢 <a href="https://github.com/devome" target="_blank">nevinee</a> 完善docker构建
-* 感谢 <a href="https://github.com/tbc0309" target="_blank">tbc0309</a> 适配群晖套件
 * 感谢 PR 代码、完善WIKI、发布教程的所有大佬
