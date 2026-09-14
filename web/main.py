@@ -1,13 +1,16 @@
 import base64
 import datetime
 import hashlib
+import io
 import os.path
 import re
+import secrets
 import shutil
 import sqlite3
 import time
 import traceback
 import urllib
+import uuid
 import xml.dom.minidom
 from functools import wraps
 from math import floor
@@ -42,10 +45,50 @@ from web.security import require_auth
 # 配置文件锁
 ConfigLock = Lock()
 
+
+def get_session_secret_key():
+    """Return a stable Flask signing key, creating one beside the config file."""
+    configured_key = os.environ.get('NASTOOL_SECRET_KEY')
+    if configured_key:
+        return configured_key
+
+    config_path = os.environ.get('NASTOOL_CONFIG')
+    if config_path:
+        secret_path = Path(config_path).expanduser().resolve().parent / '.secret_key'
+        try:
+            secret_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                secret = secret_path.read_text(encoding='utf-8').strip()
+                if secret:
+                    return secret
+            except FileNotFoundError:
+                pass
+            secret = secrets.token_hex(32)
+            try:
+                fd = os.open(str(secret_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                with os.fdopen(fd, 'w', encoding='utf-8') as secret_file:
+                    secret_file.write(secret)
+                return secret
+            except FileExistsError:
+                # Another worker may have created the key between the read
+                # and the atomic create attempt.
+                secret = secret_path.read_text(encoding='utf-8').strip()
+                if secret:
+                    return secret
+        except OSError:
+            # Keep startup compatible with read-only/test environments.  In a
+            # normal installation NASTOOL_CONFIG is writable, so this branch
+            # is not used and the key remains stable across restarts.
+            pass
+
+    return secrets.token_hex(32)
+
+
 # Flask App
 App = Flask(__name__)
 App.config['JSON_AS_ASCII'] = False
-App.secret_key = os.urandom(24)
+# The session cookie must remain verifiable after the service restarts.
+App.secret_key = get_session_secret_key()
 App.permanent_session_lifetime = datetime.timedelta(days=30)
 
 # 启用压缩
@@ -124,14 +167,17 @@ def get_wallpaper():
 def login_json():
     username = request.form.get('username')
     password = request.form.get('password')
-    remember = request.form.get('remember')
+    remember = request.form.get('remember') == '1'
     if not username or not password:
         return {"code": 1, "success": False, "message": "请输入用户名和密码"}
     user_info = User().get_user(username)
     if not user_info or not user_info.verify_password(password):
         return {"code": 1, "success": False, "message": "用户名或密码错误"}
-    login_user(user_info)
-    session.permanent = True if remember else False
+    login_user(user_info, remember=remember)
+    session.permanent = remember
+    if not remember:
+        # Remove a remember cookie left by an earlier remembered login.
+        session['_remember'] = 'clear'
     return {
         "code": 0,
         "success": True,
@@ -746,6 +792,57 @@ def upload():
     except Exception as e:
         ExceptionUtils.exception_traceback(e)
         return {"code": 1, "msg": str(e), "filepath": ""}
+
+
+@App.route('/rss_import_upload', methods=['POST'])
+@login_required
+def rss_import_upload():
+    """上传订阅导入文件；与通用上传接口隔离，避免使用用户提供的文件名。"""
+    file = request.files.get('file')
+    if not file or not file.filename:
+        return {"code": 1, "msg": "请选择 Excel 文件"}
+    if not file.filename.lower().endswith('.xlsx'):
+        return {"code": 1, "msg": "仅支持 .xlsx 格式的 Excel 文件"}
+    if request.content_length and request.content_length > 15 * 1024 * 1024:
+        return {"code": 1, "msg": "Excel 文件不能超过 15 MB"}
+    try:
+        temp_path = Path(Config().get_temp_path())
+        temp_path.mkdir(parents=True, exist_ok=True)
+        file_path = temp_path / ('rss-import-%s.xlsx' % uuid.uuid4().hex)
+        file.save(str(file_path))
+        return {"code": 0, "filepath": str(file_path)}
+    except Exception as error:
+        ExceptionUtils.exception_traceback(error)
+        return {"code": 1, "msg": "上传 Excel 文件失败"}
+
+
+@App.route('/rss_import_template', methods=['GET'])
+@login_required
+def rss_import_template():
+    rss_type = request.args.get('type', 'MOV')
+    if rss_type not in ('MOV', 'TV'):
+        return make_response('订阅类型无效', 400)
+    filename = '电视剧订阅导入模板.xlsx' if rss_type == 'TV' else '电影订阅导入模板.xlsx'
+    return send_file(
+        io.BytesIO(WebAction.get_rss_import_template(rss_type)),
+        as_attachment=True,
+        download_name=filename,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+
+
+@App.route('/rss_import_errors/<job_id>.xlsx', methods=['GET'])
+@login_required
+def rss_import_errors(job_id):
+    workbook = WebAction.get_rss_import_error_xlsx(job_id)
+    if not workbook:
+        return make_response('没有可导出的错误数据，任务可能已过期', 404)
+    return send_file(
+        io.BytesIO(workbook),
+        as_attachment=True,
+        download_name='订阅导入错误数据.xlsx',
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
 
 
 # base64模板过滤器

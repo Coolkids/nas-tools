@@ -1,14 +1,21 @@
 import base64
 import datetime
 import importlib
+import io
 import json
 import os.path
 import re
 import shutil
 import signal
+import uuid
+import zipfile
+import xml.etree.ElementTree as ET
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from math import floor
+from threading import Lock
 from urllib.parse import unquote
+from xml.sax.saxutils import escape
 
 import cn2an
 from flask_login import logout_user, current_user
@@ -53,6 +60,17 @@ class WebAction:
     dbhelper = None
     _actions = {}
     TvTypes = ['TV', '电视剧']
+    # Excel 导入任务保留在内存中。任务不依赖 WebAction 实例，轮询请求可读取同一份状态。
+    _rss_import_jobs = {}
+    _rss_import_jobs_lock = Lock()
+    _rss_import_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='rss-excel-import')
+    _rss_import_columns = [
+        ('标题*', 'name'), ('年份', 'year'), ('自定义搜索词', 'keyword'), ('季号', 'season'),
+        ('模糊匹配', 'fuzzy_match'), ('RSS站点', 'rss_sites'), ('搜索站点', 'search_sites'),
+        ('洗版', 'over_edition'), ('资源类型', 'filter_restype'), ('分辨率', 'filter_pix'),
+        ('制作组/字幕组', 'filter_team'), ('过滤规则', 'filter_rule'), ('下载设置', 'download_setting'),
+        ('保存路径', 'save_path'), ('总集数', 'total_ep'), ('开始订阅集数', 'current_ep')
+    ]
 
     def __init__(self):
         self.dbhelper = DbHelper()
@@ -86,6 +104,9 @@ class WebAction:
             "check_sync_path": self.__check_sync_path,
             "remove_rss_media": self.__remove_rss_media,
             "add_rss_media": self.__add_rss_media,
+            "start_rss_excel_import": self.__start_rss_excel_import,
+            "get_rss_excel_import": self.__get_rss_excel_import,
+            "retry_rss_excel_import": self.__retry_rss_excel_import,
             "re_identification": self.re_identification,
             "media_info": self.__media_info,
             "test_connection": self.__test_connection,
@@ -1444,6 +1465,500 @@ class WebAction:
                 rssid = self.dbhelper.get_rss_tv_id(
                     title=name, tmdbid=media_info.tmdb_id)
         return {"code": code, "msg": msg, "page": page, "name": name, "rssid": rssid}
+
+    # ---- Excel 批量导入订阅 -------------------------------------------------
+
+    @staticmethod
+    def _rss_import_text(value):
+        """将 Excel 单元格值转换成便于展示和再次导入的文本。"""
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    @classmethod
+    def _normalise_rss_import_values(cls, values):
+        values = values if isinstance(values, dict) else {}
+        text_fields = {
+            'name', 'year', 'keyword', 'season', 'filter_restype', 'filter_pix',
+            'filter_team', 'filter_rule', 'download_setting', 'save_path', 'total_ep', 'current_ep'
+        }
+        result = {field: cls._rss_import_text(values.get(field)) for field in text_fields}
+        for field in ('rss_sites', 'search_sites'):
+            value = values.get(field, [])
+            if isinstance(value, str):
+                value = re.split(r'[,，;；\n|]+', value)
+            result[field] = [cls._rss_import_text(item) for item in value] if isinstance(value, list) else []
+            result[field] = [item for item in result[field] if item]
+        for field in ('fuzzy_match', 'over_edition'):
+            value = values.get(field, False)
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in ('1', 'true', 'yes', 'y', '是', '开', '开启'):
+                    value = True
+                elif normalized in ('0', 'false', 'no', 'n', '否', '关', '关闭', ''):
+                    value = False
+                else:
+                    # 保留非法文本，后续以行级错误反馈给用户，而不是静默变成“否”。
+                    value = value.strip()
+            result[field] = value if isinstance(value, bool) else value
+        return result
+
+    @classmethod
+    def _rss_import_options(cls):
+        """读取当前配置，作为模板下拉项及导入合法值的唯一来源。"""
+        rss_sites = sorted(set(filter(None, Sites().get_site_names(rss=True))))
+        search_sites = sorted(set(filter(None, Indexer().get_indexer_names())))
+        filter_rules = {
+            str(item['id']): item['name']
+            for item in Filter().get_rule_groups()
+        }
+        download_settings = {
+            str(key): value.get('name', str(key))
+            for key, value in Downloader().get_download_setting().items()
+        }
+        return {
+            'rss_sites': rss_sites,
+            'search_sites': search_sites,
+            'filter_rules': filter_rules,
+            'download_settings': download_settings
+        }
+
+    @classmethod
+    def _validate_rss_import_values(cls, values):
+        """校验 Excel 选择项，同时将“ID | 名称”转换为后端需要的 ID。"""
+        values = deepcopy(values)
+        options = cls._rss_import_options()
+        for field, label in (('rss_sites', 'RSS站点'), ('search_sites', '搜索站点')):
+            allowed = set(options[field])
+            invalid = [site for site in values.get(field, []) if site not in allowed]
+            if invalid:
+                return None, '%s不存在或当前不可用：%s' % (label, '、'.join(invalid))
+        for field, label in (('fuzzy_match', '模糊匹配'), ('over_edition', '洗版')):
+            if not isinstance(values.get(field), bool):
+                return None, '%s只能填写“是”或“否”' % label
+        restype = values.get('filter_restype')
+        if restype and restype not in ('BLURAY', 'REMUX', 'DOLBY', 'WEB', 'HDTV', 'UHD', 'HDR', '3D'):
+            return None, '资源类型不合法，请从下拉选项中选择'
+        pix = values.get('filter_pix')
+        if pix and pix not in ('8k', '4k', '1080p', '720p'):
+            return None, '分辨率不合法，请从下拉选项中选择'
+        season = values.get('season')
+        if season and (not season.isdigit() or not 1 <= int(season) <= 50):
+            return None, '季号必须为 01 到 50'
+        for field, option_key, empty_labels, label in (
+            ('filter_rule', 'filter_rules', ('站点/默认规则',), '过滤规则'),
+            ('download_setting', 'download_settings', ('站点设置',), '下载设置')
+        ):
+            value = values.get(field, '')
+            if not value or value in empty_labels:
+                values[field] = ''
+                continue
+            option_id = value.split('|', 1)[0].strip()
+            if option_id not in options[option_key]:
+                return None, '%s不存在或已失效：%s' % (label, value)
+            values[field] = option_id
+        for field, label in (('year', '年份'), ('total_ep', '总集数'), ('current_ep', '开始订阅集数')):
+            value = values.get(field)
+            if value and not value.isdigit():
+                return None, '%s必须为数字' % label
+        return values, ''
+
+    @staticmethod
+    def _rss_import_column_index(reference):
+        """把 A1 / AB12 形式的单元格坐标换算成零基列号。"""
+        letters = ''.join(char for char in (reference or '') if char.isalpha()).upper()
+        index = 0
+        for char in letters:
+            index = index * 26 + ord(char) - ord('A') + 1
+        return index - 1
+
+    @classmethod
+    def _parse_rss_import_xlsx(cls, filepath):
+        path = os.path.realpath(filepath)
+        temp_path = os.path.realpath(Config().get_temp_path())
+        if not path.startswith(temp_path + os.sep) or not path.lower().endswith('.xlsx'):
+            raise ValueError('导入文件无效')
+        if not os.path.isfile(path):
+            raise ValueError('上传文件不存在或已过期')
+
+        def get_cell_text(cell, shared_strings):
+            cell_type = cell.attrib.get('t')
+            if cell_type == 'inlineStr':
+                return ''.join(node.text or '' for node in cell.iter() if node.tag.endswith('}t'))
+            value_node = next((node for node in cell if node.tag.endswith('}v')), None)
+            value = value_node.text if value_node is not None else ''
+            if cell_type == 's' and str(value).isdigit():
+                index = int(value)
+                return shared_strings[index] if index < len(shared_strings) else ''
+            if cell_type == 'b':
+                return '是' if value == '1' else '否'
+            return value or ''
+
+        try:
+            with zipfile.ZipFile(path) as archive:
+                shared_strings = []
+                if 'xl/sharedStrings.xml' in archive.namelist():
+                    strings_root = ET.fromstring(archive.read('xl/sharedStrings.xml'))
+                    shared_strings = [
+                        ''.join(node.text or '' for node in item.iter() if node.tag.endswith('}t'))
+                        for item in strings_root if item.tag.endswith('}si')
+                    ]
+                sheet_names = [name for name in archive.namelist() if re.match(r'xl/worksheets/sheet\d+\.xml$', name)]
+                if not sheet_names:
+                    raise ValueError('Excel 中没有可读取的工作表')
+                sheet_root = ET.fromstring(archive.read(sorted(sheet_names)[0]))
+        except zipfile.BadZipFile as error:
+            raise ValueError('文件不是有效的 .xlsx Excel 文件') from error
+        except ET.ParseError as error:
+            raise ValueError('Excel 文件格式损坏') from error
+
+        parsed_rows = []
+        for row_node in (node for node in sheet_root.iter() if node.tag.endswith('}row')):
+            row_number = int(row_node.attrib.get('r', '0') or 0)
+            cells = {}
+            for cell in (node for node in row_node if node.tag.endswith('}c')):
+                cells[cls._rss_import_column_index(cell.attrib.get('r'))] = get_cell_text(cell, shared_strings)
+            if cells:
+                parsed_rows.append((row_number, cells))
+        if not parsed_rows:
+            raise ValueError('Excel 中没有数据')
+
+        header_row, headers = parsed_rows[0]
+        header_aliases = {
+            '名称': 'name', '标题': 'name', 'name': 'name', 'title': 'name',
+            '年份': 'year', 'year': 'year', '自定义搜索词': 'keyword', '关键词': 'keyword', 'keyword': 'keyword',
+            '季号': 'season', '季': 'season', 'season': 'season', '模糊匹配': 'fuzzy_match', 'fuzzy_match': 'fuzzy_match',
+            'rss站点': 'rss_sites', 'rss_sites': 'rss_sites', '搜索站点': 'search_sites', 'search_sites': 'search_sites',
+            '洗版': 'over_edition', 'over_edition': 'over_edition', '资源类型': 'filter_restype', 'filter_restype': 'filter_restype',
+            '分辨率': 'filter_pix', 'filter_pix': 'filter_pix', '制作组/字幕组': 'filter_team', '制作组': 'filter_team', 'filter_team': 'filter_team',
+            '过滤规则': 'filter_rule', '过滤规则id': 'filter_rule', 'filter_rule': 'filter_rule',
+            '下载设置': 'download_setting', '下载设置id': 'download_setting', 'download_setting': 'download_setting',
+            '保存路径': 'save_path', 'save_path': 'save_path', '总集数': 'total_ep', 'total_ep': 'total_ep',
+            '开始订阅集数': 'current_ep', 'current_ep': 'current_ep'
+        }
+        field_by_column = {}
+        search_site_columns = {}
+        for column, header in headers.items():
+            header_text = cls._rss_import_text(header)
+            if header_text.startswith('搜索站点：'):
+                site_name = header_text.split('：', 1)[1].strip()
+                if site_name:
+                    search_site_columns[column] = site_name
+                continue
+            normalized = header_text.replace('*', '').replace(' ', '').lower()
+            if normalized in header_aliases:
+                field_by_column[column] = header_aliases[normalized]
+        if 'name' not in field_by_column.values():
+            raise ValueError('模板必须包含“标题*”列')
+
+        result = []
+        for row_number, cells in parsed_rows[1:]:
+            raw = {field: cells.get(column, '') for column, field in field_by_column.items()}
+            input_error = ''
+            if search_site_columns:
+                selected_sites = []
+                for column, site_name in search_site_columns.items():
+                    selected = cls._rss_import_text(cells.get(column, '')).lower()
+                    if selected in ('是', '1', 'true', 'yes', 'y'):
+                        selected_sites.append(site_name)
+                    elif selected not in ('', '否', '0', 'false', 'no', 'n'):
+                        input_error = '搜索站点“%s”只能填写“是”或“否”' % site_name
+                raw['search_sites'] = selected_sites
+            if not any(cls._rss_import_text(value) for value in raw.values()):
+                continue
+            result.append({
+                'row': row_number,
+                'values': cls._normalise_rss_import_values(raw),
+                'status': 'pending',
+                'reason': '',
+                'input_error': input_error
+            })
+        if not result:
+            raise ValueError('Excel 中没有可导入的数据行')
+        if len(result) > 5000:
+            raise ValueError('单次最多导入 5000 行')
+        return result
+
+    @classmethod
+    def _rss_import_job_copy(cls, job):
+        return deepcopy(job)
+
+    @classmethod
+    def _refresh_rss_import_counts(cls, job):
+        job['processed'] = sum(row['status'] in ('success', 'failed') for row in job['rows'])
+        job['succeeded'] = sum(row['status'] == 'success' for row in job['rows'])
+        job['failed'] = sum(row['status'] == 'failed' for row in job['rows'])
+        if all(row['status'] in ('success', 'failed') for row in job['rows']):
+            job['state'] = 'completed'
+            job['current_row'] = None
+
+    @classmethod
+    def _run_rss_import_rows(cls, job_id, row_numbers):
+        for row_number in row_numbers:
+            with cls._rss_import_jobs_lock:
+                job = cls._rss_import_jobs.get(job_id)
+                if not job:
+                    return
+                row = next((item for item in job['rows'] if item['row'] == row_number), None)
+                if not row or row['status'] != 'pending':
+                    continue
+                row['status'] = 'processing'
+                row['reason'] = ''
+                job['state'] = 'running'
+                job['current_row'] = row_number
+                values = deepcopy(row['values'])
+                input_error = row.get('input_error', '')
+                rss_type = job['type']
+            try:
+                values, validation_message = cls._validate_rss_import_values(values)
+                if input_error:
+                    success = False
+                    reason = input_error
+                elif validation_message:
+                    success = False
+                    reason = validation_message
+                else:
+                    result = WebAction()._WebAction__add_rss_media({'type': rss_type, **values})
+                    code = result.get('code', 1)
+                    success = str(code) == '0'
+                    reason = result.get('msg') or ('导入成功' if success else '导入失败')
+            except Exception as error:
+                log.exception('第 %s 行订阅导入失败：%s', row_number, error)
+                success = False
+                reason = str(error) or '导入时发生未知错误'
+            with cls._rss_import_jobs_lock:
+                job = cls._rss_import_jobs.get(job_id)
+                row = next((item for item in job['rows'] if item['row'] == row_number), None) if job else None
+                if row:
+                    row['status'] = 'success' if success else 'failed'
+                    row['reason'] = '' if success else reason
+                    cls._refresh_rss_import_counts(job)
+
+    @classmethod
+    def _schedule_rss_import(cls, job_id, row_numbers):
+        cls._rss_import_executor.submit(cls._run_rss_import_rows, job_id, row_numbers)
+
+    def __start_rss_excel_import(self, data):
+        filepath = (data or {}).get('filepath') or ''
+        rss_type = (data or {}).get('type')
+        if rss_type not in ('MOV', 'TV'):
+            return {'code': 1, 'msg': '订阅类型无效'}
+        try:
+            rows = self._parse_rss_import_xlsx(filepath)
+        except (OSError, ValueError) as error:
+            return {'code': 1, 'msg': str(error)}
+        finally:
+            # 文件解析后不再需要，避免临时目录累积用户上传的内容。
+            try:
+                path = os.path.realpath(filepath)
+                if path.startswith(os.path.realpath(Config().get_temp_path()) + os.sep) and os.path.isfile(path):
+                    os.unlink(path)
+            except OSError:
+                pass
+        job_id = uuid.uuid4().hex
+        job = {
+            'id': job_id, 'type': rss_type, 'total': len(rows), 'processed': 0,
+            'succeeded': 0, 'failed': 0, 'current_row': None, 'state': 'running', 'rows': rows
+        }
+        with self._rss_import_jobs_lock:
+            self._rss_import_jobs[job_id] = job
+            response = self._rss_import_job_copy(job)
+        self._schedule_rss_import(job_id, [row['row'] for row in rows])
+        return {'code': 0, 'job': response}
+
+    def __get_rss_excel_import(self, data):
+        job_id = (data or {}).get('job_id')
+        with self._rss_import_jobs_lock:
+            job = self._rss_import_jobs.get(job_id)
+            if not job:
+                return {'code': 1, 'msg': '导入任务不存在或已过期'}
+            return {'code': 0, 'job': self._rss_import_job_copy(job)}
+
+    def __retry_rss_excel_import(self, data):
+        job_id = (data or {}).get('job_id')
+        request_rows = (data or {}).get('rows') or []
+        if not isinstance(request_rows, list) or not request_rows:
+            return {'code': 1, 'msg': '请选择需要重新导入的数据'}
+        with self._rss_import_jobs_lock:
+            job = self._rss_import_jobs.get(job_id)
+            if not job:
+                return {'code': 1, 'msg': '导入任务不存在或已过期'}
+            retry_rows = []
+            for request_row in request_rows:
+                try:
+                    row_number = int(request_row.get('row'))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                row = next((item for item in job['rows'] if item['row'] == row_number), None)
+                if not row:
+                    continue
+                row['values'] = self._normalise_rss_import_values(request_row.get('values', row['values']))
+                row['status'] = 'pending'
+                row['reason'] = ''
+                row['input_error'] = ''
+                retry_rows.append(row_number)
+            if not retry_rows:
+                return {'code': 1, 'msg': '没有找到可重新导入的数据'}
+            job['state'] = 'running'
+            job['current_row'] = None
+            self._refresh_rss_import_counts(job)
+            response = self._rss_import_job_copy(job)
+        self._schedule_rss_import(job_id, retry_rows)
+        return {'code': 0, 'job': response}
+
+    @staticmethod
+    def _rss_import_xlsx_column_name(index):
+        name = ''
+        index += 1
+        while index:
+            index, remainder = divmod(index - 1, 26)
+            name = chr(65 + remainder) + name
+        return name
+
+    @classmethod
+    def _rss_import_sheet_xml(cls, rows, validations=None):
+        sheet_rows = []
+        for row_number, row in enumerate(rows, start=1):
+            cells = []
+            for column, value in enumerate(row):
+                text = escape(cls._rss_import_text(value))
+                coordinate = '%s%s' % (cls._rss_import_xlsx_column_name(column), row_number)
+                cells.append('<c r="%s" t="inlineStr"><is><t>%s</t></is></c>' % (coordinate, text))
+            sheet_rows.append('<row r="%s">%s</row>' % (row_number, ''.join(cells)))
+        validation_xml = ''
+        if validations:
+            entries = [
+                '<dataValidation type="list" allowBlank="1" showErrorMessage="0" sqref="%s2:%s5001"><formula1>=%s</formula1></dataValidation>' % (
+                    cls._rss_import_xlsx_column_name(column), cls._rss_import_xlsx_column_name(column), name
+                )
+                for column, name in validations.items()
+            ]
+            validation_xml = '<dataValidations count="%s">%s</dataValidations>' % (len(entries), ''.join(entries))
+        return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                '<sheetData>%s</sheetData>%s</worksheet>') % (''.join(sheet_rows), validation_xml)
+
+    @classmethod
+    def _make_rss_import_xlsx(cls, rows, option_lists=None, validations=None):
+        """生成 xlsx；模板含隐藏选项页和 Excel 下拉校验，错误导出保持单工作表。"""
+        worksheets = [('订阅导入', cls._rss_import_sheet_xml(rows, validations))]
+        defined_names = []
+        if option_lists:
+            option_names = list(option_lists)
+            option_rows = [option_names]
+            max_length = max((len(values) for values in option_lists.values()), default=0)
+            for row_index in range(max_length):
+                option_rows.append([
+                    option_lists[name][row_index] if row_index < len(option_lists[name]) else ''
+                    for name in option_names
+                ])
+            worksheets.append(('选项', cls._rss_import_sheet_xml(option_rows), 'hidden'))
+            for column, name in enumerate(option_names):
+                value_count = len(option_lists[name])
+                if value_count:
+                    letter = cls._rss_import_xlsx_column_name(column)
+                    defined_names.append('<definedName name="%s">\'选项\'!$%s$2:$%s$%s</definedName>' % (
+                        name, letter, letter, value_count + 1
+                    ))
+            worksheets.append(('填写说明', cls._rss_import_sheet_xml([
+                ['填写说明'],
+                ['标题为必填项；空白的筛选类字段表示使用默认/全部。'],
+                ['RSS站点可通过下拉选择；选择多个 RSS 站点时请以英文逗号分隔，留空表示全部站点。'],
+                ['搜索站点支持多选：在“搜索站点：站点名”列中将需要的站点填写为“是”，可同时选择多个。'],
+                ['模糊匹配、洗版请从“是/否”下拉项中选择。'],
+                ['过滤规则、下载设置请从下拉项中选择，系统会自动转换为对应配置。']
+            ])))
+
+        content_overrides = ''.join(
+            '<Override PartName="/xl/worksheets/sheet%s.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' % (index + 1)
+            for index in range(len(worksheets))
+        )
+        relationships = ''.join(
+            '<Relationship Id="rId%s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet%s.xml"/>' % (index + 1, index + 1)
+            for index in range(len(worksheets))
+        )
+        sheets = ''.join(
+            '<sheet name="%s" sheetId="%s" r:id="rId%s"%s/>' % (
+                escape(name), index + 1, index + 1, ' state="hidden"' if len(item) > 2 else ''
+            )
+            for index, item in enumerate(worksheets)
+            for name in [item[0]]
+        )
+        defined_names_xml = '<definedNames>%s</definedNames>' % ''.join(defined_names) if defined_names else ''
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>%s</Types>' % content_overrides)
+            archive.writestr('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+            archive.writestr('xl/workbook.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>%s</sheets>%s</workbook>' % (sheets, defined_names_xml))
+            archive.writestr('xl/_rels/workbook.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">%s</Relationships>' % relationships)
+            for index, item in enumerate(worksheets, start=1):
+                archive.writestr('xl/worksheets/sheet%s.xml' % index, item[1])
+        return output.getvalue()
+
+    @classmethod
+    def get_rss_import_template(cls, rss_type):
+        options = cls._rss_import_options()
+        columns = []
+        for label, field in cls._rss_import_columns:
+            if field == 'search_sites' and options['search_sites']:
+                columns.extend([
+                    ('搜索站点：%s' % site_name, '__search_site__:%s' % site_name)
+                    for site_name in options['search_sites']
+                ])
+            else:
+                columns.append((label, field))
+        if rss_type == 'MOV':
+            columns = [column for column in columns if column[1] not in ('season', 'total_ep', 'current_ep')]
+        option_lists = {
+            'yes_no': ['是', '否'],
+            'seasons': ['%02d' % number for number in range(1, 51)],
+            'rss_sites': options['rss_sites'],
+            'search_sites': options['search_sites'],
+            'resource_types': ['BLURAY', 'REMUX', 'DOLBY', 'WEB', 'HDTV', 'UHD', 'HDR', '3D'],
+            'resolutions': ['8k', '4k', '1080p', '720p'],
+            'filter_rules': ['站点/默认规则'] + [
+                '%s | %s' % (rule_id, name) for rule_id, name in options['filter_rules'].items()
+            ],
+            'download_settings': ['站点设置'] + [
+                '%s | %s' % (setting_id, name) for setting_id, name in options['download_settings'].items()
+            ]
+        }
+        field_columns = {field: index for index, (_, field) in enumerate(columns)}
+        validations = {
+            field_columns[field]: list_name
+            for field, list_name in {
+                'season': 'seasons', 'fuzzy_match': 'yes_no', 'rss_sites': 'rss_sites',
+                'over_edition': 'yes_no', 'filter_restype': 'resource_types',
+                'filter_pix': 'resolutions', 'filter_rule': 'filter_rules', 'download_setting': 'download_settings'
+            }.items()
+            if field in field_columns and option_lists[list_name]
+        }
+        validations.update({
+            index: 'yes_no' for index, (_, field) in enumerate(columns)
+            if field.startswith('__search_site__:')
+        })
+        return cls._make_rss_import_xlsx([[column[0] for column in columns]], option_lists, validations)
+
+    @classmethod
+    def get_rss_import_error_xlsx(cls, job_id):
+        with cls._rss_import_jobs_lock:
+            job = cls._rss_import_jobs.get(job_id)
+            if not job:
+                return None
+            errors = [deepcopy(row) for row in job['rows'] if row['status'] == 'failed']
+            rss_type = job['type']
+        columns = cls._rss_import_columns
+        if rss_type == 'MOV':
+            columns = [column for column in columns if column[1] not in ('season', 'total_ep', 'current_ep')]
+        header = [column[0] for column in columns] + ['错误原因']
+        data = [header]
+        for row in errors:
+            values = row['values']
+            data.append([
+                ','.join(values.get(field, [])) if field in ('rss_sites', 'search_sites') else values.get(field, '')
+                for _, field in columns
+            ] + [row.get('reason', '')])
+        return cls._make_rss_import_xlsx(data)
 
     def re_identification(self, data):
         """

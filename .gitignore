@@ -25,3 +25,4 @@ web2/.vite
 web2/*.tsbuildinfo
 *.db-shm
 *.db-wal
+/config/.secret_key
