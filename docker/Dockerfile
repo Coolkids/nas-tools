@@ -20,6 +20,7 @@ LABEL maintainer="Coolkids"
 
 ARG TARGETPLATFORM
 ARG REPO_URL=https://github.com/Coolkids/nas-tools.git
+ARG RUSTFS_CLI_VERSION=0.1.35
 
 # 系统运行时依赖 + 编译工具（部分包在 Python 3.14 下可能无预编译 wheel）
 RUN apt-get update && apt-get install -y \
@@ -65,11 +66,13 @@ RUN uv pip install --upgrade pip setuptools wheel Cython \
 RUN SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])") \
     && echo '/app/nas-tools' > "$SITE_PACKAGES/nas-tools.pth"
 
-# 安装 rclone、mc
+# 安装 rclone、RustFS CLI
 RUN curl -fsSL https://rclone.org/install.sh | bash \
     && if [ "$TARGETPLATFORM" = "linux/amd64" ]; then ARCH=amd64; elif [ "$TARGETPLATFORM" = "linux/arm64" ]; then ARCH=arm64; else ARCH=amd64; fi \
-    && curl -fsSL "https://github.com/minio/mc/releases/download/RELEASE.2025-08-13T08-35-41Z/mc.linux-${ARCH}.RELEASE.2025-08-13T08-35-41Z" --create-dirs -o /usr/bin/mc \
-    && chmod +x /usr/bin/mc
+    && curl -fsSL "https://github.com/rustfs/cli/releases/download/v${RUSTFS_CLI_VERSION}/rustfs-cli-linux-${ARCH}-v${RUSTFS_CLI_VERSION}.tar.gz" -o /tmp/rc.tar.gz \
+    && tar -xzf /tmp/rc.tar.gz -C /usr/bin rc \
+    && chmod +x /usr/bin/rc \
+    && rm -f /tmp/rc.tar.gz
 
 # 复制前端构建产物
 COPY --from=frontend-builder /frontend/dist /app/web/dist

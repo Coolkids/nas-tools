@@ -65,7 +65,7 @@ nohup uv run python run.py &
   5) 其它：仍然会持续增加对通知渠道的支持，API KEY获取方式类似，不一一说明。
 
 ### 2、基础配置
-* 文件转移模式说明：目前支持六种模式：复制、硬链接、软链接、移动、RCLONE、MINIO。
+* 文件转移模式说明：目前支持六种模式：复制、硬链接、软链接、移动、RCLONE、RustFS。
 
   1) 复制模式下载做种和媒体库是两份，多占用存储（下载盘大小决定能保多少种），好处是媒体库的盘不用24小时运行可以休眠；
 
@@ -75,7 +75,7 @@ nohup uv run python run.py &
   
   4) RCLONE模式只针对RCLONE网盘使用场景，**注意，使用RCLONE模式需要自行映射rclone配置目录到容器中**，具体参考设置项小问号说明； 
   
-  5) MINIO只针对S3/云原生场景，**注意，使用MINIO，媒体库应当设置为/bucket名/类别名**，例如,bucket的名字叫cloud,电影的分类文件夹名叫movie，则媒体库电影路径为：/cloud/movie,最好母集用s3fs挂载到/cloud/movie，只读就行。
+  5) RustFS只针对S3/云原生场景，**注意，使用RustFS，媒体库应当设置为/bucket名/类别名**，例如,bucket的名字叫cloud,电影的分类文件夹名叫movie，则媒体库电影路径为：/cloud/movie,最好母集用s3fs挂载到/cloud/movie，只读就行。使用前请以运行NASTool的用户配置`NASTOOL`别名，例如：`rc alias set NASTOOL http://RustFS地址:9000 access_key secret_key`。
 
 
 * 启动程序并配置：Docker默认使用3000端口启动（群晖套件默认3003端口），默认用户密码：admin/password（docker需要参考教程提前映射好端口、下载目录、媒体库目录）。登录管理界面后，在设置中根据每个配置项的提示在WEB页面修改好配置并重启生效（基础设置中有标红星的是必须要配置的，如TMDB APIKEY等），每一个配置项后都有小问号，点击会有详细的配置说明，推荐阅读。

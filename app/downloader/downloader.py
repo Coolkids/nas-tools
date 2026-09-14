@@ -339,7 +339,7 @@ class Downloader:
                         self.default_client.set_torrents_status(ids=task.get("id"),
                                                                 tags=task.get("tags"))
                     else:
-                        if self._pt_rmt_mode in [RmtMode.MOVE, RmtMode.RCLONE, RmtMode.MINIO]:
+                        if self._pt_rmt_mode in [RmtMode.MOVE, RmtMode.RCLONE, RmtMode.RUSTFS]:
                             log.warn("【Downloader】移动模式下删除种子文件：%s" % task.get("id"))
                             self.default_client.delete_torrents(delete_file=True, ids=task.get("id"))
                         else:

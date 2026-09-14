@@ -177,12 +177,12 @@ class FileTransfer:
             elif rmt_mode == RmtMode.RCLONECOPY:
                 # Rclone复制
                 retcode, retmsg = SystemUtils.rclone_copy(file_item, target_file)
-            elif rmt_mode == RmtMode.MINIO:
-                # Minio移动
-                retcode, retmsg = SystemUtils.minio_move(file_item, target_file)
-            elif rmt_mode == RmtMode.MINIOCOPY:
-                # Minio复制
-                retcode, retmsg = SystemUtils.minio_copy(file_item, target_file)
+            elif rmt_mode == RmtMode.RUSTFS:
+                # RustFS移动
+                retcode, retmsg = SystemUtils.rustfs_move(file_item, target_file)
+            elif rmt_mode == RmtMode.RUSTFSCOPY:
+                # RustFS复制
+                retcode, retmsg = SystemUtils.rustfs_copy(file_item, target_file)
             else:
                 # 复制
                 retcode, retmsg = SystemUtils.copy(file_item, target_file)
@@ -1318,7 +1318,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='文件转移工具')
     parser.add_argument('-m', '--mode', dest='mode', required=True,
-                        help='转移模式：link copy softlink move rclone rclonecopy minio miniocopy')
+                        help='转移模式：link copy softlink move rclone rclonecopy rustfs rustfscopy')
     parser.add_argument('-s', '--source', dest='s_path', required=True, help='硬链接源目录路径')
     parser.add_argument('-d', '--target', dest='t_path', required=False, help='硬链接目的目录路径')
     args = parser.parse_args()

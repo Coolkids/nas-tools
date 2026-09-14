@@ -41,8 +41,8 @@ class RmtMode(Enum):
     MOVE = "移动"
     RCLONECOPY = "Rclone复制"
     RCLONE = "Rclone移动"
-    MINIOCOPY = "Minio复制"
-    MINIO = "Minio移动"
+    RUSTFSCOPY = "RustFS复制"
+    RUSTFS = "RustFS移动"
 
 
 class MatchMode(Enum):

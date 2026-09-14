@@ -29,8 +29,8 @@ class ModuleConf(object):
         "move": RmtMode.MOVE,
         "rclone": RmtMode.RCLONE,
         "rclonecopy": RmtMode.RCLONECOPY,
-        "minio": RmtMode.MINIO,
-        "miniocopy": RmtMode.MINIOCOPY
+        "rustfs": RmtMode.RUSTFS,
+        "rustfscopy": RmtMode.RUSTFSCOPY
     }
 
     # 下载器

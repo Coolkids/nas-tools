@@ -201,16 +201,16 @@ class SystemUtils:
             return -1, str(err)
 
     @staticmethod
-    def minio_move(src, dest):
+    def rustfs_move(src, dest):
         """
-        Minio移动
+        RustFS移动
         """
         try:
             src = os.path.normpath(src)
             dest = dest.replace("\\", "/")
             if dest.startswith("/"):
                 dest = dest[1:]
-            retcode = subprocess.run(['mc', 'mv',
+            retcode = subprocess.run(['rc', 'mv',
                                       '--recursive',
                                       src,
                                       f'NASTOOL/{dest}'],
@@ -221,16 +221,16 @@ class SystemUtils:
             return -1, str(err)
 
     @staticmethod
-    def minio_copy(src, dest):
+    def rustfs_copy(src, dest):
         """
-        Minio复制
+        RustFS复制
         """
         try:
             src = os.path.normpath(src)
             dest = dest.replace("\\", "/")
             if dest.startswith("/"):
                 dest = dest[1:]
-            retcode = subprocess.run(['mc', 'cp',
+            retcode = subprocess.run(['rc', 'cp',
                                       '--recursive',
                                       src,
                                       f'NASTOOL/{dest}'],
