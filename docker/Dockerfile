@@ -59,7 +59,7 @@ ENV VIRTUAL_ENV=/app/.venv \
     PATH="/app/.venv/bin:${PATH}"
 
 # 升级 pip 工具链
-RUN uv pip install --upgrade pip setuptools wheel Cython \
+RUN uv pip install --upgrade pip setuptools wheel \
     && rm -rf /tmp/* /root/.cache
 
 # 添加项目路径到 venv 的 site-packages
