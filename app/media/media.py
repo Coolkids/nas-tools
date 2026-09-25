@@ -691,13 +691,14 @@ class Media:
                 headers={"Content-Type": "application/json", "User-Agent": Config().get_ua()}
             ).post_res(url=url, json={"title": title})
             if not response or response.status_code != 200:
-                log.warning("【Meta】AI推理接口返回异常：%s", response.status_code if response else "无响应")
+                log.warn("【Meta】AI推理接口返回异常：%s" %
+                         (response.status_code if response else "无响应"))
                 return None
             payload = response.json()
             result = payload.get("result") if isinstance(payload, dict) else None
             return result if isinstance(result, dict) else None
         except Exception as err:
-            log.warning("【Meta】调用AI推理接口失败：%s", str(err))
+            log.warn("【Meta】调用AI推理接口失败：%s" % str(err))
             return None
 
     @staticmethod
