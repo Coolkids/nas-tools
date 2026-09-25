@@ -12,7 +12,7 @@ os.environ.setdefault("NASTOOL_CONFIG", str(ROOT_PATH / "config" / "config.yaml"
 
 from app.media.media import Media
 from app.media.meta import MetaInfo
-from app.utils import TmdbWebSearchCache, cacheman
+from app.utils import TmdbWebSearchCache
 from app.utils.types import MediaType
 
 
@@ -112,7 +112,6 @@ class SearchFallbackTest(TestCase):
         meta_info = MetaInfo("小丑 2 Joker 2 2024 1080p")
         media = object.__new__(Media)
         media._search_tmdbweb = True
-        media._search_keyword = False
         searched_names = []
 
         def search_tmdb_web(file_media_name, mtype):
@@ -128,50 +127,6 @@ class SearchFallbackTest(TestCase):
             [("小丑 2", MediaType.MOVIE), ("Joker 2", MediaType.MOVIE)],
             searched_names
         )
-
-    def test_keyword_cache_keeps_the_detected_media_type(self):
-        feature_name = "Iron Man 3"
-        cache = cacheman["tmdb_supply"]
-        cache.delete(feature_name)
-        media = object.__new__(Media)
-        media._Media__search_engine = Mock(return_value=(feature_name, True))
-        media._Media__search_tmdb = Mock(return_value={"id": 502356})
-        media._Media__search_multi_tmdb = Mock()
-
-        try:
-            first_result = media._Media__search_by_keyword(feature_name)
-            second_result = media._Media__search_by_keyword(feature_name)
-        finally:
-            cache.delete(feature_name)
-
-        self.assertEqual({"id": 502356}, first_result)
-        self.assertEqual({"id": 502356}, second_result)
-        media._Media__search_engine.assert_called_once_with(feature_name)
-        self.assertEqual(2, media._Media__search_tmdb.call_count)
-        media._Media__search_multi_tmdb.assert_not_called()
-
-    def test_keyword_search_merges_highlighted_title_parts(self):
-        calls = []
-
-        class FakeRequestUtils:
-            def __init__(self, timeout):
-                self.timeout = timeout
-
-            def get_res(self, url):
-                calls.append(url)
-                if "bing.com" in url:
-                    return SimpleNamespace(
-                        status_code=200,
-                        text="<html><body><h2><strong>Iron Man</strong> <strong>3</strong> - Wikipedia</h2></body></html>"
-                    )
-                return None
-
-        with patch("app.media.media.RequestUtils", FakeRequestUtils):
-            keyword, is_movie = Media._Media__search_engine("Iron Man 3")
-
-        self.assertEqual("iron man 3", keyword)
-        self.assertFalse(is_movie)
-        self.assertEqual("Iron Man 3", parse_qs(urlparse(calls[0]).query)["q"][0])
 
     def test_tmdb_web_search_allows_chinese_and_encodes_the_query(self):
         calls = []

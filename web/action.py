@@ -238,6 +238,7 @@ class WebAction:
             "run_directory_sync": self.__run_directory_sync,
             "get_config": self.__get_config,
             "get_system_config": self.__get_system_config,
+            "get_ai_recognition_records": self.__get_ai_recognition_records,
             "version": self.__version
         }
 
@@ -1244,6 +1245,13 @@ class WebAction:
         更新配置信息
         """
         cfg = Config().get_config()
+        data = data or {}
+        if data.get("laboratory.ai_inference"):
+            ai_url = data.get("laboratory.ai_inference_url")
+            if not ai_url:
+                ai_url = cfg.get("laboratory", {}).get("ai_inference_url")
+            if not str(ai_url or "").strip():
+                return {"code": 1, "msg": "启用AI推理前请输入接口地址"}
         cfgs = dict(data).items()
         # 仅测试不保存
         config_test = False
@@ -2644,6 +2652,7 @@ class WebAction:
                         tmdb_S_E_link, media_info.get_episode_seq())
         return {
             "type": media_info.type.value if media_info.type else "",
+            "recognition_source": media_info.recognition_source,
             "name": media_info.get_name(),
             "title": media_info.title,
             "year": media_info.year,
@@ -5039,6 +5048,73 @@ class WebAction:
         """
         cfg = Config().get_config()
         return {"code": 0, "config": cfg}
+
+    @staticmethod
+    def __get_ai_recognition_records(data):
+        """查询本地解析与 AI 解析不一致或同时未命中的记录。"""
+        data = data or {}
+        title = (data.get("title") or "").strip()
+        try:
+            page = max(int(data.get("page") or 1), 1)
+            page_size = min(max(int(data.get("page_size") or 20), 1), 100)
+        except (TypeError, ValueError):
+            return {"code": 1, "msg": "分页参数无效"}
+        total, records = DbHelper().get_ai_recognition_records(title=title, page=page, page_size=page_size)
+
+        def decode(value):
+            try:
+                return json.loads(value) if value else {}
+            except (TypeError, ValueError):
+                return {"raw": value}
+
+        return {
+            "code": 0,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "records": [{
+                "id": record.ID,
+                "title": record.TITLE,
+                "status": record.STATUS,
+                "add_time": record.ADD_TIME,
+                "anitopy_result": decode(record.ANITOPY_RESULT),
+                "ai_result": decode(record.AI_RESULT),
+                "anitopy_tmdb": decode(record.ANITOPY_TMDB),
+                "ai_tmdb": decode(record.AI_TMDB),
+            } for record in records]
+        }
+
+    @classmethod
+    def get_ai_recognition_xlsx(cls, title=None):
+        """导出 AI 识别核对记录为 Excel。"""
+        title = (title or "").strip()
+        total, records = DbHelper().get_ai_recognition_records(title=title, page=1, page_size=100)
+        all_records = list(records)
+        page = 2
+        while len(all_records) < total:
+            _, records = DbHelper().get_ai_recognition_records(title=title, page=page, page_size=100)
+            if not records:
+                break
+            all_records.extend(records)
+            page += 1
+
+        def compact(value):
+            if not value:
+                return ""
+            try:
+                value = json.dumps(json.loads(value), ensure_ascii=False, separators=(",", ":"))
+            except (TypeError, ValueError):
+                value = str(value)
+            return value[:32767]
+
+        rows = [["ID", "标题", "状态", "时间", "本地解析结果", "AI解析结果", "本地TMDB结果", "AI TMDB结果"]]
+        rows.extend([
+            [record.ID, record.TITLE, record.STATUS, record.ADD_TIME,
+             compact(record.ANITOPY_RESULT), compact(record.AI_RESULT),
+             compact(record.ANITOPY_TMDB), compact(record.AI_TMDB)]
+            for record in all_records
+        ])
+        return cls._make_rss_import_xlsx(rows)
 
     @staticmethod
     def __version(data=None):

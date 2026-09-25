@@ -129,6 +129,7 @@ class MetaBase(object):
     # 下载设置
     download_setting = None
     # 识别辅助
+    recognition_source = "original"
     ignored_words = None
     replaced_words = None
     offset_words = None

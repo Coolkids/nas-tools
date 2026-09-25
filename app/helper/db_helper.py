@@ -15,6 +15,19 @@ class DbHelper:
     _db = MainDb()
 
     @staticmethod
+    def _json_default(value):
+        """将 TMDB 的 AsObj 等对象转换为可持久化的 JSON 结构。"""
+        if isinstance(value, Enum):
+            return value.value
+        if hasattr(value, "__dict__"):
+            return value.__dict__
+        return str(value)
+
+    @classmethod
+    def _json_dumps(cls, value):
+        return json.dumps(value or {}, ensure_ascii=False, default=cls._json_default)
+
+    @staticmethod
     def release_session():
         from app.db import close_db
         close_db()
@@ -150,6 +163,33 @@ class DbHelper:
         查询所有搜索任务，按开始时间倒序
         """
         return self._db.query(SEARCHTASK).order_by(SEARCHTASK.ID.desc()).limit(limit).all()
+
+    @DbPersist(_db)
+    def insert_ai_recognition_record(self, title, anitopy_result, ai_result,
+                                     anitopy_tmdb, ai_tmdb, status):
+        """保存未命中或匹配冲突的双解析结果。"""
+        record = AIRECOGNITIONRECORD(
+            TITLE=title,
+            ANITOPY_RESULT=self._json_dumps(anitopy_result),
+            AI_RESULT=self._json_dumps(ai_result),
+            ANITOPY_TMDB=self._json_dumps(anitopy_tmdb),
+            AI_TMDB=self._json_dumps(ai_tmdb),
+            STATUS=status,
+            ADD_TIME=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        )
+        self._db.insert(record)
+        return record
+
+    def get_ai_recognition_records(self, title=None, page=1, page_size=20):
+        """按标题分页查询 AI 识别核对记录。"""
+        page = max(int(page or 1), 1)
+        page_size = min(max(int(page_size or 20), 1), 100)
+        query = self._db.query(AIRECOGNITIONRECORD)
+        if title:
+            query = query.filter(AIRECOGNITIONRECORD.TITLE.contains(title))
+        total = query.count()
+        records = query.order_by(AIRECOGNITIONRECORD.ID.desc()).offset((page - 1) * page_size).limit(page_size).all()
+        return total, records
 
     def get_running_tasks(self):
         """

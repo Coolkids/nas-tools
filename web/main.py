@@ -845,6 +845,19 @@ def rss_import_errors(job_id):
     )
 
 
+@App.route('/ai_recognition_export.xlsx', methods=['GET'])
+@login_required
+def ai_recognition_export():
+    """导出 AI 识别核对记录。"""
+    workbook = WebAction.get_ai_recognition_xlsx(request.args.get('title', ''))
+    return send_file(
+        io.BytesIO(workbook),
+        as_attachment=True,
+        download_name='AI识别核对记录.xlsx',
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+
+
 # base64模板过滤器
 @App.template_filter('b64encode')
 def b64encode(s):

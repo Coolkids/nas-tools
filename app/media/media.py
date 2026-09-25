@@ -1,23 +1,22 @@
-import difflib
+import json
 import os
 import random
 import re
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlencode
 
 import zhconv
+import anitopy
 from lxml import etree
 from app.utils import ExceptionUtils
 import log
-from app.helper import MetaHelper
-from app.media.meta.metainfo import MetaInfo
+from app.helper import DbHelper, MetaHelper
+from app.media.meta.metainfo import MetaInfo, prepare_media_title
 from app.media.tmdbv3api import TMDb, Search, Movie, TV, Person, Find, TMDbException, Discover, Trending, Episode, Genre
-from app.utils import PathUtils, EpisodeFormat, RequestUtils, NumberUtils, StringUtils, cacheman, TmdbWebSearchCache
+from app.utils import PathUtils, EpisodeFormat, RequestUtils, NumberUtils, StringUtils, TmdbWebSearchCache
 from app.utils.types import MediaType, MatchMode
-from config import Config, KEYWORD_BLACKLIST, KEYWORD_SEARCH_WEIGHT_3, KEYWORD_SEARCH_WEIGHT_2, KEYWORD_SEARCH_WEIGHT_1, \
-    KEYWORD_STR_SIMILARITY_THRESHOLD, KEYWORD_DIFF_SCORE_THRESHOLD, TMDB_IMAGE_ORIGINAL_URL, DEFAULT_TMDB_PROXY, \
+from config import Config, TMDB_IMAGE_ORIGINAL_URL, DEFAULT_TMDB_PROXY, \
     TMDB_IMAGE_FACE_URL, TMDB_PEOPLE_PROFILE_URL, TMDB_IMAGE_W500_URL
 
 
@@ -38,7 +37,8 @@ class Media:
     genre = None
     meta = None
     _rmt_match_mode = None
-    _search_keyword = None
+    _ai_inference = False
+    _ai_inference_url = None
     _search_tmdbweb = None
     _tmdb_clients = None
     _tmdb_query_cache = None
@@ -87,7 +87,8 @@ class Media:
                 self._rmt_match_mode = MatchMode.NORMAL
         laboratory = Config().get_config('laboratory')
         if laboratory:
-            self._search_keyword = laboratory.get("search_keyword")
+            self._ai_inference = laboratory.get("ai_inference", False)
+            self._ai_inference_url = laboratory.get("ai_inference_url")
             self._search_tmdbweb = laboratory.get("search_tmdbweb")
 
     @staticmethod
@@ -622,33 +623,12 @@ class Media:
         ))
         return result
 
-    def __search_by_keyword(self, feature_name):
-        """通过搜索引擎推断标题后再查询 TMDB。"""
-        cache_value = cacheman["tmdb_supply"].get(feature_name)
-        cache_name = None
-        is_movie = False
-        if isinstance(cache_value, tuple):
-            cache_name, is_movie = cache_value
-        elif cache_value:
-            # 兼容进程升级前缓存的字符串值。
-            cache_name = cache_value
-        else:
-            cache_name, is_movie = self.__search_engine(feature_name)
-            if cache_name:
-                cacheman["tmdb_supply"].set(feature_name, (cache_name, is_movie))
-        if not cache_name:
-            return None
-        log.info("【Meta】开始辅助查询：%s ..." % cache_name)
-        if is_movie:
-            return self.__search_tmdb(file_media_name=cache_name, search_type=MediaType.MOVIE)
-        return self.__search_multi_tmdb(file_media_name=cache_name)
-
     def __search_fallback(self, meta_info, mtype=None, primary_name=None):
         """
         执行实验室中的识别增强回退。
 
-        先使用 TMDB 网页的唯一结果，再使用搜索引擎关键词推断；每种方式
-        都会尝试中英文标题候选，以免数字或另一种语言在分词时丢失。
+        使用 TMDB 网页的唯一结果，并尝试中英文标题候选，以免数字或另一种
+        语言在分词时丢失。
         """
         search_names = self.__get_search_names(meta_info, primary_name)
         if self._search_tmdbweb:
@@ -656,12 +636,252 @@ class Media:
                 media_info = self.__search_tmdb_web(file_media_name=search_name, mtype=mtype)
                 if media_info:
                     return media_info
-        if self._search_keyword:
-            for search_name in search_names:
-                media_info = self.__search_by_keyword(search_name)
-                if media_info:
-                    return media_info
         return None
+
+    @staticmethod
+    def __json_safe(value):
+        """将 TMDB 返回值和枚举转换为可保存到 JSON 的结构。"""
+        if isinstance(value, MediaType):
+            return value.value
+        if isinstance(value, dict):
+            return {key: Media.__json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [Media.__json_safe(item) for item in value]
+        # tmdbv3api 返回的媒体对象是 AsObj，字段保存在 __dict__ 中，
+        # 不能直接交给 json.dumps。
+        if hasattr(value, "__dict__"):
+            return {key: Media.__json_safe(item) for key, item in value.__dict__.items()}
+        return value
+
+    @staticmethod
+    def __meta_snapshot(meta_info):
+        if not meta_info:
+            return {}
+        return Media.__json_safe({
+            "type": meta_info.type,
+            "recognition_source": meta_info.recognition_source,
+            "name": meta_info.get_name(),
+            "cn_name": meta_info.cn_name,
+            "en_name": meta_info.en_name,
+            "alternative_names": getattr(meta_info, "alternative_names", []),
+            "year": meta_info.year,
+            "season": meta_info.get_season_string(),
+            "episode": meta_info.get_episode_string(),
+            "part": meta_info.part,
+            "resource_type": meta_info.resource_type,
+            "resource_effect": meta_info.resource_effect,
+            "resource_pix": meta_info.resource_pix,
+            "resource_team": meta_info.resource_team,
+            "video_encode": meta_info.video_encode,
+            "audio_encode": meta_info.audio_encode,
+        })
+
+    def __request_ai_parse(self, title):
+        """调用 anitopy-ml 的单条解析接口。"""
+        if not self._ai_inference or not self._ai_inference_url or not title:
+            return None
+        url = str(self._ai_inference_url).strip().rstrip("/")
+        if not url:
+            return None
+        if not url.endswith("/v1/parse"):
+            url = "%s/v1/parse" % url
+        try:
+            response = RequestUtils(
+                timeout=10,
+                headers={"Content-Type": "application/json", "User-Agent": Config().get_ua()}
+            ).post_res(url=url, json={"title": title})
+            if not response or response.status_code != 200:
+                log.warning("【Meta】AI推理接口返回异常：%s", response.status_code if response else "无响应")
+                return None
+            payload = response.json()
+            result = payload.get("result") if isinstance(payload, dict) else None
+            return result if isinstance(result, dict) else None
+        except Exception as err:
+            log.warning("【Meta】调用AI推理接口失败：%s", str(err))
+            return None
+
+    @staticmethod
+    def __ai_media_type(value):
+        mapping = {
+            "movie": MediaType.MOVIE,
+            "tv": MediaType.TV,
+            "anime": MediaType.ANIME,
+            "电影": MediaType.MOVIE,
+            "电视剧": MediaType.TV,
+            "动漫": MediaType.ANIME,
+        }
+        return mapping.get(str(value or "").lower())
+
+    @staticmethod
+    def __first_extracted_value(value):
+        if isinstance(value, (list, tuple)):
+            return value[0] if value else None
+        return value
+
+    def __meta_from_ai_result(self, title, result, subtitle=None, used_info=None):
+        if not result or not isinstance(result.get("extracted"), dict):
+            return None
+        extracted = result["extracted"]
+        names = []
+        for name in [extracted.get("title"), *(extracted.get("title_aliases") or [])]:
+            if isinstance(name, str) and name.strip() and name.strip() not in names:
+                names.append(name.strip())
+        if not names:
+            return None
+        media_type = self.__ai_media_type(extracted.get("media_type"))
+        seasons = [int(value) for value in extracted.get("seasons", []) if str(value).isdigit() and int(value) > 0]
+        episodes = []
+        for item in extracted.get("episodes", []) or []:
+            if isinstance(item, dict) and str(item.get("value", "")).replace(".", "", 1).isdigit():
+                episodes.append(int(float(item["value"])))
+        if not media_type:
+            if seasons or episodes or extracted.get("release_kind") in ("episode", "season_pack"):
+                media_type = MediaType.TV
+            elif extracted.get("release_kind") == "movie":
+                media_type = MediaType.MOVIE
+        if not media_type:
+            return None
+        meta_info = MetaInfo("", mtype=media_type, apply_custom_words=False)
+        meta_info.org_string = title
+        meta_info.subtitle = subtitle
+        meta_info.type = media_type
+        meta_info.recognition_source = "ai"
+        used_info = used_info or {"ignored": [], "replaced": [], "offset": []}
+        meta_info.ignored_words = used_info.get("ignored", [])
+        meta_info.replaced_words = used_info.get("replaced", [])
+        meta_info.offset_words = used_info.get("offset", [])
+        meta_info.alternative_names = names
+        for name in names:
+            if StringUtils.is_chinese(name) and not meta_info.cn_name:
+                meta_info.cn_name = name
+            elif not meta_info.en_name:
+                meta_info.en_name = StringUtils.str_title(name)
+        if not meta_info.cn_name and not meta_info.en_name:
+            meta_info.en_name = names[0]
+        if extracted.get("year") is not None:
+            meta_info.year = str(extracted.get("year"))
+        if seasons:
+            meta_info.begin_season = seasons[0]
+            meta_info.end_season = seasons[-1] if len(seasons) > 1 else None
+        if episodes:
+            meta_info.begin_episode = episodes[0]
+            meta_info.end_episode = episodes[-1] if len(episodes) > 1 else None
+        meta_info.resource_type = self.__first_extracted_value(extracted.get("source"))
+        meta_info.resource_pix = self.__first_extracted_value(extracted.get("resolution"))
+        meta_info.video_encode = self.__first_extracted_value(
+            extracted.get("video_codecs") or extracted.get("video_encoders"))
+        meta_info.audio_encode = self.__first_extracted_value(extracted.get("audio_codecs"))
+        meta_info.resource_team = self.__first_extracted_value(extracted.get("release_groups"))
+        return meta_info
+
+    def __search_meta_tmdb(self, meta_info, strict=None, cache=True,
+                           chinese=True, append_to_response=None):
+        """按一套解析结果查询 TMDB，并维护同现有识别一致的缓存。"""
+        if not meta_info or not meta_info.get_name():
+            return None
+        media_key = self.__make_cache_key(meta_info)
+        if cache and self.meta.get_meta_data_by_key(media_key):
+            cache_info = self.meta.get_meta_data_by_key(media_key)
+            file_media_info = self.get_tmdb_info(mtype=cache_info.get("type"), tmdbid=cache_info.get("id"),
+                                                 chinese=chinese, append_to_response=append_to_response) \
+                if cache_info.get("id") else None
+            meta_info.set_tmdb_info(file_media_info)
+            return file_media_info
+        if meta_info.type != MediaType.TV and not meta_info.year:
+            file_media_info = self.__search_multi_tmdb(file_media_name=meta_info.get_name())
+        elif meta_info.type == MediaType.TV:
+            file_media_info = self.__search_tmdb(file_media_name=meta_info.get_name(),
+                                                 first_media_year=meta_info.year,
+                                                 search_type=meta_info.type,
+                                                 media_year=meta_info.year,
+                                                 season_number=meta_info.begin_season)
+            if not file_media_info and meta_info.year and self._rmt_match_mode == MatchMode.NORMAL and not strict:
+                file_media_info = self.__search_tmdb(file_media_name=meta_info.get_name(), search_type=meta_info.type)
+        else:
+            file_media_info = self.__search_tmdb(file_media_name=meta_info.get_name(),
+                                                 first_media_year=meta_info.year,
+                                                 search_type=MediaType.MOVIE)
+            if not file_media_info:
+                file_media_info = self.__search_tmdb(file_media_name=meta_info.get_name(),
+                                                     first_media_year=meta_info.year,
+                                                     search_type=MediaType.TV)
+            if not file_media_info and self._rmt_match_mode == MatchMode.NORMAL and not strict:
+                file_media_info = self.__search_multi_tmdb(file_media_name=meta_info.get_name())
+        if not file_media_info and not strict:
+            file_media_info = self.__search_by_title_aliases(meta_info)
+        if not file_media_info and self._search_tmdbweb:
+            file_media_info = self.__search_fallback(meta_info=meta_info, mtype=meta_info.type)
+        if file_media_info and not file_media_info.get("genres"):
+            file_media_info = self.get_tmdb_info(mtype=file_media_info.get("media_type"),
+                                                 tmdbid=file_media_info.get("id"), chinese=chinese,
+                                                 append_to_response=append_to_response)
+        if file_media_info is not None:
+            self.__insert_media_cache(media_key=media_key, file_media_info=file_media_info)
+        meta_info.set_tmdb_info(file_media_info)
+        return file_media_info
+
+    @staticmethod
+    def __same_tmdb(left, right):
+        if not left or not right:
+            return False
+        left_type = getattr(left.get("media_type"), "value", left.get("media_type"))
+        right_type = getattr(right.get("media_type"), "value", right.get("media_type"))
+        return str(left.get("id")) == str(right.get("id")) and left_type == right_type
+
+    def __get_media_info_with_ai(self, title, subtitle=None, mtype=None, strict=None,
+                                 cache=True, chinese=True, append_to_response=None):
+        """同时尝试本地解析和 AI 解析，按本地结果优先规则返回。"""
+        # 自定义识别词必须先于所有解析方式执行，保证本地解析、anitopy
+        # 和 AI 推理使用同一份处理后的标题。
+        processed_title, processed_subtitle, used_info = prepare_media_title(title, subtitle)
+        local_meta = MetaInfo(processed_title, subtitle=processed_subtitle,
+                              mtype=mtype, apply_custom_words=False)
+        local_meta.ignored_words = used_info.get("ignored", [])
+        local_meta.replaced_words = used_info.get("replaced", [])
+        local_meta.offset_words = used_info.get("offset", [])
+        if mtype:
+            local_meta.type = mtype
+        ai_result = self.__request_ai_parse(processed_title)
+        local_tmdb = self.__search_meta_tmdb(local_meta, strict=strict, cache=cache,
+                                             chinese=chinese, append_to_response=append_to_response)
+        ai_meta = self.__meta_from_ai_result(processed_title, ai_result,
+                                             subtitle=processed_subtitle, used_info=used_info)
+        # AI 接口只负责从文件名推断标题。转移时指定的媒体类型只参与
+        # TMDB 查询和后续转移，不作为 AI 推理输入。
+        if ai_meta and mtype:
+            ai_meta.type = mtype
+        ai_tmdb = self.__search_meta_tmdb(ai_meta, strict=strict, cache=cache,
+                                          chinese=chinese, append_to_response=append_to_response) if ai_meta else None
+        if local_tmdb and (not ai_tmdb or self.__same_tmdb(local_tmdb, ai_tmdb)):
+            selected = local_meta
+        elif ai_tmdb:
+            selected = ai_meta
+        else:
+            selected = local_meta if local_meta.get_name() else ai_meta
+        needs_record = (not local_tmdb and not ai_tmdb) or \
+            (local_tmdb and ai_tmdb and not self.__same_tmdb(local_tmdb, ai_tmdb))
+        if needs_record:
+            anitopy_result = {}
+            try:
+                anitopy_result = anitopy.parse(processed_title) or {}
+            except Exception:
+                pass
+            DbHelper().insert_ai_recognition_record(
+                title=title,
+                anitopy_result={"parsed": anitopy_result, "normalized": self.__meta_snapshot(local_meta)},
+                ai_result=ai_result or {},
+                anitopy_tmdb=self.__json_safe(local_tmdb),
+                ai_tmdb=self.__json_safe(ai_tmdb),
+                status="unmatched" if not local_tmdb and not ai_tmdb else "inconsistent"
+            )
+        if selected and (local_tmdb or ai_tmdb):
+            selected_tmdb = local_tmdb if selected is local_meta else ai_tmdb
+            selected.set_tmdb_info(selected_tmdb or ai_tmdb)
+            if mtype:
+                # set_tmdb_info 会按 TMDB 返回值重置 type；转移时仍以用户
+                # 选择的类型为准，避免 AI/TMDB 的分类影响转移路径。
+                selected.type = mtype
+        return selected
 
     def get_tmdb_info(self, mtype: MediaType,
                       tmdbid,
@@ -837,6 +1057,10 @@ class Media:
             return None
         if not title:
             return None
+        if self._ai_inference and self._ai_inference_url:
+            return self.__get_media_info_with_ai(title=title, subtitle=subtitle, mtype=mtype,
+                                                 strict=strict, cache=cache, chinese=chinese,
+                                                 append_to_response=append_to_response)
         # 识别
         meta_info = MetaInfo(title, subtitle=subtitle)
         if not meta_info.get_name() or not meta_info.type:
@@ -880,7 +1104,7 @@ class Media:
                         file_media_info = self.__search_multi_tmdb(file_media_name=meta_info.get_name())
             if not file_media_info and not strict:
                 file_media_info = self.__search_by_title_aliases(meta_info)
-            if not file_media_info and (self._search_tmdbweb or self._search_keyword):
+            if not file_media_info and self._search_tmdbweb:
                 file_media_info = self.__search_fallback(meta_info=meta_info,
                                                          mtype=meta_info.type)
             # 补充全量信息
@@ -936,6 +1160,10 @@ class Media:
             return None
         if not title:
             return None
+        if self._ai_inference and self._ai_inference_url:
+            return self.__get_media_info_with_ai(title=title, subtitle=subtitle, mtype=mtype,
+                                                 strict=strict, cache=cache, chinese=chinese,
+                                                 append_to_response=append_to_response)
         meta_info = MetaInfo(title, subtitle=subtitle)
         meta_info.cn_name = name
 
@@ -973,7 +1201,7 @@ class Media:
                     if not file_media_info and self._rmt_match_mode == MatchMode.NORMAL and not strict:
                         # 非严格模式下去掉年份和类型再查一次
                         file_media_info = self.__search_multi_tmdb(file_media_name=name)
-            if not file_media_info and (self._search_tmdbweb or self._search_keyword):
+            if not file_media_info and self._search_tmdbweb:
                 file_media_info = self.__search_fallback(meta_info=meta_info,
                                                          mtype=mtype,
                                                          primary_name=name)
@@ -1071,6 +1299,16 @@ class Media:
                     continue
                 # 没有自带TMDB信息
                 if not tmdb_info:
+                    if self._ai_inference and self._ai_inference_url:
+                        # AI 只接收文件名；media_type 仅在 AI 返回后用于 TMDB 查询
+                        # 和转移类型，不参与 AI 推理。
+                        ai_media_info = self.get_media_info(title=file_name, mtype=media_type,
+                                                             chinese=chinese)
+                        # 识别页面可以展示没有 TMDB 的解析结果，但文件转移必须
+                        # 有完整 TMDB 信息，否则 FileTransfer 会判定为未识别。
+                        if ai_media_info and ai_media_info.tmdb_info:
+                            return_media_infos[file_path] = ai_media_info
+                            continue
                     # 识别名称
                     meta_info = MetaInfo(title=file_name)
                     # 识别不到则使用上级的名称
@@ -1114,7 +1352,7 @@ class Media:
                                                                      search_type=meta_info.type)
                         if not file_media_info:
                             file_media_info = self.__search_by_title_aliases(meta_info)
-                        if not file_media_info and (self._search_tmdbweb or self._search_keyword):
+                        if not file_media_info and self._search_tmdbweb:
                             file_media_info = self.__search_fallback(meta_info=meta_info,
                                                                      mtype=meta_info.type)
                         # 补全TMDB信息
@@ -2180,148 +2418,6 @@ class Media:
         except Exception as e:
             print(str(e))
         return []
-
-    @staticmethod
-    def __get_search_result_texts(elements):
-        """将搜索页中同一标题内被拆开的高亮词合并为完整标题。"""
-        result_texts = []
-        for element in elements:
-            context = element
-            for parent in element.iterancestors():
-                if str(parent.tag).lower() in ["h1", "h2", "h3"]:
-                    context = parent
-                    break
-            if context is element:
-                text = "".join(element.itertext())
-            else:
-                # 标题的其余文字常包含站点名、简介等。只合并标题中的高亮词，
-                # 既保留“Title 2”里的数字，也不把“ - Wikipedia”带入检索词。
-                highlights = ["".join(highlight.itertext()).strip()
-                              for highlight in context.xpath(".//strong | .//em")]
-                text = " ".join(highlight for highlight in highlights if highlight)
-            text = re.sub(r"\s+", " ", text).strip()
-            if text and text not in result_texts:
-                result_texts.append(text)
-        return result_texts
-
-    @staticmethod
-    def __search_engine(feature_name):
-        """
-        辅助识别关键字
-        """
-        is_movie = False
-        if not feature_name:
-            return None, is_movie
-        # 剔除不必要字符
-        feature_name = re.compile(r"^\w+字幕[组社]?", re.IGNORECASE).sub("", feature_name)
-        backlist = sorted(KEYWORD_BLACKLIST, key=lambda x: len(x), reverse=True)
-        for single in backlist:
-            feature_name = feature_name.replace(single, " ")
-        if not feature_name:
-            return None, is_movie
-
-        def cal_score(strongs, r_dict):
-            for i, s in enumerate(strongs):
-                if len(strongs) < 5:
-                    if i < 2:
-                        score = KEYWORD_SEARCH_WEIGHT_3[0]
-                    else:
-                        score = KEYWORD_SEARCH_WEIGHT_3[1]
-                elif len(strongs) < 10:
-                    if i < 2:
-                        score = KEYWORD_SEARCH_WEIGHT_2[0]
-                    else:
-                        score = KEYWORD_SEARCH_WEIGHT_2[1] if i < (len(strongs) >> 1) else KEYWORD_SEARCH_WEIGHT_2[2]
-                else:
-                    if i < 2:
-                        score = KEYWORD_SEARCH_WEIGHT_1[0]
-                    else:
-                        score = KEYWORD_SEARCH_WEIGHT_1[1] if i < (len(strongs) >> 2) else KEYWORD_SEARCH_WEIGHT_1[
-                            2] if i < (
-                                len(strongs) >> 1) \
-                            else KEYWORD_SEARCH_WEIGHT_1[3] if i < (len(strongs) >> 2 + len(strongs) >> 1) else \
-                            KEYWORD_SEARCH_WEIGHT_1[
-                                4]
-                if r_dict.__contains__(s.lower()):
-                    r_dict[s.lower()] += score
-                    continue
-                r_dict[s.lower()] = score
-
-        bing_url = "https://www.cn.bing.com/search?%s" % urlencode({
-            "q": feature_name,
-            "qs": "n",
-            "form": "QBRE",
-            "sp": "-1"
-        })
-        baidu_url = "https://www.baidu.com/s?%s" % urlencode({
-            "ie": "utf-8",
-            "tn": "baiduhome_pg",
-            "wd": feature_name
-        })
-        # 两个搜索引擎相互独立，固定两个 I/O worker 避免回退阶段串行等待。
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="media-search") as executor:
-            bing_future = executor.submit(RequestUtils(timeout=5).get_res, url=bing_url)
-            baidu_future = executor.submit(RequestUtils(timeout=5).get_res, url=baidu_url)
-            res_bing = bing_future.result()
-            res_baidu = baidu_future.result()
-        ret_dict = {}
-        if res_bing and res_bing.status_code == 200:
-            html_text = res_bing.text
-            if html_text:
-                html = etree.HTML(html_text)
-                strongs_bing = [
-                    text for text in Media.__get_search_result_texts(html.cssselect(
-                        "#sp_requery strong, #sp_recourse strong, #tile_link_cn strong, .b_ad .ad_esltitle~div strong, h2 strong, .b_caption p strong, .b_snippetBigText strong, .recommendationsTableTitle+.b_slideexp strong, .recommendationsTableTitle+table strong, .recommendationsTableTitle+ul strong, .pageRecoContainer .b_module_expansion_control strong, .pageRecoContainer .b_title>strong, .b_rs strong, .b_rrsr strong, #dict_ans strong, .b_listnav>.b_ans_stamp>strong, #b_content #ans_nws .na_cnt strong, .adltwrnmsg strong"))
-                    if difflib.SequenceMatcher(None, feature_name, text).ratio() > KEYWORD_STR_SIMILARITY_THRESHOLD
-                ]
-                if strongs_bing:
-                    title = html.xpath("//aside//h2[@class = \" b_entityTitle\"]/text()")
-                    if len(title) > 0:
-                        if title:
-                            t = re.compile(r"\s*\(\d{4}\)$").sub("", title[0])
-                            ret_dict[t] = 200
-                            if html.xpath("//aside//div[@data-feedbk-ids = \"Movie\"]"):
-                                is_movie = True
-                    cal_score(strongs_bing, ret_dict)
-        if res_baidu and res_baidu.status_code == 200:
-            html_text = res_baidu.text
-            if html_text:
-                html = etree.HTML(html_text)
-                ems = [
-                    text for text in Media.__get_search_result_texts(html.cssselect("em"))
-                    if difflib.SequenceMatcher(None, feature_name, text).ratio() > KEYWORD_STR_SIMILARITY_THRESHOLD
-                ]
-                if len(ems) > 0:
-                    cal_score(ems, ret_dict)
-        if not ret_dict:
-            return None, False
-        ret = sorted(ret_dict.items(), key=lambda d: d[1], reverse=True)
-        log.info("【Meta】推断关键字为：%s ..." % ([k[0] for i, k in enumerate(ret) if i < 4]))
-        if len(ret) == 1:
-            keyword = ret[0][0]
-        else:
-            pre = ret[0]
-            nextw = ret[1]
-            if nextw[0].find(pre[0]) > -1:
-                # 满分直接判定
-                if int(pre[1]) >= 100:
-                    keyword = pre[0]
-                # 得分相差30 以上， 选分高
-                elif int(pre[1]) - int(nextw[1]) > KEYWORD_DIFF_SCORE_THRESHOLD:
-                    keyword = pre[0]
-                # 重复的不选
-                elif nextw[0].replace(pre[0], "").strip() == pre[0]:
-                    keyword = pre[0]
-                # 纯数字不选
-                elif pre[0].isdigit():
-                    keyword = nextw[0]
-                else:
-                    keyword = nextw[0]
-
-            else:
-                keyword = pre[0]
-        log.info("【Meta】选择关键字为：%s " % keyword)
-        return keyword, is_movie
 
     @staticmethod
     def __get_genre_ids_from_detail(genres):

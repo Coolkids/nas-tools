@@ -198,7 +198,8 @@ def update_config():
     # 实验室配置初始化
     if not _config.get("laboratory"):
         _config['laboratory'] = {
-            'search_keyword': False,
+            'ai_inference': False,
+            'ai_inference_url': '',
             'search_tmdbweb': False,
             'tmdb_cache_expire': True,
             'use_douban_titles': False,
@@ -209,9 +210,14 @@ def update_config():
     else:
         # 新增实验室开关时补齐旧配置，避免 get() 返回 None 让设置不可见。
         laboratory = _config['laboratory']
-        for key in ('search_keyword', 'search_tmdbweb'):
+        # search_keyword 已由 AI 推理替代，删除旧配置，避免旧设置继续影响行为。
+        if laboratory.pop('search_keyword', None) is not None:
+            overwrite_cofig = True
+        for key, default in (('ai_inference', False),
+                             ('ai_inference_url', ''),
+                             ('search_tmdbweb', False)):
             if key not in laboratory:
-                laboratory[key] = False
+                laboratory[key] = default
                 overwrite_cofig = True
 
     # 安全配置初始化

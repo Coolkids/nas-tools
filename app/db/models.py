@@ -155,7 +155,7 @@ class DOWNLOADHISTORY(Base):
     __tablename__ = 'DOWNLOAD_HISTORY'
 
     ID = Column(Integer, Sequence('ID'), primary_key=True)
-    TITLE = Column(Text, index=True)
+    TITLE = Column(Text)
     YEAR = Column(Text)
     TYPE = Column(Text)
     TMDBID = Column(Text)
@@ -366,6 +366,23 @@ class SEARCHTASK(Base):
     START_TIME = Column(Text)
     END_TIME = Column(Text)
     MESSAGE = Column(Text)
+
+
+class AIRECOGNITIONRECORD(Base):
+    """需要人工核对的本地解析、AI解析和TMDB匹配记录。"""
+    __tablename__ = 'AI_RECOGNITION_RECORD'
+
+    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    TITLE = Column(Text, index=True)
+    ANITOPY_RESULT = Column(Text)
+    AI_RESULT = Column(Text)
+    ANITOPY_TMDB = Column(Text)
+    AI_TMDB = Column(Text)
+    STATUS = Column(Text)
+    ADD_TIME = Column(Text)
+
+    def as_dict(self):
+        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
 
 
 class SITEBRUSHDOWNLOADERS(Base):

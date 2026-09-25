@@ -9,7 +9,21 @@ from app.utils.types import MediaType
 from config import RMT_MEDIAEXT
 
 
-def MetaInfo(title, subtitle=None, mtype=None):
+def prepare_media_title(title, subtitle=None):
+    """统一应用自定义识别词，供本地解析和外部解析器共用。"""
+    title, msg, used_info = WordsHelper().process(title)
+    if subtitle:
+        subtitle, subtitle_msg, subtitle_used_info = WordsHelper().process(subtitle)
+        msg.extend(subtitle_msg)
+        for key in ("ignored", "replaced", "offset"):
+            used_info.setdefault(key, []).extend(subtitle_used_info.get(key, []))
+    if msg:
+        for msg_item in msg:
+            log.warn("【Meta】%s" % msg_item)
+    return title, subtitle, used_info
+
+
+def MetaInfo(title, subtitle=None, mtype=None, apply_custom_words=True):
     """
     媒体整理入口，根据名称和副标题，判断是哪种类型的识别，返回对应对象
     :param title: 标题、种子名、文件名
@@ -18,14 +32,10 @@ def MetaInfo(title, subtitle=None, mtype=None):
     :return: MetaAnime、MetaVideo
     """
 
-    # 应用自定义识别词
-    title, msg, used_info = WordsHelper().process(title)
-    if subtitle:
-        subtitle, _, _ = WordsHelper().process(subtitle)
-
-    if msg:
-        for msg_item in msg:
-            log.warn("【Meta】%s" % msg_item)
+    if apply_custom_words:
+        title, subtitle, used_info = prepare_media_title(title, subtitle)
+    else:
+        used_info = {"ignored": [], "replaced": [], "offset": []}
 
     # 判断是否处理文件
     if title and os.path.splitext(title)[-1] in RMT_MEDIAEXT:
