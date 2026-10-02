@@ -1,6 +1,7 @@
-"""HTTP adapter for the anitopy-ml single-title parse endpoint."""
+"""封装 anitopy-ml 单标题解析接口的 HTTP 调用。"""
 
 import time
+from requests.exceptions import Timeout
 
 from app.media.recognition.contracts import (
     MediaNameRecognizer,
@@ -55,6 +56,11 @@ class AnitopyMlRecognizer(MediaNameRecognizer):
             return ParseResult(
                 self.descriptor.provider_id, "success", parsed=extracted,
                 raw_result=payload, elapsed_ms=int((time.monotonic() - started) * 1000),
+            )
+        except (Timeout, TimeoutError) as error:
+            return ParseResult(
+                self.descriptor.provider_id, "timeout", error=str(error) or "request_timeout",
+                elapsed_ms=int((time.monotonic() - started) * 1000),
             )
         except Exception as error:
             return ParseResult(

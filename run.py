@@ -100,6 +100,12 @@ def init_system():
     init_db()
     # 数据库更新
     update_db()
+    # 数据库结构就绪后回放未完成的全量识别记录暂存。
+    try:
+        from app.media.recognition.records import replay_recognition_spool
+        replay_recognition_spool()
+    except Exception as e:
+        log.error(f"恢复识别记录暂存失败：{e}")
     # 数据初始化
     init_data()
     # 升级配置文件

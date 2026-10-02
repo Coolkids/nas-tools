@@ -1,15 +1,132 @@
-"""Capture one recognition request and its ordered actions/results."""
+"""记录一次识别请求及其有序动作和结果。"""
 
 import contextvars
+import copy
 import datetime
+import hashlib
 import json
+import os
 import time
 import uuid
+import requests.exceptions
 from functools import wraps
 from enum import Enum
+from threading import Lock
 
 
 _current = contextvars.ContextVar("media_recognition_recorder", default=None)
+_spool_lock = Lock()
+_active_spool_paths = set()
+
+
+def _spool_directory():
+    from config import Config
+    return os.path.join(Config().get_config_path(), "recognition_spool")
+
+
+def _write_spool(payload):
+    directory = _spool_directory()
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    final_path = os.path.join(directory, f"{payload['request_id']}.json")
+    temporary_path = final_path + f".{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    with open(temporary_path, "x", encoding="utf-8") as spool_file:
+        spool_file.write(encoded)
+        spool_file.flush()
+        os.fsync(spool_file.fileno())
+    os.replace(temporary_path, final_path)
+    try:
+        directory_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError:
+        pass
+    return final_path
+
+
+def replay_recognition_spool():
+    """数据库恢复可写后，回放已暂存的识别记录。"""
+    with _spool_lock:
+        try:
+            directory = _spool_directory()
+            paths = [os.path.join(directory, name) for name in os.listdir(directory)
+                     if name.endswith(".json") and os.path.join(directory, name)
+                     not in _active_spool_paths]
+        except FileNotFoundError:
+            return {"replayed": 0, "pending": 0, "invalid": 0}
+        except Exception as error:
+            try:
+                import log
+                log.error(f"【Recognition】读取识别暂存目录失败：{error}")
+            except Exception:
+                pass
+            return {"replayed": 0, "pending": 0, "invalid": 0}
+
+        replayed = 0
+        invalid = 0
+        for path in sorted(paths):
+            try:
+                with open(path, "r", encoding="utf-8") as spool_file:
+                    payload = json.load(spool_file)
+                if not isinstance(payload, dict) or not payload.get("request_id"):
+                    invalid += 1
+                    import log
+                    log.error(f"【Recognition】识别暂存记录格式无效，保留文件供排查：{path}")
+                    continue
+                overall = payload.get("overall_result")
+                actions = payload.get("actions")
+                if not isinstance(overall, dict) or not isinstance(actions, list):
+                    invalid += 1
+                    import log
+                    log.error(f"【Recognition】识别暂存记录结构无效，保留文件供排查：{path}")
+                    continue
+                if overall.get("lifecycle") == "running" or overall.get("status") == "running":
+                    overall.update({
+                        "status": "failed",
+                        "reason": "process_interrupted",
+                        "lifecycle": "interrupted",
+                    })
+                    sequence = max((int(action.get("sequence", 0)) for action in actions
+                                    if isinstance(action, dict)), default=0) + 1
+                    actions.append({
+                        "action_id": f"{payload['request_id']}:{sequence}",
+                        "sequence": sequence,
+                        "action_type": "request_recovered",
+                        "provider_id": None,
+                        "attempt_id": None,
+                        "status": "interrupted",
+                        "input": {},
+                        "output": {"reason": "process_interrupted"},
+                        "reason": "process_interrupted",
+                        "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
+                    })
+                from app.helper.db_helper import DbHelper
+                if DbHelper().insert_recognition_record(payload):
+                    os.remove(path)
+                    replayed += 1
+            except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                invalid += 1
+                try:
+                    import log
+                    log.error(f"【Recognition】识别暂存记录损坏，保留文件供排查 {os.path.basename(path)}：{error}")
+                except Exception:
+                    pass
+            except Exception as error:
+                try:
+                    import log
+                    log.error(f"【Recognition】回放识别记录失败 {os.path.basename(path)}：{error}")
+                except Exception:
+                    pass
+        pending = len(paths) - replayed
+        if pending:
+            try:
+                import log
+                log.warn(f"【Recognition】识别暂存恢复完成：成功 {replayed} 条，待处理 {pending} 条，无效 {invalid} 条；查看 recognition_spool 目录日志")
+            except Exception:
+                pass
+        return {"replayed": replayed, "pending": pending, "invalid": invalid}
 
 
 def json_safe(value):
@@ -32,6 +149,72 @@ def json_safe(value):
     return str(value)
 
 
+_SENSITIVE_CONFIG_KEY_PARTS = (
+    "url", "endpoint", "token", "password", "secret", "api_key", "apikey",
+    "access_key", "authorization", "credential",
+)
+
+
+def _public_recognition_config(value):
+    """复制识别配置，同时排除连接地址和凭据信息。"""
+    if isinstance(value, dict):
+        public = {}
+        for key, item in value.items():
+            normalized_key = "".join(character for character in str(key).lower()
+                                     if character.isalnum())
+            if any(part.replace("_", "") in normalized_key
+                   for part in _SENSITIVE_CONFIG_KEY_PARTS):
+                continue
+            public[str(key)] = _public_recognition_config(item)
+        return public
+    if isinstance(value, (list, tuple)):
+        return [_public_recognition_config(item) for item in value]
+    return json_safe(value)
+
+
+def _recognition_config_snapshot():
+    """返回当前生效识别配置的稳定脱敏快照。"""
+    try:
+        from config import Config
+        config = Config().get_config()
+        recognition_config = config.get("recognition", {}) if isinstance(config, dict) else {}
+        laboratory = config.get("laboratory", {}) if isinstance(config, dict) else {}
+        snapshot = {
+            "recognition": _public_recognition_config(recognition_config),
+            # 此兼容开关决定是否实际调用 AI 识别器；快照会刻意排除其服务地址。
+            "runtime": {"ai_inference_enabled": bool(
+                laboratory.get("ai_inference")) if isinstance(laboratory, dict) else False},
+        }
+        canonical = json.dumps(snapshot, ensure_ascii=False, sort_keys=True,
+                               separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest(), snapshot
+    except Exception:
+        # 记录过程不能影响媒体查询；启动期间配置尚不可用时也必须如此。
+        return None, {}
+
+
+def _runtime_config_snapshot():
+    try:
+        from config import Config
+        config = Config().get_config()
+        return copy.deepcopy(config) if isinstance(config, dict) else None
+    except Exception:
+        return None
+
+
+def recognition_config(section=None):
+    """存在识别作用域时，读取该请求固定下来的配置快照。"""
+    recorder = current_recorder()
+    snapshot = getattr(recorder, "_runtime_config", None) if recorder else None
+    if snapshot is not None:
+        if section is None:
+            return copy.deepcopy(snapshot)
+        value = snapshot.get(section, {})
+        return copy.deepcopy(value) if isinstance(value, dict) else value
+    from config import Config
+    return Config().get_config(section) if section else Config().get_config()
+
+
 class RecognitionRecorder:
     def __init__(self, original_name, source="unknown", stage="resolve", context=None):
         self.request_id = str(uuid.uuid4())
@@ -47,24 +230,59 @@ class RecognitionRecorder:
         self._sequence = 0
         self._token = None
         self._delegate = None
+        self._spool_path = None
+        self._runtime_config = None
+        self.deadline_monotonic = None
+        self._tmdb_timeout_count = 0
+        self._tmdb_timeout_reason = None
+        self._tmdb_failure_events = []
 
     def __enter__(self):
         parent = _current.get()
         if parent is not None:
-            # Internal resolve calls belong to the caller's request. In
-            # particular, a batch-file request must not be replaced by the
-            # nested get_media_info() used for its AI path.
+            # 内部解析调用属于外层请求；尤其是批量文件请求，不能被 AI 流程中的
+            # 嵌套 get_media_info() 替换。
             self._delegate = parent
             return parent
+        self._runtime_config = _runtime_config_snapshot()
+        config_version, config_snapshot = _recognition_config_snapshot()
+        if self._runtime_config is not None:
+            recognition_config_value = self._runtime_config.get("recognition", {})
+            laboratory = self._runtime_config.get("laboratory", {})
+            config_snapshot = {
+                "recognition": _public_recognition_config(recognition_config_value),
+                "runtime": {"ai_inference_enabled": bool(
+                    laboratory.get("ai_inference")) if isinstance(laboratory, dict) else False},
+            }
+            canonical = json.dumps(config_snapshot, ensure_ascii=False, sort_keys=True,
+                                   separators=(",", ":"))
+            config_version = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        self.context["recognition_config_version"] = config_version
+        self.context["recognition_config_snapshot"] = config_snapshot
+        replay_recognition_spool()
         self._token = _current.set(self)
         self.action("request_start", status="running", input={"original_name": self.original_name})
+        self.overall_result = {"status": "running", "lifecycle": "running"}
+        try:
+            self._spool_path = _write_spool(self.as_dict())
+            with _spool_lock:
+                _active_spool_paths.add(self._spool_path)
+        except Exception as error:
+            try:
+                import log
+                log.warn(f"【Recognition】无法写入识别开始暂存 {self.request_id}：{error}")
+            except Exception:
+                pass
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         if self._delegate is not None:
             return False
         if exc_type:
-            self.overall_result = {"status": "failed", "reason": str(exc_value)}
+            # 保留异常发生前已经收集的解析、TMDB 和决策数据。整体替换结果会丢失
+            # 部分完成请求中最有用的证据。
+            self.overall_result = dict(self.overall_result or {})
+            self.overall_result.update({"status": "failed", "reason": str(exc_value)})
             self.action("request_error", status="error", output={"error": str(exc_value)})
         if not self.overall_result:
             self.overall_result = {"status": "failed", "reason": "recognition_not_completed"}
@@ -73,22 +291,45 @@ class RecognitionRecorder:
         self.action("request_finish", status=self.overall_result["status"],
                     output=self.overall_result)
         try:
+            if self._spool_path:
+                try:
+                    self._spool_path = _write_spool(self.as_dict())
+                except Exception as error:
+                    try:
+                        import log
+                        log.error(f"【Recognition】更新识别暂存失败 {self.request_id}：{error}")
+                    except Exception:
+                        pass
             from app.helper.db_helper import DbHelper
             saved = DbHelper().insert_recognition_record(self.as_dict())
+            if saved and self._spool_path:
+                os.remove(self._spool_path)
+                self._spool_path = None
+            elif not saved and not self._spool_path:
+                self._spool_path = _write_spool(self.as_dict())
             if not saved:
-                try:
-                    import log
-                    log.error(f"【Recognition】识别记录写入失败：{self.request_id}")
-                except Exception:
-                    pass
+                import log
+                log.warn(f"【Recognition】数据库暂不可写，记录已暂存：{self._spool_path}")
         except Exception as error:
-            # Recognition logging must not break existing media lookup behavior.
+            # 识别记录失败不能影响现有媒体查询行为。
             try:
                 import log
                 log.error(f"【Recognition】保存识别记录失败：{error}")
             except Exception:
                 pass
+            if not self._spool_path:
+                try:
+                    self._spool_path = _write_spool(self.as_dict())
+                except Exception as spool_error:
+                    try:
+                        import log
+                        log.error(f"【Recognition】记录持久化失败 {self.request_id}：{spool_error}")
+                    except Exception:
+                        pass
         finally:
+            if self._spool_path:
+                with _spool_lock:
+                    _active_spool_paths.discard(self._spool_path)
             if self._token is not None:
                 _current.reset(self._token)
         return False
@@ -110,6 +351,17 @@ class RecognitionRecorder:
             action["reason"] = str(reason)
         action["time"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
         self.actions.append(action)
+        # 每完成一个阶段就写入暂存，确保进程意外退出后能保留有效的部分轨迹，
+        # 而不只是 request_start 标记。
+        if self._spool_path:
+            try:
+                self._spool_path = _write_spool(self.as_dict())
+            except Exception as error:
+                try:
+                    import log
+                    log.error(f"【Recognition】更新识别暂存失败 {self.request_id}：{error}")
+                except Exception:
+                    pass
         return action
 
     def add_provider_result(self, provider_id, status, input=None, raw_result=None,
@@ -183,37 +435,85 @@ def current_recorder():
     return _current.get()
 
 
+def recognition_remaining_seconds():
+    """返回当前解析请求剩余的网络时间预算；未设置时返回空值。"""
+    recorder = current_recorder()
+    deadline = getattr(recorder, "deadline_monotonic", None) if recorder else None
+    return max(deadline - time.monotonic(), 0.0) if deadline is not None else None
+
+
+def note_tmdb_timeout(error):
+    recorder = current_recorder()
+    if recorder is not None:
+        recorder._tmdb_timeout_count += 1
+        recorder._tmdb_timeout_reason = str(error) or "tmdb_request_timeout"
+
+
+def note_tmdb_failure(reason, error=None):
+    """以明确类型向外层解析流程传递 TMDB 搜索失败。"""
+    recorder = current_recorder()
+    if recorder is not None:
+        recorder._tmdb_failure_events.append({
+            "reason": str(reason),
+            "error": str(error) if error else None,
+            "time": time.monotonic(),
+        })
+
+
 def recognition_scope(original_name, source="unknown", stage="resolve", context=None):
     return RecognitionRecorder(original_name, source=source, stage=stage, context=context)
 
 
 def record_tmdb_call(method):
-    """Keep the actual TMDB lookup result attached to its recognition request."""
+    """将实际 TMDB 查询结果关联到当前识别请求。"""
     @wraps(method)
     def wrapped(self, *args, **kwargs):
         recorder = current_recorder()
         if recorder is None:
             return method(self, *args, **kwargs)
+        timeout_count = recorder._tmdb_timeout_count
+        failure_count = len(recorder._tmdb_failure_events)
         provider_id = recorder.context.get("active_provider_id") or "local_rules"
         query = {"method": method.__name__, "args": json_safe(args), "kwargs": json_safe(kwargs)}
         started = time.monotonic()
         try:
             result = method(self, *args, **kwargs)
         except Exception as error:
+            timed_out = isinstance(error, requests.exceptions.Timeout)
+            if timed_out:
+                recorder._tmdb_timeout_count += 1
+                recorder._tmdb_timeout_reason = str(error) or "tmdb_request_timeout"
+            else:
+                recorder._tmdb_failure_events.append({
+                    "reason": "tmdb_network_error", "error": str(error),
+                    "time": time.monotonic(),
+                })
             recorder.add_tmdb_result(
                 provider_id=provider_id,
                 query=query,
                 result=None,
-                status="error",
+                status="timeout" if timed_out else "error",
                 reason=str(error),
             )
             raise
+        new_failures = recorder._tmdb_failure_events[failure_count:]
+        failure = next((item for item in reversed(new_failures)
+                        if item["reason"] == "ambiguous_tmdb"), None)
+        if failure is None and new_failures:
+            priority = {"tmdb_network_error": 3, "tmdb_no_results": 1,
+                        "no_tmdb_match": 2, "ambiguous_tmdb": 4}
+            failure = max(new_failures, key=lambda item: priority.get(item["reason"], 0))
+        result_status = ("timeout" if recorder._tmdb_timeout_count > timeout_count else
+                         "success" if result else
+                         failure["reason"] if failure else "no_result")
         recorder.add_tmdb_result(
             provider_id=provider_id,
             query=query,
             result=result,
-            status="success" if result else "no_result",
-            reason=f"elapsed_ms={int((time.monotonic() - started) * 1000)}",
+            status=result_status,
+            reason=(recorder._tmdb_timeout_reason if recorder._tmdb_timeout_count > timeout_count else
+                    ((failure.get("error") or failure["reason"]) if failure and not result else
+                     f"elapsed_ms={int((time.monotonic() - started) * 1000)}")),
         )
         return result
     return wrapped

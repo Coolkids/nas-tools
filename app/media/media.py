@@ -2,24 +2,34 @@ import json
 import os
 import random
 import re
+import sys
 import time
 import traceback
 import uuid
 import unicodedata
+import copy
 from difflib import SequenceMatcher
 from urllib.parse import urlencode
 
 import zhconv
 import anitopy
+from requests.exceptions import Timeout as HttpTimeout
 from lxml import etree
 from app.utils import ExceptionUtils
 import log
 from app.helper import DbHelper, MetaHelper
-from app.media.meta.metainfo import MetaInfo, prepare_media_title
+from app.media.meta.metainfo import MetaInfo, prepare_media_title, _infer_recognition_source
 from app.media.meta.metaanime import MetaAnime
 from app.media.meta.metavideo import MetaVideo
-from app.media.recognition.records import current_recorder, record_tmdb_call, recognition_scope
+from app.media.recognition.records import (
+    current_recorder, note_tmdb_failure, note_tmdb_timeout, recognition_config, recognition_remaining_seconds,
+    record_tmdb_call, recognition_scope,
+)
 from app.media.recognition import RecognitionRequest, registry
+from app.media.recognition import cache as recognition_cache
+from app.media.recognition.decision import (
+    candidate_features, select_title_evidence, weighted_score,
+)
 from app.media.tmdbv3api import TMDb, Search, Movie, TV, Person, Find, TMDbException, Discover, Trending, Episode, Genre
 from app.utils import PathUtils, EpisodeFormat, RequestUtils, NumberUtils, StringUtils, TmdbWebSearchCache
 from app.utils.types import MediaType, MatchMode
@@ -48,13 +58,11 @@ class Media:
     _ai_inference_url = None
     _search_tmdbweb = None
     _tmdb_clients = None
-    _tmdb_query_cache = None
 
     def __init__(self):
         self.init_config()
 
     def init_config(self):
-        self._tmdb_query_cache = {}
         self._tmdb_clients = []
         app = Config().get_config('app')
         laboratory = Config().get_config('laboratory')
@@ -99,6 +107,13 @@ class Media:
             self._search_tmdbweb = laboratory.get("search_tmdbweb")
 
     @staticmethod
+    def __tmdb_search_type(media_type):
+        """Map the library's anime category to TMDB's TV media type."""
+        if media_type == MediaType.ANIME:
+            return MediaType.TV
+        return media_type
+
+    @staticmethod
     def __compare_tmdb_names(file_name, tmdb_names):
         """
         比较文件名是否匹配，忽略大小写和特殊字符
@@ -117,8 +132,96 @@ class Media:
                 return True
         return False
 
+    def __select_tmdb_search_candidates(self, query, results, default_media_type=None):
+        """Select TMDB search results only when their names occur in the raw title."""
+        # The TMDB client wraps result rows in AsObj. Keep ordinary mappings
+        # and convert the client's object rows before applying the common
+        # candidate-selection logic; filtering to dict silently discarded
+        # every real API result.
+        normalized_results = []
+        for item in results or []:
+            if isinstance(item, dict):
+                normalized_results.append(dict(item))
+                continue
+            items = getattr(item, "items", None)
+            if callable(items):
+                try:
+                    normalized_results.append(dict(items()))
+                    continue
+                except (TypeError, ValueError):
+                    pass
+            attributes = getattr(item, "__dict__", None)
+            if isinstance(attributes, dict):
+                normalized_results.append(dict(attributes))
+        results = normalized_results
+        recorder = current_recorder()
+        original_title = (recorder.original_name if recorder else None) or query
+        pending = []
+        examined = []
+        seen_entities = set()
+        for result in results:
+            candidate = dict(result)
+            media_type = candidate.get("media_type") or default_media_type
+            if media_type == "movie":
+                media_type = MediaType.MOVIE
+            elif media_type == "tv":
+                media_type = MediaType.TV
+            if not media_type:
+                continue
+            candidate["media_type"] = media_type
+            evidence = self.__tmdb_title_evidence(
+                original_title, candidate, include_aliases=False)
+            if evidence.get("level") != "strong":
+                evidence = self.__tmdb_title_evidence(original_title, candidate)
+            matched = evidence.get("level") == "strong"
+            entity = (str(getattr(media_type, "value", media_type)), str(candidate.get("id")))
+            examined.append({"id": candidate.get("id"), "media_type": media_type,
+                             "matched": matched, "evidence": evidence})
+            if matched and candidate.get("id") and entity not in seen_entities:
+                seen_entities.add(entity)
+                pending.append(candidate)
+                if len(pending) > 1:
+                    break
+
+        if len(pending) == 1:
+            status, reason, selected = "success", None, pending[0]
+        elif len(pending) > 1:
+            status, reason, selected = "ambiguous", "ambiguous_tmdb", None
+            if recorder is not None:
+                recorder.context["decision_reason"] = "ambiguous_tmdb"
+            note_tmdb_failure("ambiguous_tmdb")
+        elif not results:
+            status, reason, selected = "no_result", "tmdb_no_results", {}
+            note_tmdb_failure("tmdb_no_results")
+        else:
+            status, reason, selected = "no_name_match", "no_tmdb_match", {}
+            note_tmdb_failure("no_tmdb_match")
+
+        if recorder is not None:
+            recorder.action(
+                "tmdb_candidate_selection", status=status,
+                input={"query": query, "original_title": original_title},
+                output={"candidate_count": len(results), "examined": examined,
+                        "pending_count": len(pending),
+                        "pending_ids": [item.get("id") for item in pending],
+                        "selected_id": selected.get("id") if selected else None,
+                        "results": results},
+                reason=reason)
+        return selected
+
+    @staticmethod
+    def __recognition_tmdb_failure_reason(recorder):
+        if not recorder:
+            return None
+        priority = {"tmdb_no_results": 1, "no_tmdb_match": 2,
+                    "tmdb_network_error": 3, "ambiguous_tmdb": 4}
+        failures = getattr(recorder, "_tmdb_failure_events", [])
+        if not failures:
+            return None
+        return max(failures, key=lambda item: priority.get(item["reason"], 0))["reason"]
+
     @record_tmdb_call
-    def __search_tmdb_allnames(self, mtype: MediaType, tmdb_id):
+    def __search_tmdb_allnames(self, mtype: MediaType, tmdb_id, alias_sources=None):
         """
         检索tmdb中所有的标题和译名，用于名称匹配
         :param mtype: 类型：电影、电视剧、动漫
@@ -131,28 +234,51 @@ class Media:
         tmdb_info = self.get_tmdb_info(mtype=mtype, tmdbid=tmdb_id)
         if not tmdb_info:
             return tmdb_info, []
+        alias_sources = set(alias_sources or ("alternative", "translation"))
         if mtype == MediaType.MOVIE:
-            alternative_titles = tmdb_info.get("alternative_titles", {}).get("titles", [])
-            for alternative_title in alternative_titles:
-                title = alternative_title.get("title")
-                if title and title not in ret_names:
-                    ret_names.append(title)
-            translations = tmdb_info.get("translations", {}).get("translations", [])
-            for translation in translations:
-                title = translation.get("data", {}).get("title")
-                if title and title not in ret_names:
-                    ret_names.append(title)
+            if "alternative" in alias_sources:
+                alternative_data = tmdb_info.get("alternative_titles") or {}
+                alternative_titles = alternative_data.get("titles", []) or [] \
+                    if callable(getattr(alternative_data, "get", None)) else []
+                for alternative_title in alternative_titles:
+                    if not callable(getattr(alternative_title, "get", None)):
+                        continue
+                    title = alternative_title.get("title")
+                    if title and title not in ret_names:
+                        ret_names.append(title)
+            if "translation" in alias_sources:
+                translation_data = tmdb_info.get("translations") or {}
+                translations = translation_data.get("translations", []) or [] \
+                    if callable(getattr(translation_data, "get", None)) else []
+                for translation in translations:
+                    translation_value = translation.get("data") or {} \
+                        if callable(getattr(translation, "get", None)) else {}
+                    title = translation_value.get("title") \
+                        if callable(getattr(translation_value, "get", None)) else None
+                    if title and title not in ret_names:
+                        ret_names.append(title)
         else:
-            alternative_titles = tmdb_info.get("alternative_titles", {}).get("results", [])
-            for alternative_title in alternative_titles:
-                name = alternative_title.get("title")
-                if name and name not in ret_names:
-                    ret_names.append(name)
-            translations = tmdb_info.get("translations", {}).get("translations", [])
-            for translation in translations:
-                name = translation.get("data", {}).get("name")
-                if name and name not in ret_names:
-                    ret_names.append(name)
+            if "alternative" in alias_sources:
+                alternative_data = tmdb_info.get("alternative_titles") or {}
+                alternative_titles = alternative_data.get("results", []) or [] \
+                    if callable(getattr(alternative_data, "get", None)) else []
+                for alternative_title in alternative_titles:
+                    if not callable(getattr(alternative_title, "get", None)):
+                        continue
+                    name = alternative_title.get("title")
+                    if name and name not in ret_names:
+                        ret_names.append(name)
+            if "translation" in alias_sources:
+                translation_data = tmdb_info.get("translations") or {}
+                translations = translation_data.get("translations", []) or [] \
+                    if callable(getattr(translation_data, "get", None)) else []
+                for translation in translations:
+                    translation_value = translation.get("data") or {} \
+                        if callable(getattr(translation, "get", None)) else {}
+                    name = translation_value.get("name") \
+                        if callable(getattr(translation_value, "get", None)) else None
+                    if name and name not in ret_names:
+                        ret_names.append(name)
         return tmdb_info, ret_names
 
     @record_tmdb_call
@@ -176,11 +302,30 @@ class Media:
             return None
         if not file_media_name:
             return None
+        recorder = current_recorder()
         language = language or 'zh-CN'
-        cache_key = (file_media_name, search_type, first_media_year,
-                     media_year, season_number, language)
-        if cache_key in self._tmdb_query_cache:
-            return self._tmdb_query_cache[cache_key]
+        cache_key = recognition_cache.cache_key("tmdb", {
+            "title": file_media_name,
+            "original_title": recorder.original_name if recorder else file_media_name,
+            "search_type": getattr(search_type, "value", search_type),
+            "first_media_year": first_media_year,
+            "media_year": media_year,
+            "season_number": season_number,
+            "language": language,
+            "config_version": recognition_cache.config_version(),
+        })
+        cached_result = recognition_cache.get("tmdb", cache_key)
+        if recorder is not None and cached_result is not recognition_cache.CACHE_MISS \
+                and not cached_result:
+            # Negative cache entries have no reason/candidate trace to replay;
+            # recorded requests perform the query again so failure causes stay accurate.
+            cached_result = recognition_cache.CACHE_MISS
+        if cached_result is not recognition_cache.CACHE_MISS:
+            if recorder is not None:
+                recorder.action("cache_hit", input={"layer": "tmdb", "cache_key": cache_key},
+                                provider_id=recorder.context.get("active_provider_id"))
+            return cached_result
+        failure_count = len(recorder._tmdb_failure_events) if recorder is not None else 0
         try:
             result = self.__search_tmdb_uncached(
                 file_media_name, search_type, first_media_year,
@@ -188,7 +333,10 @@ class Media:
         except TMDbException:
             # 网络、限流等暂态失败不能污染批次缓存。
             raise
-        self._tmdb_query_cache[cache_key] = result
+        selection_failure = (recorder is not None and not result and
+                             len(recorder._tmdb_failure_events) > failure_count)
+        if not selection_failure:
+            recognition_cache.put("tmdb", cache_key, result, negative=not result)
         return result
 
     def _set_tmdb_language(self, language):
@@ -220,6 +368,9 @@ class Media:
                 log.debug(
                     f"【Meta】正在识别{search_type.value}：{file_media_name}, 年份={year} ...")
                 info = self.__search_movie_by_name(file_media_name, year)
+                if (current_recorder() and current_recorder().context.get("decision_reason")
+                        == "ambiguous_tmdb"):
+                    return {}
                 if info:
                     info['media_type'] = MediaType.MOVIE
                     log.info("【Meta】%s 识别到 电影：TMDBID=%s, 名称=%s, 上映日期=%s" % (
@@ -236,11 +387,17 @@ class Media:
                 info = self.__search_tv_by_season(file_media_name,
                                                   media_year,
                                                   season_number)
+                if (current_recorder() and current_recorder().context.get("decision_reason")
+                        == "ambiguous_tmdb"):
+                    return {}
             if not info:
                 log.debug(
                     f"【Meta】正在识别{search_type.value}：{file_media_name}, 年份={StringUtils.xstr(first_media_year)} ...")
                 info = self.__search_tv_by_name(file_media_name,
                                                 first_media_year)
+                if (current_recorder() and current_recorder().context.get("decision_reason")
+                        == "ambiguous_tmdb"):
+                    return {}
             if info:
                 info['media_type'] = MediaType.TV
                 log.info("【Meta】%s 识别到 电视剧：TMDBID=%s, 名称=%s, 首播日期=%s" % (
@@ -257,223 +414,63 @@ class Media:
             return info
 
     def __search_movie_by_name(self, file_media_name, first_media_year):
-        """
-        根据名称查询电影TMDB匹配
-        :param file_media_name: 识别的文件名或种子名
-        :param first_media_year: 电影上映日期
-        :return: 匹配的媒体信息
-        """
+        """Find the sole movie whose primary name or alias occurs in the title."""
         try:
             if first_media_year:
                 movies = self.search.movies({"query": file_media_name, "year": first_media_year})
             else:
                 movies = self.search.movies({"query": file_media_name})
-        except TMDbException as err:
-            log.error(f"【Meta】连接TMDB出错：{str(err)}")
-            return None
-        except Exception as e:
-            log.error(f"【Meta】连接TMDB出错：{str(e)}")
+        except Exception as error:
+            log.error(f"【Meta】连接TMDB出错：{str(error)}")
+            note_tmdb_failure("tmdb_network_error", error)
             return None
         log.debug(f"【Meta】API返回：{str(self.search.total_results)}")
-        if len(movies) == 0:
-            log.debug(f"【Meta】{file_media_name} 未找到相关电影信息!")
-            return {}
-        else:
-            info = {}
-            if first_media_year:
-                for movie in movies:
-                    if movie.get('release_date'):
-                        if self.__compare_tmdb_names(file_media_name, movie.get('title')) \
-                                and movie.get('release_date')[0:4] == str(first_media_year):
-                            return movie
-                        if self.__compare_tmdb_names(file_media_name, movie.get('original_title')) \
-                                and movie.get('release_date')[0:4] == str(first_media_year):
-                            return movie
-            else:
-                for movie in movies:
-                    if self.__compare_tmdb_names(file_media_name, movie.get('title')) \
-                            or self.__compare_tmdb_names(file_media_name, movie.get('original_title')):
-                        return movie
-            if not info:
-                index = 0
-                for movie in movies:
-                    if first_media_year:
-                        if not movie.get('release_date'):
-                            continue
-                        if movie.get('release_date')[0:4] != str(first_media_year):
-                            continue
-                        index += 1
-                        info, names = self.__search_tmdb_allnames(MediaType.MOVIE, movie.get("id"))
-                        if self.__compare_tmdb_names(file_media_name, names):
-                            return info
-                    else:
-                        index += 1
-                        info, names = self.__search_tmdb_allnames(MediaType.MOVIE, movie.get("id"))
-                        if self.__compare_tmdb_names(file_media_name, names):
-                            return info
-                    if index > 5:
-                        break
-        return {}
+        return self.__select_tmdb_search_candidates(
+            file_media_name, movies, default_media_type=MediaType.MOVIE)
 
     def __search_tv_by_name(self, file_media_name, first_media_year):
-        """
-        根据名称查询电视剧TMDB匹配
-        :param file_media_name: 识别的文件名或者种子名
-        :param first_media_year: 电视剧的首播年份
-        :return: 匹配的媒体信息
-        """
+        """Find the sole TV result whose primary name or alias occurs in the title."""
         try:
             if first_media_year:
-                tvs = self.search.tv_shows({"query": file_media_name, "first_air_date_year": first_media_year})
+                tvs = self.search.tv_shows({"query": file_media_name,
+                                            "first_air_date_year": first_media_year})
             else:
                 tvs = self.search.tv_shows({"query": file_media_name})
-        except TMDbException as err:
-            ExceptionUtils.exception_traceback(err)
-            log.error(f"【Meta】连接TMDB出错：{str(err)}")
-            return None
-        except Exception as e:
-            ExceptionUtils.exception_traceback(e)
-            log.error(f"【Meta】连接TMDB出错：{str(e)}")
+        except Exception as error:
+            ExceptionUtils.exception_traceback(error)
+            log.error(f"【Meta】连接TMDB出错：{str(error)}")
+            note_tmdb_failure("tmdb_network_error", error)
             return None
         log.debug(f"【Meta】API返回：{str(self.search.total_results)}")
-        if len(tvs) == 0:
-            log.debug(f"【Meta】{file_media_name} 未找到相关剧集信息!")
-            return {}
-        else:
-            info = {}
-            if first_media_year:
-                for tv in tvs:
-                    if tv.get('first_air_date'):
-                        if self.__compare_tmdb_names(file_media_name, tv.get('name')) \
-                                and tv.get('first_air_date')[0:4] == str(first_media_year):
-                            return tv
-                        if self.__compare_tmdb_names(file_media_name, tv.get('original_name')) \
-                                and tv.get('first_air_date')[0:4] == str(first_media_year):
-                            return tv
-            else:
-                for tv in tvs:
-                    if self.__compare_tmdb_names(file_media_name, tv.get('name')) \
-                            or self.__compare_tmdb_names(file_media_name, tv.get('original_name')):
-                        return tv
-            if not info:
-                index = 0
-                for tv in tvs:
-                    if first_media_year:
-                        if not tv.get('first_air_date'):
-                            continue
-                        if tv.get('first_air_date')[0:4] != str(first_media_year):
-                            continue
-                        index += 1
-                        info, names = self.__search_tmdb_allnames(MediaType.TV, tv.get("id"))
-                        if self.__compare_tmdb_names(file_media_name, names):
-                            return info
-                    else:
-                        index += 1
-                        info, names = self.__search_tmdb_allnames(MediaType.TV, tv.get("id"))
-                        if self.__compare_tmdb_names(file_media_name, names):
-                            return info
-                    if index > 5:
-                        break
-        return {}
+        return self.__select_tmdb_search_candidates(
+            file_media_name, tvs, default_media_type=MediaType.TV)
 
     def __search_tv_by_season(self, file_media_name, media_year, season_number):
-        """
-        根据电视剧的名称和季的年份及序号匹配TMDB
-        :param file_media_name: 识别的文件名或者种子名
-        :param media_year: 季的年份
-        :param season_number: 季序号
-        :return: 匹配的媒体信息
-        """
-
-        def __season_match(tv_info, season_year):
-            if not tv_info:
-                return False
-            try:
-                seasons = self.get_tmdb_tv_seasons(tv_info=tv_info)
-                for season in seasons:
-                    if season.get("air_date") and season.get("season_number"):
-                        if season.get("air_date")[0:4] == str(season_year) \
-                                and season.get("season_number") == int(season_number):
-                            return True
-            except Exception as e1:
-                log.error(f"【Meta】连接TMDB出错：{e1}")
-                return False
-            return False
-
+        """Search a season query, then resolve by title evidence across results."""
         try:
             tvs = self.search.tv_shows({"query": file_media_name})
-        except TMDbException as err:
-            log.error(f"【Meta】连接TMDB出错：{str(err)}")
+        except Exception as error:
+            log.error(f"【Meta】连接TMDB出错：{error}")
+            note_tmdb_failure("tmdb_network_error", error)
             return None
-        except Exception as e:
-            log.error(f"【Meta】连接TMDB出错：{e}")
-            return None
-
-        if len(tvs) == 0:
-            log.debug("【Meta】%s 未找到季%s相关信息!" % (file_media_name, season_number))
-            return {}
-        else:
-            for tv in tvs:
-                if (self.__compare_tmdb_names(file_media_name, tv.get('name'))
-                    or self.__compare_tmdb_names(file_media_name, tv.get('original_name'))) \
-                        and (tv.get('first_air_date') and tv.get('first_air_date')[0:4] == str(media_year)):
-                    return tv
-
-            for tv in tvs[:5]:
-                info, names = self.__search_tmdb_allnames(MediaType.TV, tv.get("id"))
-                if not self.__compare_tmdb_names(file_media_name, names):
-                    continue
-                if __season_match(tv_info=info, season_year=media_year):
-                    return info
-        return {}
+        return self.__select_tmdb_search_candidates(
+            file_media_name, tvs, default_media_type=MediaType.TV)
 
     @record_tmdb_call
     def __search_multi_tmdb(self, file_media_name):
-        """
-        根据名称同时查询电影和电视剧，不带年份
-        :param file_media_name: 识别的文件名或种子名
-        :return: 匹配的媒体信息
-        """
+        """Resolve multi-search results using title and alias evidence."""
         try:
-            multis = self.search.multi({"query": file_media_name}) or []
-        except TMDbException as err:
-            log.error(f"【Meta】连接TMDB出错：{str(err)}")
-            return None
-        except Exception as e:
-            log.error(f"【Meta】连接TMDB出错：{str(e)}")
+            results = self.search.multi({"query": file_media_name}) or []
+        except Exception as error:
+            log.error(f"【Meta】连接TMDB出错：{str(error)}")
+            note_tmdb_failure("tmdb_network_error", error)
             return None
         log.debug(f"【Meta】API返回：{str(self.search.total_results)}")
-        if len(multis) == 0:
-            log.debug(f"【Meta】{file_media_name} 未找到相关媒体息!")
-            return {}
-        else:
-            info = {}
-            for multi in multis:
-                if multi.get("media_type") == "movie":
-                    if self.__compare_tmdb_names(file_media_name, multi.get('title')) \
-                            or self.__compare_tmdb_names(file_media_name, multi.get('original_title')):
-                        info = multi
-                elif multi.get("media_type") == "tv":
-                    if self.__compare_tmdb_names(file_media_name, multi.get('name')) \
-                            or self.__compare_tmdb_names(file_media_name, multi.get('original_name')):
-                        info = multi
-            if not info:
-                for multi in multis[:5]:
-                    if multi.get("media_type") == "movie":
-                        movie_info, names = self.__search_tmdb_allnames(MediaType.MOVIE, multi.get("id"))
-                        if self.__compare_tmdb_names(file_media_name, names):
-                            info = movie_info
-                    elif multi.get("media_type") == "tv":
-                        tv_info, names = self.__search_tmdb_allnames(MediaType.TV, multi.get("id"))
-                        if self.__compare_tmdb_names(file_media_name, names):
-                            info = tv_info
-        # 返回
-        if info:
-            info['media_type'] = MediaType.MOVIE if info.get('media_type') == 'movie' else MediaType.TV
-            return info
-        else:
-            log.info("【Meta】%s 在TMDB中未找到媒体信息!" % file_media_name)
-            return info
+        result = self.__select_tmdb_search_candidates(file_media_name, results)
+        if result:
+            result["media_type"] = MediaType.MOVIE if result.get("media_type") == "movie" \
+                else MediaType.TV if result.get("media_type") == "tv" else result.get("media_type")
+        return result
 
     @record_tmdb_call
     def __search_tmdb_web(self, file_media_name, mtype: MediaType):
@@ -486,15 +483,31 @@ class Media:
         if not file_media_name:
             return None
         # 缓存键：避免mtype枚举无法哈希的问题
-        cache_key = (file_media_name, mtype.value if mtype else None)
+        recorder = current_recorder()
+        original_title = (recorder.original_name if recorder else None) or file_media_name
+        cache_key = (file_media_name, mtype.value if mtype else None, original_title)
         cached = TmdbWebSearchCache.get(cache_key, _TmdbWebSearchCache_SENTINEL)
         if cached is not _TmdbWebSearchCache_SENTINEL:
             log.info("【Meta】正在从TheDbMovie缓存查询：%s ..." % file_media_name)
+            if recorder is not None:
+                recorder.action("cache_hit", input={"layer": "tmdb_web", "cache_key": cache_key},
+                                provider_id=recorder.context.get("active_provider_id"))
             return cached
+        failure_count = len(recorder._tmdb_failure_events) if recorder is not None else 0
         result = None
         log.info("【Meta】正在从TheDbMovie网站查询：%s ..." % file_media_name)
         tmdb_url = "https://www.themoviedb.org/search?%s" % urlencode({"query": file_media_name})
-        res = RequestUtils(timeout=5).get_res(url=tmdb_url)
+        remaining = recognition_remaining_seconds()
+        if remaining is not None and remaining <= 0:
+            note_tmdb_timeout(HttpTimeout("recognition_deadline_exceeded"))
+            return None
+        request_timeout = min(5, remaining) if remaining is not None else 5
+        res = RequestUtils(timeout=request_timeout).get_res(url=tmdb_url)
+        if (not res and remaining is not None
+                and recognition_remaining_seconds() <= 0):
+            note_tmdb_timeout(HttpTimeout("recognition_deadline_exceeded"))
+        elif not res:
+            note_tmdb_failure("tmdb_network_error", "TMDB 网站请求失败")
         if res and res.status_code == 200:
             html_text = res.text
             if html_text:
@@ -507,36 +520,31 @@ class Media:
                             continue
                         if link not in tmdb_links:
                             tmdb_links.append(link)
-                    if len(tmdb_links) == 1:
-                        tmdbinfo = self.get_tmdb_info(
-                            mtype=MediaType.TV if tmdb_links[0].startswith("/tv") else MediaType.MOVIE,
-                            tmdbid=tmdb_links[0].split("/")[-1])
-                        if tmdbinfo:
-                            if mtype == MediaType.TV and tmdbinfo.get('media_type') != MediaType.TV:
-                                result = {}
-                            else:
-                                if tmdbinfo.get('media_type') == MediaType.MOVIE:
-                                    log.info("【Meta】%s 从WEB识别到 电影：TMDBID=%s, 名称=%s, 上映日期=%s" % (
-                                        file_media_name,
-                                        tmdbinfo.get('id'),
-                                        tmdbinfo.get('title'),
-                                        tmdbinfo.get('release_date')))
-                                else:
-                                    log.info("【Meta】%s 从WEB识别到 电视剧：TMDBID=%s, 名称=%s, 首播日期=%s" % (
-                                        file_media_name,
-                                        tmdbinfo.get('id'),
-                                        tmdbinfo.get('name'),
-                                        tmdbinfo.get('first_air_date')))
-                                result = tmdbinfo
-                        else:
-                            result = tmdbinfo
-                    elif len(tmdb_links) > 1:
-                        log.info("【Meta】%s TMDB网站返回数据过多：%s" % (file_media_name, len(tmdb_links)))
+                    if tmdb_links:
+                        candidates = []
+                        for link in tmdb_links:
+                            candidate_type = (MediaType.TV if link.startswith("/tv")
+                                              else MediaType.MOVIE)
+                            tmdbinfo = self.get_tmdb_info(
+                                mtype=candidate_type, tmdbid=link.split("/")[-1])
+                            if tmdbinfo:
+                                tmdbinfo["media_type"] = candidate_type
+                                candidates.append(tmdbinfo)
+                        result = self.__select_tmdb_search_candidates(file_media_name, candidates)
                     else:
                         log.info("【Meta】%s TMDB网站未查询到媒体信息！" % file_media_name)
+                        note_tmdb_failure("tmdb_no_results")
                 except Exception as err:
-                    print(str(err))
-        TmdbWebSearchCache.set(cache_key, result)
+                    log.error("【Meta】TMDB网站候选处理失败：%s" % str(err))
+                    note_tmdb_failure("tmdb_network_error", err)
+            else:
+                note_tmdb_failure("tmdb_no_results")
+        elif res:
+            note_tmdb_failure("tmdb_network_error", f"HTTP {res.status_code}")
+        has_failure = (recorder is not None and
+                       len(recorder._tmdb_failure_events) > failure_count)
+        if result or not has_failure:
+            TmdbWebSearchCache.set(cache_key, result)
         return result
 
     @staticmethod
@@ -575,13 +583,19 @@ class Media:
         if not meta_info:
             return None
         primary_name = meta_info.get_name()
+        search_type = self.__tmdb_search_type(meta_info.type)
         for search_name in self.__get_search_names(meta_info):
             if search_name == primary_name:
                 continue
-            if meta_info.type == MediaType.MOVIE:
+            recorder = current_recorder()
+            if recorder is not None:
+                recorder.action("fallback", input={"primary_name": primary_name},
+                                output={"alias": search_name, "type": meta_info.type},
+                                provider_id=recorder.context.get("active_provider_id"))
+            if search_type == MediaType.MOVIE:
                 media_info = self.__search_tmdb(file_media_name=search_name,
                                                 search_type=MediaType.MOVIE)
-            elif meta_info.type == MediaType.TV:
+            elif search_type == MediaType.TV:
                 media_info = self.__search_tmdb(file_media_name=search_name,
                                                 search_type=MediaType.TV)
             else:
@@ -592,7 +606,12 @@ class Media:
         # 候选。此时采用该唯一同类型结果，和 TMDB WEB 的唯一结果策略一致。
         if getattr(meta_info, "alternative_names", None):
             for search_name in self.__get_search_names(meta_info):
-                media_info = self.__search_single_tmdb_result(search_name, meta_info.type)
+                recorder = current_recorder()
+                if recorder is not None:
+                    recorder.action("fallback", input={"primary_name": primary_name},
+                                    output={"unique_alias": search_name, "type": meta_info.type},
+                                    provider_id=recorder.context.get("active_provider_id"))
+                media_info = self.__search_single_tmdb_result(search_name, search_type)
                 if media_info:
                     return media_info
         return None
@@ -601,6 +620,7 @@ class Media:
         """返回 TMDB API 的唯一媒体结果，避免把模糊查询结果误认为匹配。"""
         if not self.search or not file_media_name:
             return None
+        mtype = self.__tmdb_search_type(mtype)
         try:
             if mtype == MediaType.MOVIE:
                 results = self.search.movies({"query": file_media_name}) or []
@@ -642,6 +662,7 @@ class Media:
         语言在分词时丢失。
         """
         search_names = self.__get_search_names(meta_info, primary_name)
+        mtype = self.__tmdb_search_type(mtype or getattr(meta_info, "type", None))
         if self._search_tmdbweb:
             for search_name in search_names:
                 media_info = self.__search_tmdb_web(file_media_name=search_name, mtype=mtype)
@@ -687,9 +708,12 @@ class Media:
             "audio_encode": meta_info.audio_encode,
         })
 
-    def __request_ai_parse(self, title):
+    def __request_ai_parse(self, title, timeout=None):
         """Call the registered anitopy-ml provider and record its raw response."""
-        if not self._ai_inference or not self._ai_inference_url or not title \
+        laboratory = recognition_config("laboratory") or {}
+        ai_enabled = laboratory.get("ai_inference", self._ai_inference)
+        ai_endpoint = laboratory.get("ai_inference_url", self._ai_inference_url)
+        if not ai_enabled or not ai_endpoint or not title \
                 or not self.__recognition_provider_enabled("anitopy_ml"):
             recorder = current_recorder()
             if recorder is not None:
@@ -697,7 +721,35 @@ class Media:
                     provider_id="anitopy_ml", status="skipped",
                     input={"title": title}, error="disabled_or_empty_title")
             return None
-        provider = registry.create("anitopy_ml", endpoint=self._ai_inference_url)
+        provider_class = registry.discover().get("anitopy_ml")
+        provider_version = getattr(getattr(provider_class, "descriptor", None), "version", "unknown")
+        provider_settings = ((recognition_config("recognition") or {}).get("providers") or {}).get(
+            "anitopy_ml") or {}
+        effective_endpoint = provider_settings.get("endpoint") or ai_endpoint
+        parse_key = recognition_cache.cache_key("parse", {
+            "provider_id": "anitopy_ml",
+            "provider_version": provider_version,
+            "model_revision": provider_settings.get("model_revision", "unknown"),
+            "endpoint": effective_endpoint,
+            "title": title,
+            "config_version": recognition_cache.config_version(),
+        })
+        cached_result = recognition_cache.get("parse", parse_key)
+        if cached_result is not recognition_cache.CACHE_MISS:
+            recorder = current_recorder()
+            if recorder is not None:
+                recorder.action("cache_hit", provider_id="anitopy_ml",
+                                input={"layer": "parse", "cache_key": parse_key})
+                recorder.add_provider_result(
+                    provider_id="anitopy_ml", status="cached", input={"title": title},
+                    raw_result=cached_result.get("raw_result"),
+                    normalized_result=cached_result.get("parsed"),
+                    version=cached_result.get("version", provider_version), elapsed_ms=0)
+            return cached_result.get("parsed")
+        provider_options = {"endpoint": effective_endpoint}
+        if timeout is not None:
+            provider_options["timeout"] = max(min(10.0, float(timeout)), 0.001)
+        provider = registry.create("anitopy_ml", **provider_options)
         if provider is None:
             recorder = current_recorder()
             if recorder is not None:
@@ -705,33 +757,73 @@ class Media:
                     provider_id="anitopy_ml", status="error", input={"title": title},
                     error="provider_unavailable")
             return None
-        result = provider.parse(RecognitionRequest(title=title))
-        recorder = current_recorder()
-        if recorder is not None:
-            recorder.add_provider_result(
-                provider_id=result.provider_id,
-                status=result.status,
-                input={"title": title},
-                raw_result=result.raw_result,
-                normalized_result=result.parsed,
-                version=provider.descriptor.version,
-                elapsed_ms=result.elapsed_ms,
-                error=result.error,
-            )
-        return result.parsed if result.status == "success" else None
+        try:
+            result = provider.parse(RecognitionRequest(title=title))
+            recorder = current_recorder()
+            if recorder is not None:
+                recorder.add_provider_result(
+                    provider_id=result.provider_id,
+                    status=result.status,
+                    input={"title": title},
+                    raw_result=result.raw_result,
+                    normalized_result=result.parsed,
+                    version=provider.descriptor.version,
+                    elapsed_ms=result.elapsed_ms,
+                    error=result.error,
+                )
+            if result.status == "success":
+                recognition_cache.put("parse", parse_key, {
+                    "parsed": result.parsed,
+                    "raw_result": result.raw_result,
+                    "version": provider.descriptor.version,
+                })
+            return result.parsed if result.status == "success" else None
+        except Exception as error:
+            recorder = current_recorder()
+            if recorder is not None:
+                recorder.add_provider_result(
+                    provider_id="anitopy_ml", status="error", input={"title": title},
+                    error=str(error))
+            log.error("【Recognition】anitopy-ml 识别执行失败：%s" % str(error))
+            return None
+        finally:
+            registry.release(provider)
 
     @staticmethod
     def __recognition_provider_enabled(provider_id):
-        recognition = Config().get_config("recognition") or {}
+        recognition = recognition_config("recognition") or {}
         providers = recognition.get("providers") or {}
         provider = providers.get(provider_id)
         if provider_id == "anitopy_ml":
-            legacy_enabled = bool((Config().get_config("laboratory") or {}).get("ai_inference"))
+            legacy_enabled = bool((recognition_config("laboratory") or {}).get("ai_inference"))
             configured_enabled = provider.get("enabled", True) if isinstance(provider, dict) else True
             return legacy_enabled and bool(configured_enabled)
         if isinstance(provider, dict) and "enabled" in provider:
             return bool(provider["enabled"])
         return provider_id == "local_rules"
+
+    @staticmethod
+    def __start_recognition_deadline(recorder):
+        """Pin one end-to-end network budget to the current resolve request."""
+        if recorder is None or recorder.deadline_monotonic is not None:
+            return recorder.deadline_monotonic if recorder else None
+        execution_cfg = ((recognition_config("recognition") or {}).get("execution") or {})
+        try:
+            total_timeout = max(float(execution_cfg.get("total_timeout_seconds", 30)), 0.001)
+        except (TypeError, ValueError):
+            total_timeout = 30.0
+        recorder.deadline_monotonic = time.monotonic() + total_timeout
+        return recorder.deadline_monotonic
+
+    @staticmethod
+    def __recognition_provider_options(provider_class, provider_settings):
+        """Pass only descriptor-declared extension settings to provider constructors."""
+        provider_schema = getattr(getattr(provider_class, "descriptor", None), "config_schema", {}) or {}
+        return {
+            key: provider_settings[key]
+            for key in provider_schema
+            if key in provider_settings and key not in {"enabled", "reliability"}
+        }
 
     @classmethod
     def __has_additional_recognizer(cls):
@@ -858,8 +950,23 @@ class Media:
         """按一套解析结果查询 TMDB，并维护同现有识别一致的缓存。"""
         if not meta_info or not meta_info.get_name():
             return None
-        media_key = self.__make_cache_key(meta_info)
-        if cache and self.meta.get_meta_data_by_key(media_key):
+        tmdb_type = self.__tmdb_search_type(meta_info.type)
+        base_key = self.__make_cache_key(meta_info)
+        laboratory = recognition_config("laboratory") or {}
+        media_key = recognition_cache.cache_key("tmdb", {
+            "resolver_input": base_key,
+            "strict": strict,
+            "language": "zh-CN",
+            "chinese": chinese,
+            "append_to_response": self.__json_safe(append_to_response),
+            "match_mode": getattr(self._rmt_match_mode, "value", self._rmt_match_mode),
+            "web_fallback": laboratory.get("search_tmdbweb", self._search_tmdbweb),
+            "config_version": recognition_cache.config_version(),
+        })
+        # Recognition requests must recompute the winning entity from this
+        # request's provider results. The lower-level TMDB query cache remains
+        # available, but a cached previous winner must not bypass arbitration.
+        if cache and current_recorder() is None and self.meta.get_meta_data_by_key(media_key):
             cache_info = self.meta.get_meta_data_by_key(media_key)
             recorder = current_recorder()
             if recorder is not None:
@@ -870,30 +977,51 @@ class Media:
                 if cache_info.get("id") else None
             meta_info.set_tmdb_info(file_media_info)
             return file_media_info
-        if meta_info.type != MediaType.TV and not meta_info.year:
+        recorder = current_recorder()
+
+        def is_ambiguous():
+            return bool(recorder and recorder.context.get("decision_reason") == "ambiguous_tmdb")
+
+        if tmdb_type != MediaType.TV and not meta_info.year:
             file_media_info = self.__search_multi_tmdb(file_media_name=meta_info.get_name())
-        elif meta_info.type == MediaType.TV:
+            if is_ambiguous():
+                return None
+        elif tmdb_type == MediaType.TV:
             file_media_info = self.__search_tmdb(file_media_name=meta_info.get_name(),
                                                  first_media_year=meta_info.year,
-                                                 search_type=meta_info.type,
+                                                 search_type=tmdb_type,
                                                  media_year=meta_info.year,
                                                  season_number=meta_info.begin_season)
+            if is_ambiguous():
+                return None
             if not file_media_info and meta_info.year and self._rmt_match_mode == MatchMode.NORMAL and not strict:
-                file_media_info = self.__search_tmdb(file_media_name=meta_info.get_name(), search_type=meta_info.type)
+                file_media_info = self.__search_tmdb(file_media_name=meta_info.get_name(), search_type=tmdb_type)
+                if is_ambiguous():
+                    return None
         else:
             file_media_info = self.__search_tmdb(file_media_name=meta_info.get_name(),
                                                  first_media_year=meta_info.year,
                                                  search_type=MediaType.MOVIE)
+            if is_ambiguous():
+                return None
             if not file_media_info:
                 file_media_info = self.__search_tmdb(file_media_name=meta_info.get_name(),
                                                      first_media_year=meta_info.year,
                                                      search_type=MediaType.TV)
+                if is_ambiguous():
+                    return None
             if not file_media_info and self._rmt_match_mode == MatchMode.NORMAL and not strict:
                 file_media_info = self.__search_multi_tmdb(file_media_name=meta_info.get_name())
+                if is_ambiguous():
+                    return None
         if not file_media_info and not strict:
             file_media_info = self.__search_by_title_aliases(meta_info)
+            if is_ambiguous():
+                return None
         if not file_media_info and self._search_tmdbweb:
             file_media_info = self.__search_fallback(meta_info=meta_info, mtype=meta_info.type)
+            if is_ambiguous():
+                return None
         if file_media_info and not file_media_info.get("genres"):
             file_media_info = self.get_tmdb_info(mtype=file_media_info.get("media_type"),
                                                  tmdbid=file_media_info.get("id"), chinese=chinese,
@@ -911,38 +1039,164 @@ class Media:
         right_type = getattr(right.get("media_type"), "value", right.get("media_type"))
         return str(left.get("id")) == str(right.get("id")) and left_type == right_type
 
-    def __tmdb_title_evidence(self, original_title, tmdb_info):
+    def __tmdb_title_evidence(self, original_title, tmdb_info, release_groups=None,
+                              include_aliases=True):
+        """Cache title evidence only; the winning TMDB entity is always resolved per request."""
+        cfg = recognition_config("recognition") or {}
+        decision_cfg = cfg.get("decision") or {}
+        title_cfg = decision_cfg.get("title_evidence") or {}
+        key = recognition_cache.cache_key("decision", {
+            "original_title": original_title,
+            "tmdb_info": tmdb_info,
+            "release_groups": release_groups,
+            "include_aliases": include_aliases,
+            "title_evidence": title_cfg,
+            "config_version": recognition_cache.config_version(),
+        })
+        cached = recognition_cache.get("decision", key)
+        if cached is not recognition_cache.CACHE_MISS:
+            recorder = current_recorder()
+            if recorder is not None:
+                recorder.action("cache_hit", input={"layer": "decision", "cache_key": key},
+                                provider_id=recorder.context.get("active_provider_id"))
+            return cached
+        result = self.__tmdb_title_evidence_uncached(
+            original_title, tmdb_info, release_groups, include_aliases=include_aliases)
+        if result.get("level") != "unavailable":
+            recognition_cache.put("decision", key, result,
+                                  negative=result.get("level") in ("none", "weak"))
+        return result
+
+    def __tmdb_title_evidence_uncached(self, original_title, tmdb_info, release_groups=None,
+                                       include_aliases=True):
         """Find whether a complete TMDB title occurs in the raw media title."""
         if not original_title or not tmdb_info:
             return {"level": "unavailable", "matched_name": None, "names": []}
 
+        cfg = recognition_config("recognition") or {}
+        decision_cfg = cfg.get("decision") or {}
+        title_cfg = decision_cfg.get("title_evidence") or {}
+        name_sources = set(title_cfg.get(
+            "name_sources", ["primary", "original", "alternative", "translation"]))
         names = []
-        for key in ("title", "name", "original_title", "original_name"):
+        source_fields = []
+        if "primary" in name_sources:
+            source_fields.extend(("title", "name"))
+        if "original" in name_sources:
+            source_fields.extend(("original_title", "original_name"))
+        for key in source_fields:
             value = tmdb_info.get(key)
             if isinstance(value, str) and value.strip() and value.strip() not in names:
                 names.append(value.strip())
         mtype = tmdb_info.get("media_type")
         tmdb_id = tmdb_info.get("id")
-        if mtype and tmdb_id:
+        alias_sources = (name_sources.intersection(("alternative", "translation"))
+                         if include_aliases else set())
+        if mtype and tmdb_id and alias_sources:
             try:
-                _, aliases = self.__search_tmdb_allnames(mtype, tmdb_id)
+                _, aliases = self.__search_tmdb_allnames(
+                    mtype, tmdb_id, alias_sources=alias_sources)
                 for alias in aliases:
                     if isinstance(alias, str) and alias.strip() and alias.strip() not in names:
                         names.append(alias.strip())
             except Exception as error:
                 log.warn("【Meta】读取 TMDB 译名失败：%s" % str(error))
 
-        def normalize(value):
-            value = unicodedata.normalize("NFKC", zhconv.convert(str(value), "zh-cn"))
-            value = re.sub(r"[^\w\u3400-\u9fff]+", " ", value.casefold(), flags=re.UNICODE)
-            return re.sub(r"\s+", " ", value).strip()
+        normalization = set(title_cfg.get(
+            "normalization", ["nfkc", "casefold", "simplified_chinese",
+                              "separators", "whitespace"]))
 
-        normalized_title = normalize(original_title)
-        cfg = Config().get_config("recognition") or {}
-        decision_cfg = cfg.get("decision") or {}
-        title_cfg = decision_cfg.get("title_evidence") or {}
+        def normalize(value, with_positions=False):
+            value = str(value)
+            output = []
+            positions = []
+            cluster = ""
+            cluster_start = 0
+
+            def emit_cluster(cluster_value, source_start, source_end):
+                if not cluster_value:
+                    return
+                transformed = cluster_value
+                if "nfkc" in normalization:
+                    transformed = unicodedata.normalize("NFKC", transformed)
+                if "simplified_chinese" in normalization:
+                    transformed = zhconv.convert(transformed, "zh-cn")
+                if "casefold" in normalization:
+                    transformed = transformed.casefold()
+                for character in transformed:
+                    separator = (character == "_" or
+                                 not re.match(r"[\w\u3400-\u9fff]", character,
+                                              flags=re.UNICODE))
+                    if not title_cfg.get("preserve_title_numbers", True) \
+                            and character.isdigit():
+                        separator = True
+                    if "separators" in normalization and separator:
+                        character = " "
+                    if "whitespace" in normalization and character.isspace():
+                        character = " "
+                        if output and output[-1] == " ":
+                            positions[-1] = (positions[-1][0], source_end)
+                            continue
+                    output.append(character)
+                    positions.append((source_start, source_end))
+
+            for index, character in enumerate(value):
+                if cluster and not unicodedata.combining(character):
+                    emit_cluster(cluster, cluster_start, index)
+                    cluster = ""
+                if not cluster:
+                    cluster_start = index
+                cluster += character
+            if cluster:
+                emit_cluster(cluster, cluster_start, len(value))
+            if "whitespace" in normalization:
+                while output and output[0] == " ":
+                    output.pop(0)
+                    positions.pop(0)
+                while output and output[-1] == " ":
+                    output.pop()
+                    positions.pop()
+            normalized = "".join(output)
+            return (normalized, positions) if with_positions else normalized
+
+        normalized_title, title_positions = normalize(original_title, with_positions=True)
+
+        if isinstance(release_groups, str):
+            release_group_values = release_groups.split("@")
+        elif isinstance(release_groups, (list, tuple, set)):
+            release_group_values = release_groups
+        else:
+            release_group_values = []
+        normalized_release_groups = {
+            re.sub(r"\W", "", normalize(value), flags=re.UNICODE).casefold()
+            for value in release_group_values if isinstance(value, str) and value.strip()
+        }
+
+        def raw_match_span(start, end):
+            if start >= end or end > len(title_positions):
+                return None, None, None
+            raw_start = title_positions[start][0]
+            raw_end = title_positions[end - 1][1]
+            return raw_start, raw_end, original_title[raw_start:raw_end]
         min_cjk = max(int(title_cfg.get("min_cjk_chars_for_strong", 3)), 1)
         min_latin = max(int(title_cfg.get("min_latin_chars_for_strong", 4)), 1)
+        require_latin_boundary = title_cfg.get("require_latin_word_boundary", True)
+        default_technical_tokens = {
+            "360p", "480p", "720p", "1080p", "1440p", "2160p", "4k", "8k",
+            "8bit", "10bit", "xvid", "x264", "x265", "h264", "h265", "hevc", "av1", "avc",
+            "hdr", "hdr10", "dv", "dolby vision", "webdl", "webrip", "bluray", "bdrip",
+            "brrip", "hdtv", "pdtv", "dsr", "remux", "uhd", "aac", "ac3", "eac3",
+            "dts", "dts-hd", "dts-hd-ma", "dts-x", "truehd", "flac", "atmos", "ddp",
+            "dd+", "ddp5.1",
+        }
+        configured_technical_tokens = title_cfg.get(
+            "weak_technical_tokens", default_technical_tokens)
+        if not isinstance(configured_technical_tokens, (list, tuple, set)):
+            configured_technical_tokens = default_technical_tokens
+        technical_title_tokens = {
+            re.sub(r"\W", "", normalize(token), flags=re.UNICODE).casefold()
+            for token in configured_technical_tokens if isinstance(token, str) and token.strip()
+        }
         strong_matches = []
         weak_matches = []
         for name in names:
@@ -951,19 +1205,35 @@ class Media:
                 continue
             contains_cjk = bool(re.search(r"[\u3400-\u9fff]", normalized_name))
             letter_count = len(re.sub(r"\W", "", normalized_name, flags=re.UNICODE))
+            compact_name = re.sub(r"\W", "", normalized_name, flags=re.UNICODE)
+            technical_only = compact_name.casefold() in technical_title_tokens
+            release_group_only = compact_name.casefold() in normalized_release_groups
+            numeric_only = bool(compact_name) and compact_name.isdigit()
             if contains_cjk:
                 match = re.search(re.escape(normalized_name), normalized_title)
-                strong = letter_count >= min_cjk
-            else:
+                strong = (letter_count >= min_cjk and not technical_only and
+                          not release_group_only and not numeric_only)
+            elif require_latin_boundary:
                 match = re.search(r"(?<![\w])" + re.escape(normalized_name) + r"(?![\w])",
                                   normalized_title, flags=re.UNICODE)
-                strong = letter_count >= min_latin
+                strong = (letter_count >= min_latin and not technical_only and
+                          not release_group_only and not numeric_only)
+            else:
+                match = re.search(re.escape(normalized_name), normalized_title, flags=re.UNICODE)
+                strong = (letter_count >= min_latin and not technical_only and
+                          not release_group_only and not numeric_only)
             if not match:
                 continue
             after = normalized_title[match.end():].lstrip()
-            sequel_prefix = bool(re.match(r"\d+\b", after)) and not normalized_name[-1:].isdigit()
+            sequel_check = title_cfg.get("check_sequel_prefix", True)
+            sequel_prefix = bool(sequel_check and
+                                 re.match(r"\d{1,2}\b", after) and
+                                 not normalized_name[-1:].isdigit())
+            raw_start, raw_end, raw_match = raw_match_span(match.start(), match.end())
             item = {"name": name, "normalized_name": normalized_name,
-                    "match": match.group(0), "level": "strong" if strong and not sequel_prefix else "weak",
+                    "match": match.group(0), "match_text": raw_match,
+                    "match_start": raw_start, "match_end": raw_end,
+                    "level": "strong" if strong and not sequel_prefix else "weak",
                     "sequel_prefix": sequel_prefix}
             (strong_matches if item["level"] == "strong" else weak_matches).append(item)
         if strong_matches:
@@ -983,7 +1253,11 @@ class Media:
             for name in names:
                 normalized_name = normalize(name)
                 name_tokens = normalized_name.split()
-                char_count = len(re.sub(r"\W", "", normalized_name, flags=re.UNICODE))
+                compact_name = re.sub(r"\W", "", normalized_name, flags=re.UNICODE).casefold()
+                char_count = len(compact_name)
+                if compact_name in technical_title_tokens or compact_name in normalized_release_groups \
+                        or compact_name.isdigit():
+                    continue
                 if not name_tokens or char_count < (min_cjk if re.search(r"[\u3400-\u9fff]", normalized_name)
                                                     else min_latin):
                     continue
@@ -1005,12 +1279,25 @@ class Media:
                 "names": names, "input": original_title}
 
     def __get_media_info_with_providers(self, title, subtitle=None, mtype=None, strict=None,
-                                        cache=True, chinese=True, append_to_response=None):
+                                        cache=True, chinese=True, append_to_response=None,
+                                        name_override=None, year_override=None,
+                                        season_override=None):
         """Run all enabled recognizers, then resolve their TMDB evidence."""
         # 自定义识别词必须先于所有解析方式执行，保证本地解析、anitopy
         # 和 AI 推理使用同一份处理后的标题。
         processed_title, processed_subtitle, used_info = prepare_media_title(title, subtitle)
         recorder = current_recorder()
+        recognition_settings = recognition_config("recognition") or {}
+        execution_cfg = recognition_settings.get("execution") or {}
+        try:
+            total_timeout = max(float(execution_cfg.get("total_timeout_seconds", 30)), 0.001)
+        except (TypeError, ValueError):
+            total_timeout = 30.0
+        recognition_deadline = (recorder.deadline_monotonic if recorder is not None
+                                and recorder.deadline_monotonic is not None
+                                else time.monotonic() + total_timeout)
+        if recorder is not None and recorder.deadline_monotonic is None:
+            recorder.deadline_monotonic = recognition_deadline
         if recorder is not None:
             recorder.action("preprocess", input={"title": title, "subtitle": subtitle},
                             output={"title": processed_title, "subtitle": processed_subtitle,
@@ -1020,12 +1307,42 @@ class Media:
         local_meta.ignored_words = used_info.get("ignored", [])
         local_meta.replaced_words = used_info.get("replaced", [])
         local_meta.offset_words = used_info.get("offset", [])
+        if name_override is not None:
+            local_meta.cn_name = name_override
         if mtype:
             local_meta.type = mtype
+
+        def resolver_meta(candidate):
+            """Apply explicit lookup overrides to a copy, preserving parse evidence."""
+            if not candidate:
+                return None
+            query_meta = copy.copy(candidate)
+            if name_override is not None:
+                query_meta.cn_name = name_override
+            if year_override is not None:
+                query_meta.year = str(year_override)
+            if season_override is not None:
+                query_meta.begin_season = season_override
+            if mtype:
+                query_meta.type = mtype
+            return query_meta
+
+        if recorder is not None and any(value is not None for value in
+                                        (name_override, year_override, season_override, mtype)):
+            recorder.action("resolution_overrides", input={
+                "name": name_override, "year": year_override,
+                "season": season_override, "media_type": getattr(mtype, "value", mtype),
+            }, output={"title": processed_title})
         if recorder is not None:
             recorder.context["active_provider_id"] = "local_rules"
-        ai_result = self.__request_ai_parse(processed_title)
-        local_tmdb = self.__search_meta_tmdb(local_meta, strict=strict, cache=cache,
+        ai_remaining = recognition_deadline - time.monotonic()
+        ai_result = self.__request_ai_parse(processed_title, timeout=ai_remaining) \
+            if ai_remaining > 0 else None
+        if ai_remaining <= 0 and recorder is not None:
+            recorder.add_provider_result(
+                provider_id="anitopy_ml", status="timeout", input={"title": processed_title},
+                error="recognition_deadline_exceeded")
+        local_tmdb = self.__search_meta_tmdb(resolver_meta(local_meta), strict=strict, cache=cache,
                                              chinese=chinese, append_to_response=append_to_response)
         ai_meta = self.__meta_from_ai_result(processed_title, ai_result,
                                              subtitle=processed_subtitle, used_info=used_info)
@@ -1033,9 +1350,11 @@ class Media:
         # TMDB 查询和后续转移，不作为 AI 推理输入。
         if ai_meta and mtype:
             ai_meta.type = mtype
+        if ai_meta and name_override is not None:
+            ai_meta.cn_name = name_override
         if recorder is not None:
             recorder.context["active_provider_id"] = "anitopy_ml"
-        ai_tmdb = self.__search_meta_tmdb(ai_meta, strict=strict, cache=cache,
+        ai_tmdb = self.__search_meta_tmdb(resolver_meta(ai_meta), strict=strict, cache=cache,
                                           chinese=chinese, append_to_response=append_to_response) if ai_meta else None
         additional_candidates = []
         # New providers are discovered from the package and enabled through
@@ -1046,13 +1365,32 @@ class Media:
                     or not self.__recognition_provider_enabled(provider_id):
                 continue
             started = time.monotonic()
+            provider = None
+            remaining = recognition_deadline - started
+            if remaining <= 0:
+                if recorder is not None:
+                    recorder.add_provider_result(
+                        provider_id=provider_id, status="timeout",
+                        input={"title": processed_title, "subtitle": processed_subtitle},
+                        error="recognition_deadline_exceeded")
+                continue
             try:
-                provider = provider_class()
+                provider_settings = ((recognition_config("recognition") or {}).get("providers") or {}).get(
+                    provider_id) or {}
+                provider_options = self.__recognition_provider_options(provider_class, provider_settings)
+                provider = registry.create(provider_id, **provider_options)
                 parsed_result = provider.parse(RecognitionRequest(
                     title=processed_title, subtitle=processed_subtitle,
-                    context={"mtype": getattr(mtype, "value", mtype)}))
+                    context={"mtype": getattr(mtype, "value", mtype),
+                             "deadline_monotonic": recognition_deadline,
+                             "remaining_timeout_seconds": remaining}))
+                if time.monotonic() > recognition_deadline:
+                    parsed_result.status = "timeout"
+                    parsed_result.error = "recognition_deadline_exceeded"
                 parsed_value = parsed_result.parsed
-                if hasattr(parsed_value, "get_name") and hasattr(parsed_value, "type"):
+                if parsed_result.status != "success":
+                    provider_meta = None
+                elif hasattr(parsed_value, "get_name") and hasattr(parsed_value, "type"):
                     provider_meta = parsed_value
                 elif isinstance(parsed_value, dict) and isinstance(parsed_value.get("extracted"), dict):
                     provider_meta = self.__meta_from_ai_result(
@@ -1065,6 +1403,8 @@ class Media:
                     provider_meta = None
                 if provider_meta and mtype:
                     provider_meta.type = mtype
+                if provider_meta and name_override is not None:
+                    provider_meta.cn_name = name_override
                 if recorder is not None:
                     recorder.add_provider_result(
                         provider_id=provider_id, status=parsed_result.status,
@@ -1079,17 +1419,30 @@ class Media:
                     if recorder is not None:
                         recorder.context["active_provider_id"] = provider_id
                     provider_tmdb = self.__search_meta_tmdb(
-                        provider_meta, strict=strict, cache=cache, chinese=chinese,
+                        resolver_meta(provider_meta), strict=strict, cache=cache, chinese=chinese,
                         append_to_response=append_to_response)
                     additional_candidates.append((provider_id, provider_meta, provider_tmdb))
             except Exception as error:
                 if recorder is not None:
+                    timed_out = (isinstance(error, (HttpTimeout, TimeoutError))
+                                 or time.monotonic() >= recognition_deadline)
                     recorder.add_provider_result(
-                        provider_id=provider_id, status="error",
+                        provider_id=provider_id, status="timeout" if timed_out else "error",
                         input={"title": processed_title, "subtitle": processed_subtitle},
-                        error=str(error), elapsed_ms=int((time.monotonic() - started) * 1000))
+                        error=("recognition_deadline_exceeded" if timed_out else str(error)),
+                        elapsed_ms=int((time.monotonic() - started) * 1000))
                 log.error("【Recognition】识别方式 %s 执行失败：%s" % (provider_id, str(error)))
-        decision_cfg = (Config().get_config("recognition") or {}).get("decision") or {}
+            finally:
+                registry.release(provider)
+        if recorder is not None and recorder.context.get("decision_reason") == "ambiguous_tmdb":
+            # Complete all configured parser attempts for the recognition trace,
+            # but never let a later provider silently override a multi-hit TMDB query.
+            return local_meta
+        if recorder is not None and time.monotonic() >= recognition_deadline:
+            recorder.context["decision_reason"] = "recognition_deadline_exceeded"
+            recorder.action("deadline_exceeded", status="timeout",
+                            output={"total_timeout_seconds": total_timeout})
+        decision_cfg = (recognition_config("recognition") or {}).get("decision") or {}
         strategy = decision_cfg.get("strategy", "legacy")
         shadow = (decision_cfg.get("shadow") or {}).get("enabled", False)
         if strategy != "title_evidence" and not shadow:
@@ -1119,72 +1472,52 @@ class Media:
         if ai_tmdb:
             candidates.append(("anitopy_ml", ai_meta, ai_tmdb))
         candidates.extend(candidate for candidate in additional_candidates if candidate[2])
-        matched = []
         candidate_evidence = []
         for provider_id, candidate_meta, tmdb_info in candidates:
             if recorder is not None:
                 recorder.context["active_provider_id"] = provider_id
             evidence = self.__tmdb_title_evidence(
                 (recorder.original_name if recorder is not None else None) or title,
-                tmdb_info)
+                tmdb_info, release_groups=getattr(candidate_meta, "resource_team", None))
             candidate_evidence.append(((provider_id, candidate_meta, tmdb_info), evidence))
-            weights = (((Config().get_config("recognition") or {}).get("decision") or {}).get("weights") or {})
-            release_date = tmdb_info.get("release_date") or tmdb_info.get("first_air_date") or ""
-            tmdb_type = getattr(tmdb_info.get("media_type"), "value", tmdb_info.get("media_type"))
-            meta_type = getattr(getattr(candidate_meta, "type", None), "value", getattr(candidate_meta, "type", None))
-            parsed_year = str(getattr(candidate_meta, "year", "") or "")
-            tmdb_year = str(release_date)[:4]
-            season = getattr(candidate_meta, "begin_season", None)
-            season_count = tmdb_info.get("number_of_seasons")
-            features = {
-                "title_match": 1.0 if evidence["level"] == "strong" else
-                    evidence.get("fuzzy_score", 0.0) if evidence["level"] == "fuzzy" else
-                    0.4 if evidence["level"] == "weak" else 0.0,
-                "year_match": 0.5 if not parsed_year or not tmdb_year else 1.0 if parsed_year == tmdb_year else 0.0,
-                "type_match": 0.5 if not meta_type or not tmdb_type else 1.0 if meta_type == tmdb_type or (meta_type == "anime" and tmdb_type == "tv") else 0.0,
-                "season_episode_match": 0.5 if season is None or season_count is None else 1.0 if 0 <= int(season) <= int(season_count) else 0.0,
-                "input_evidence": 1.0 if evidence["level"] in ("strong", "fuzzy") else 0.5,
-                "provider_reliability": 0.5,
-            }
+            weights = (((recognition_config("recognition") or {}).get("decision") or {}).get("weights") or {})
+            provider_settings = (recognition_settings.get("providers") or {}).get(provider_id) or {}
+            try:
+                provider_reliability = min(1.0, max(0.0, float(
+                    provider_settings.get("reliability", 0.5))))
+            except (TypeError, ValueError):
+                provider_reliability = 0.5
+            features = candidate_features(candidate_meta, tmdb_info, evidence,
+                                          provider_reliability=provider_reliability)
             active_weight = sum(max(float(weights.get(key, 0)), 0.0) for key in features)
             evidence["features"] = features
-            evidence["score"] = round(
-                sum(features[key] * max(float(weights.get(key, 0)), 0.0) for key in features) / active_weight,
-                4,
-            ) if active_weight else None
+            evidence["score"] = weighted_score(features, weights) if active_weight else None
             if recorder is not None:
                 recorder.action("title_match", status=evidence["level"],
                                 input={"original_name": title},
                                 output={"provider_id": provider_id, **evidence},
                                 provider_id=provider_id)
-            if evidence["level"] == "strong":
-                matched.append((provider_id, candidate_meta, tmdb_info))
-        entities = {}
-        for candidate in matched:
-            entity_key = (str(getattr(candidate[2].get("media_type"), "value", candidate[2].get("media_type"))),
-                          str(candidate[2].get("id")))
-            entities.setdefault(entity_key, candidate)
-        if not entities and candidates and (decision_cfg.get("title_evidence") or {}).get("allow_fuzzy_fallback"):
-            fuzzy_entities = {}
-            for candidate, evidence in candidate_evidence:
-                if evidence.get("level") == "fuzzy":
-                    key = (str(getattr(candidate[2].get("media_type"), "value",
-                                       candidate[2].get("media_type"))), str(candidate[2].get("id")))
-                    fuzzy_entities.setdefault(key, candidate)
-            if len(fuzzy_entities) == 1:
-                entities = fuzzy_entities
-            elif len(fuzzy_entities) > 1:
-                entities = fuzzy_entities
+        try:
+            agreement_bonus = float(decision_cfg.get("agreement_bonus", 0.0))
+        except (TypeError, ValueError):
+            agreement_bonus = 0.0
+        title_decision = select_title_evidence(candidate_evidence,
+                                               agreement_bonus=agreement_bonus)
+        entities = title_decision["entities"]
+        if recorder is not None:
+            recorder.context["decision_metrics"] = {
+                "confidence_score": title_decision.get("confidence"),
+                "agreement_count": title_decision.get("agreement_count", 0),
+                "distinct_tmdb_entities": len(entities),
+            }
         if strategy != "title_evidence":
-            shadow_status = "success" if len(entities) == 1 else "failed"
-            shadow_reason = "ambiguous_tmdb" if len(entities) > 1 else \
-                "insufficient_title_evidence" if candidates and not entities else None
             if recorder is not None:
                 recorder.context["shadow_result"] = {
-                    "status": shadow_status,
-                    "reason": shadow_reason,
+                    "status": title_decision["status"],
+                    "reason": title_decision["reason"],
                     "candidate_ids": [key[1] for key in entities],
-                    "selected_candidate": next(iter(entities))[1] if len(entities) == 1 else None,
+                    "selected_candidate": (title_decision["selected"][2].get("id")
+                                            if title_decision["selected"] else None),
                 }
             if local_tmdb and (not ai_tmdb or self.__same_tmdb(local_tmdb, ai_tmdb)):
                 selected = local_meta
@@ -1205,19 +1538,20 @@ class Media:
             if recorder is not None:
                 recorder.context["selected_provider"] = selected_provider
             return selected
-        if len(entities) > 1:
+        if title_decision["reason"] == "ambiguous_tmdb":
             if recorder is not None:
                 recorder.context["decision_reason"] = "ambiguous_tmdb"
             return None
-        if len(entities) == 1:
-            _, (selected_provider, selected, selected_tmdb) = next(iter(entities.items()))
+        if title_decision["status"] == "success":
+            selected_provider, selected, selected_tmdb = title_decision["selected"]
         elif candidates:
             if recorder is not None:
-                recorder.context["decision_reason"] = "insufficient_title_evidence"
+                recorder.context["decision_reason"] = title_decision["reason"]
             return None
         elif not candidates:
             if recorder is not None:
-                recorder.context["decision_reason"] = "no_tmdb_match"
+                recorder.context["decision_reason"] = (
+                    self.__recognition_tmdb_failure_reason(recorder) or "no_tmdb_match")
             selected = local_meta if local_meta.get_name() else ai_meta
             selected_tmdb = None
             selected_provider = "local_rules" if selected is local_meta else "anitopy_ml"
@@ -1389,14 +1723,20 @@ class Media:
                        strict=None,
                        cache=True,
                        chinese=True,
-                       append_to_response=None):
+        append_to_response=None):
         """Resolve a media title and persist its complete recognition trace."""
+        caller_module = sys._getframe(1).f_globals.get("__name__", "")
+        source = _infer_recognition_source(caller_module)
+        if source == "unknown":
+            source = "media.get_media_info"
         with recognition_scope(
                 title,
-                source="media.get_media_info",
+                source=source,
                 stage="resolve",
                 context={"subtitle": subtitle, "mtype": getattr(mtype, "value", mtype),
-                         "strict": strict, "cache": cache, "chinese": chinese}) as recorder:
+                         "strict": strict, "cache": cache, "chinese": chinese,
+                         "caller_module": caller_module}) as recorder:
+            self.__start_recognition_deadline(recorder)
             result = self._get_media_info_impl(
                 title=title, subtitle=subtitle, mtype=mtype, strict=strict,
                 cache=cache, chinese=chinese, append_to_response=append_to_response)
@@ -1408,12 +1748,16 @@ class Media:
                 status, reason = "failed", "tmdb_unavailable"
             elif recorder.context.get("decision_reason"):
                 status, reason = "failed", recorder.context["decision_reason"]
+            elif recorder.deadline_monotonic is not None \
+                    and time.monotonic() >= recorder.deadline_monotonic:
+                status, reason = "failed", "recognition_deadline_exceeded"
             elif not parsed or not parsed.get("name"):
                 status, reason = "failed", "no_name_parsed"
             elif tmdb_result:
                 status, reason = "success", None
             else:
-                status, reason = "failed", "no_tmdb_match"
+                status, reason = "failed", (
+                    self.__recognition_tmdb_failure_reason(recorder) or "no_tmdb_match")
             recorder.set_overall(
                 status=status,
                 reason=reason,
@@ -1447,7 +1791,9 @@ class Media:
             return None
         if not title:
             return None
-        if ((self._ai_inference and self._ai_inference_url
+        laboratory = recognition_config("laboratory") or {}
+        if ((laboratory.get("ai_inference", self._ai_inference)
+             and laboratory.get("ai_inference_url", self._ai_inference_url)
              and self.__recognition_provider_enabled("anitopy_ml"))
                 or self.__has_additional_recognizer()):
             return self.__get_media_info_with_providers(title=title, subtitle=subtitle, mtype=mtype,
@@ -1463,24 +1809,25 @@ class Media:
             return None
         if mtype:
             meta_info.type = mtype
+        tmdb_type = self.__tmdb_search_type(meta_info.type)
         media_key = self.__make_cache_key(meta_info)
         if not cache or not self.meta.get_meta_data_by_key(media_key):
             # 缓存没有或者强制不使用缓存
-            if meta_info.type != MediaType.TV and not meta_info.year:
+            if tmdb_type != MediaType.TV and not meta_info.year:
                 file_media_info = self.__search_multi_tmdb(file_media_name=meta_info.get_name())
             else:
-                if meta_info.type == MediaType.TV:
+                if tmdb_type == MediaType.TV:
                     # 确定是电视
                     file_media_info = self.__search_tmdb(file_media_name=meta_info.get_name(),
                                                          first_media_year=meta_info.year,
-                                                         search_type=meta_info.type,
+                                                         search_type=tmdb_type,
                                                          media_year=meta_info.year,
                                                          season_number=meta_info.begin_season
                                                          )
                     if not file_media_info and meta_info.year and self._rmt_match_mode == MatchMode.NORMAL and not strict:
                         # 非严格模式下去掉年份再查一次
                         file_media_info = self.__search_tmdb(file_media_name=meta_info.get_name(),
-                                                             search_type=meta_info.type
+                                                             search_type=tmdb_type
                                                              )
                 else:
                     # 有年份先按电影查
@@ -1497,8 +1844,12 @@ class Media:
                     if not file_media_info and self._rmt_match_mode == MatchMode.NORMAL and not strict:
                         # 非严格模式下去掉年份和类型再查一次
                         file_media_info = self.__search_multi_tmdb(file_media_name=meta_info.get_name())
+            if recorder is not None and recorder.context.get("decision_reason") == "ambiguous_tmdb":
+                return meta_info
             if not file_media_info and not strict:
                 file_media_info = self.__search_by_title_aliases(meta_info)
+            if recorder is not None and recorder.context.get("decision_reason") == "ambiguous_tmdb":
+                return meta_info
             if not file_media_info and self._search_tmdbweb:
                 file_media_info = self.__search_fallback(meta_info=meta_info,
                                                          mtype=meta_info.type)
@@ -1528,12 +1879,13 @@ class Media:
                                         "type": cache_info.get("type")})
         # 普通本地解析也遵循可配置的 TMDB 标题证据策略。
         recorder = current_recorder()
-        recognition_cfg = Config().get_config("recognition") or {}
+        recognition_cfg = recognition_config("recognition") or {}
         decision_cfg = recognition_cfg.get("decision") or {}
         strategy = decision_cfg.get("strategy", "legacy")
         shadow_enabled = (decision_cfg.get("shadow") or {}).get("enabled", False)
         if file_media_info:
-            evidence = self.__tmdb_title_evidence(title, file_media_info)
+            evidence = self.__tmdb_title_evidence(
+                title, file_media_info, release_groups=getattr(meta_info, "resource_team", None))
             if recorder is not None:
                 recorder.action("title_match", status=evidence["level"],
                                 input={"original_name": title}, output=evidence,
@@ -1564,11 +1916,17 @@ class Media:
                         chinese=True,
                         append_to_response=None):
         """Record and resolve a title while preserving its supplied name context."""
+        caller_module = sys._getframe(1).f_globals.get("__name__", "")
+        source = _infer_recognition_source(caller_module)
+        if source == "unknown":
+            source = "media.get_media_info_original_title"
         with recognition_scope(
-                name or title, source="media.get_media_info_original_title", stage="resolve",
-                context={"name": name, "subtitle": subtitle, "year": year,
+                name or title, source=source, stage="resolve",
+                context={"title": title, "name": name, "subtitle": subtitle, "year": year,
                          "season": season, "mtype": getattr(mtype, "value", mtype),
-                         "strict": strict, "cache": cache, "chinese": chinese}) as recorder:
+                         "strict": strict, "cache": cache, "chinese": chinese,
+                         "caller_module": caller_module}) as recorder:
+            self.__start_recognition_deadline(recorder)
             result = self._get_media_info_original_title_impl(
                 title=title, name=name, subtitle=subtitle, year=year, season=season,
                 mtype=mtype, strict=strict, cache=cache, chinese=chinese,
@@ -1578,12 +1936,18 @@ class Media:
             reason = recorder.context.get("decision_reason")
             if not title:
                 status, reason = "failed", "empty_title"
+            elif not self.tmdb:
+                status, reason = "failed", "tmdb_unavailable"
             elif reason:
                 status = "failed"
+            elif recorder.deadline_monotonic is not None \
+                    and time.monotonic() >= recorder.deadline_monotonic:
+                status, reason = "failed", "recognition_deadline_exceeded"
             elif tmdb_result:
                 status, reason = "success", None
             else:
-                status, reason = "failed", "no_tmdb_match"
+                status, reason = "failed", (
+                    self.__recognition_tmdb_failure_reason(recorder) or "no_tmdb_match")
             recorder.set_overall(status, reason, parsed,
                                  recorder.context.get("selected_provider") or "local_rules",
                                  tmdb_result)
@@ -1618,14 +1982,18 @@ class Media:
             return None
         if not title:
             return None
-        if ((self._ai_inference and self._ai_inference_url
+        laboratory = recognition_config("laboratory") or {}
+        if ((laboratory.get("ai_inference", self._ai_inference)
+             and laboratory.get("ai_inference_url", self._ai_inference_url)
              and self.__recognition_provider_enabled("anitopy_ml"))
                 or self.__has_additional_recognizer()):
-            return self.__get_media_info_with_providers(title=title, subtitle=subtitle, mtype=mtype,
-                                                 strict=strict, cache=cache, chinese=chinese,
-                                                 append_to_response=append_to_response)
+            return self.__get_media_info_with_providers(
+                title=title, subtitle=subtitle, mtype=mtype, strict=strict,
+                cache=cache, chinese=chinese, append_to_response=append_to_response,
+                name_override=name, year_override=year, season_override=season)
         meta_info = MetaInfo(title, subtitle=subtitle)
         meta_info.cn_name = name
+        tmdb_type = self.__tmdb_search_type(mtype or meta_info.type)
         recorder = current_recorder()
         if recorder is not None:
             recorder.context["active_provider_id"] = "local_rules"
@@ -1633,21 +2001,21 @@ class Media:
         media_key = self.__make_cache_key(meta_info)
         if not cache or not self.meta.get_meta_data_by_key(media_key):
             # 缓存没有或者强制不使用缓存
-            if mtype != MediaType.TV and not year:
+            if tmdb_type != MediaType.TV and not year:
                 file_media_info = self.__search_multi_tmdb(file_media_name=name)
             else:
-                if mtype == MediaType.TV:
+                if tmdb_type == MediaType.TV:
                     # 确定是电视
                     file_media_info = self.__search_tmdb(file_media_name=name,
                                                          first_media_year=year,
-                                                         search_type=mtype,
+                                                         search_type=tmdb_type,
                                                          media_year=year,
                                                          season_number=season
                                                          )
                     if not file_media_info and year and self._rmt_match_mode == MatchMode.NORMAL and not strict:
                         # 非严格模式下去掉年份再查一次
                         file_media_info = self.__search_tmdb(file_media_name=name,
-                                                             search_type=mtype
+                                                             search_type=tmdb_type
                                                              )
                 else:
                     # 有年份先按电影查
@@ -1664,6 +2032,8 @@ class Media:
                     if not file_media_info and self._rmt_match_mode == MatchMode.NORMAL and not strict:
                         # 非严格模式下去掉年份和类型再查一次
                         file_media_info = self.__search_multi_tmdb(file_media_name=name)
+            if recorder is not None and recorder.context.get("decision_reason") == "ambiguous_tmdb":
+                return meta_info
             if not file_media_info and self._search_tmdbweb:
                 file_media_info = self.__search_fallback(meta_info=meta_info,
                                                          mtype=mtype,
@@ -1691,11 +2061,12 @@ class Media:
                                                      append_to_response=append_to_response)
             else:
                 file_media_info = None
-        strategy_cfg = (Config().get_config("recognition") or {}).get("decision") or {}
+        strategy_cfg = (recognition_config("recognition") or {}).get("decision") or {}
         strategy = strategy_cfg.get("strategy", "legacy")
         shadow_enabled = (strategy_cfg.get("shadow") or {}).get("enabled", False)
         if file_media_info:
-            evidence = self.__tmdb_title_evidence(name or title, file_media_info)
+            evidence = self.__tmdb_title_evidence(
+                name or title, file_media_info, release_groups=getattr(meta_info, "resource_team", None))
             if recorder is not None:
                 recorder.action("title_match", status=evidence["level"],
                                 input={"original_name": name or title}, output=evidence,
@@ -1750,29 +2121,38 @@ class Media:
                                 episode_format: EpisodeFormat = None,
                                 chinese=True):
         """Create one complete recognition record for each file in a batch."""
-        if not self.tmdb:
-            log.error("【Meta】TMDB API Key 未设置！")
-            return {}
         paths = file_list if isinstance(file_list, list) else [file_list]
         results = {}
         batch_id = str(uuid.uuid4())
+        caller_module = sys._getframe(1).f_globals.get("__name__", "")
+        source = _infer_recognition_source(caller_module)
+        if source == "unknown":
+            source = "media.get_media_info_on_files"
         for file_path in paths:
             with recognition_scope(
-                    os.path.basename(str(file_path)), source="media.get_media_info_on_files",
+                    os.path.basename(str(file_path)), source=source,
                     stage="resolve", context={"file_path": str(file_path), "batch_id": batch_id,
                                                "tmdb_info_supplied": bool(tmdb_info),
                                                "media_type": getattr(media_type, "value", media_type),
-                                               "season": season}) as recorder:
+                                               "season": season, "caller_module": caller_module}) as recorder:
+                self.__start_recognition_deadline(recorder)
                 resolved = self._get_media_info_on_files_impl(
                     file_path, tmdb_info=tmdb_info, media_type=media_type, season=season,
                     episode_format=episode_format, chinese=chinese)
                 result = resolved.get(file_path) if resolved else None
+                if result:
+                    result.recognition_request_id = recorder.request_id
                 parsed = self.__meta_snapshot(result) if result else None
                 tmdb_result = self.__json_safe(result.tmdb_info) if result and result.tmdb_info else None
                 status = "success" if tmdb_result else "failed"
-                reason = None if status == "success" else "no_tmdb_match"
+                reason = None if status == "success" else (
+                    "tmdb_unavailable" if not self.tmdb else
+                    (self.__recognition_tmdb_failure_reason(recorder) or "no_tmdb_match"))
                 if recorder.context.get("decision_reason"):
                     status, reason = "failed", recorder.context["decision_reason"]
+                elif status != "success" and recorder.deadline_monotonic is not None \
+                        and time.monotonic() >= recorder.deadline_monotonic:
+                    reason = "recognition_deadline_exceeded"
                 recorder.set_overall(status, reason, parsed,
                                      recorder.context.get("selected_provider") or "local_rules",
                                      tmdb_result)
@@ -1810,6 +2190,11 @@ class Media:
             try:
                 if not os.path.exists(file_path):
                     log.warn("【Meta】%s 不存在" % file_path)
+                    recorder = current_recorder()
+                    if recorder is not None:
+                        recorder.context["decision_reason"] = "file_not_found"
+                        recorder.action("file_skip", status="skipped", input={"file_path": file_path},
+                                        reason="file_not_found")
                     continue
                 # 解析媒体名称
                 # 先用自己的名称
@@ -1820,10 +2205,17 @@ class Media:
                 if not os.path.isdir(file_path) \
                         and PathUtils.get_bluray_dir(file_path):
                     log.info("【Meta】%s 跳过蓝光原盘文件：" % file_path)
+                    recorder = current_recorder()
+                    if recorder is not None:
+                        recorder.context["decision_reason"] = "bluray_directory_child"
+                        recorder.action("file_skip", status="skipped", input={"file_path": file_path},
+                                        reason="bluray_directory_child")
                     continue
                 # 没有自带TMDB信息
                 if not tmdb_info:
-                    if ((self._ai_inference and self._ai_inference_url
+                    laboratory = recognition_config("laboratory") or {}
+                    if ((laboratory.get("ai_inference", self._ai_inference)
+                         and laboratory.get("ai_inference_url", self._ai_inference_url)
                          and self.__recognition_provider_enabled("anitopy_ml"))
                             or self.__has_additional_recognizer()):
                         # AI 只接收文件名；media_type 仅在 AI 返回后用于 TMDB 查询
@@ -1845,8 +2237,17 @@ class Media:
                     meta_info = MetaInfo(title=file_name)
                     # 识别不到则使用上级的名称
                     if not meta_info.get_name() or not meta_info.year:
+                        recorder = current_recorder()
+                        if recorder is not None:
+                            recorder.action("fallback", input={"file_name": file_name},
+                                            output={"parent_name": parent_name},
+                                            reason="file_name_insufficient")
                         parent_info = MetaInfo(parent_name)
                         if not parent_info.get_name() or not parent_info.year:
+                            if recorder is not None:
+                                recorder.action("fallback", input={"parent_name": parent_name},
+                                                output={"parent_parent_name": parent_parent_name},
+                                                reason="parent_name_insufficient")
                             parent_parent_info = MetaInfo(parent_parent_name)
                             parent_info.type = parent_parent_info.type if parent_parent_info.type and parent_info.type != MediaType.TV else parent_info.type
                             parent_info.cn_name = parent_parent_info.cn_name if parent_parent_info.cn_name else parent_info.cn_name
@@ -1867,10 +2268,20 @@ class Media:
                                                                          meta_info.begin_season)
                     if not meta_info.get_name() or not meta_info.type:
                         log.warn("【Rmt】%s 未识别出有效信息！" % meta_info.org_string)
+                        recorder = current_recorder()
+                        if recorder is not None:
+                            recorder.context["decision_reason"] = "no_name_parsed"
                         continue
                     # 区配缓存及TMDB
                     media_key = self.__make_cache_key(meta_info)
-                    if not self.meta.get_meta_data_by_key(media_key):
+                    recorder = current_recorder()
+                    cached_info = self.meta.get_meta_data_by_key(media_key)
+                    # Recorded recognition/transfer requests must arbitrate
+                    # against current parser and TMDB evidence. In particular,
+                    # a legacy id=0 negative cache can survive a previous
+                    # failed lookup and otherwise prevent file transfer from
+                    # seeing a later successful recognition.
+                    if recorder is not None or not cached_info:
                         # 没有缓存数据
                         file_media_info = self.__search_tmdb(file_media_name=meta_info.get_name(),
                                                              first_media_year=meta_info.year,
@@ -1887,6 +2298,9 @@ class Media:
                         if not file_media_info and self._search_tmdbweb:
                             file_media_info = self.__search_fallback(meta_info=meta_info,
                                                                      mtype=meta_info.type)
+                        recorder = current_recorder()
+                        if recorder is not None and recorder.context.get("decision_reason") == "ambiguous_tmdb":
+                            continue
                         # 补全TMDB信息
                         if file_media_info and not file_media_info.get("genres"):
                             file_media_info = self.get_tmdb_info(mtype=file_media_info.get("media_type"),
@@ -1898,7 +2312,7 @@ class Media:
                                                       file_media_info=file_media_info)
                     else:
                         # 使用缓存信息
-                        cache_info = self.meta.get_meta_data_by_key(media_key)
+                        cache_info = cached_info
                         if cache_info.get("id"):
                             file_media_info = self.get_tmdb_info(mtype=cache_info.get("type"),
                                                                  tmdbid=cache_info.get("id"),
@@ -1907,11 +2321,13 @@ class Media:
                             # 缓存为未识别
                             file_media_info = None
                     recorder = current_recorder()
-                    recognition_decision = (Config().get_config("recognition") or {}).get("decision") or {}
+                    recognition_decision = (recognition_config("recognition") or {}).get("decision") or {}
                     strategy = recognition_decision.get("strategy", "legacy")
                     shadow_enabled = (recognition_decision.get("shadow") or {}).get("enabled", False)
                     if file_media_info:
-                        evidence = self.__tmdb_title_evidence(file_name, file_media_info)
+                        evidence = self.__tmdb_title_evidence(
+                            file_name, file_media_info,
+                            release_groups=getattr(meta_info, "resource_team", None))
                         if recorder is not None:
                             recorder.action("title_match", status=evidence["level"],
                                             input={"original_name": file_name}, output=evidence,
@@ -1952,10 +2368,58 @@ class Media:
             except Exception as err:
                 print(str(err))
                 log.error("【Rmt】发生错误：%s - %s" % (str(err), traceback.format_exc()))
+                recorder = current_recorder()
+                if recorder is not None:
+                    recorder.context["decision_reason"] = "file_resolution_error"
+                    recorder.action("file_resolution_error", status="error",
+                                    input={"file_path": file_path},
+                                    output={"error": str(err)},
+                                    reason="file_resolution_error")
         # 循环结束
         return return_media_infos
 
     def search_media_info_force(self, meta_info):
+        """Retry TMDB lookup and keep the retry trace as a recognition request."""
+        if not meta_info:
+            return None
+        title = getattr(meta_info, "org_string", None) or meta_info.get_name()
+        parsed_name = meta_info.get_name()
+        recognition_provider = getattr(meta_info, "recognition_source", None) or "local_rules"
+        if recognition_provider == "ai":
+            recognition_provider = "anitopy_ml"
+        caller_module = sys._getframe(1).f_globals.get("__name__", "")
+        source = _infer_recognition_source(caller_module)
+        if source == "unknown":
+            source = "media.search_media_info_force"
+        with recognition_scope(
+                title, source=source, stage="resolve",
+                context={"parsed_name": parsed_name, "year": meta_info.year,
+                         "mtype": getattr(meta_info.type, "value", meta_info.type),
+                         "season": meta_info.begin_season, "forced_retry": True,
+                         "parent_request_id": getattr(meta_info, "recognition_request_id", None),
+                         "caller_module": caller_module}) as recorder:
+            self.__start_recognition_deadline(recorder)
+            recorder.context["active_provider_id"] = recognition_provider
+            recorder.action("forced_search", status="running",
+                            input={"title": title, "parsed_name": parsed_name})
+            result = self._search_media_info_force_impl(meta_info)
+            tmdb_result = self.__json_safe(result) if result else None
+            timed_out = (recorder.deadline_monotonic is not None
+                         and time.monotonic() >= recorder.deadline_monotonic)
+            recorder.set_overall(
+                status="failed" if timed_out else ("success" if result else "failed"),
+                reason=("recognition_deadline_exceeded" if timed_out else
+                        (None if result else
+                         recorder.context.get("decision_reason") or
+                         self.__recognition_tmdb_failure_reason(recorder) or
+                         "forced_tmdb_no_result")),
+                parsed_result=self.__meta_snapshot(meta_info),
+                selected_provider=recognition_provider,
+                tmdb_result=tmdb_result,
+            )
+            return result
+
+    def _search_media_info_force_impl(self, meta_info):
         """
         强制重新搜索媒体信息，跳过缓存，针对网络问题或API限流进行重试
         :param meta_info: 已解析但识别失败的 MetaInfo 对象
@@ -1983,10 +2447,20 @@ class Media:
             media_year=year,
             season_number=season
         )
+        recorder = current_recorder()
+        if recorder is not None and recorder.context.get("decision_reason") == "ambiguous_tmdb":
+            return None
 
         # 策略2：等待2秒后重试（解决API限流问题）
         if not file_media_info:
-            time.sleep(2)
+            remaining = recognition_remaining_seconds()
+            # Preserve the legacy delayed retry for normal calls. Under a
+            # resolve deadline, skip it unless enough time remains for both
+            # the delay and at least a minimal follow-up request.
+            if remaining is None or remaining > 2:
+                time.sleep(2)
+            else:
+                return None
             file_media_info = self.__search_tmdb(
                 file_media_name=name,
                 first_media_year=year,

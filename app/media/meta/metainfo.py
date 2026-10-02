@@ -1,4 +1,5 @@
 import os.path
+import sys
 import regex as re
 
 import log
@@ -82,13 +83,41 @@ def _meta_snapshot(meta_info):
     }
 
 
+def _infer_recognition_source(module_name=None):
+    """Map direct MetaInfo callers to a stable business-source family."""
+    if module_name is None:
+        try:
+            module_name = sys._getframe(2).f_globals.get("__name__", "")
+        except (ValueError, AttributeError):
+            module_name = ""
+    prefixes = (
+        ("app.indexer", "indexer"),
+        ("app.rsschecker", "rss"),
+        ("app.rss", "rss"),
+        ("app.downloader", "downloader"),
+        ("app.subscribe", "subscribe"),
+        ("app.media.douban", "douban"),
+        ("app.doubansync", "douban_sync"),
+        ("app.filetransfer", "file_transfer"),
+        ("web", "web"),
+        ("app.media.media", "media_internal"),
+    )
+    for prefix, source in prefixes:
+        if module_name == prefix or module_name.startswith(prefix + "."):
+            return source
+    return "unknown"
+
+
 def MetaInfo(title, subtitle=None, mtype=None, apply_custom_words=True):
     """Parse a title through the discoverable local recognizer and record it."""
     recorder = current_recorder()
     if recorder is not None:
         return _record_meta_parse(recorder, title, subtitle, mtype, apply_custom_words)
 
-    with recognition_scope(title, stage="parse_only") as recorder:
+    caller_module = sys._getframe(1).f_globals.get("__name__", "")
+    source = _infer_recognition_source(caller_module)
+    with recognition_scope(title, source=source, stage="parse_only",
+                           context={"caller_module": caller_module} if caller_module else None) as recorder:
         result = _record_meta_parse(recorder, title, subtitle, mtype, apply_custom_words)
         recorder.set_overall(
             status="success" if result and result.get_name() else "failed",

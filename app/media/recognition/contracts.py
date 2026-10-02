@@ -1,4 +1,4 @@
-"""Shared contracts for media-name recognition providers."""
+"""多媒体名称识别器共用的数据契约。"""
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -32,7 +32,7 @@ class ParseResult:
 
 
 class MediaNameRecognizer(ABC):
-    """A parser accepts a title and returns one normalized parse result."""
+    """识别器接收标题并返回一份标准化解析结果。"""
 
     descriptor: RecognizerDescriptor
 
@@ -41,5 +41,4 @@ class MediaNameRecognizer(ABC):
         raise NotImplementedError
 
     def close(self) -> None:
-        """Release optional provider resources."""
-
+        """释放识别器持有的可选资源。"""

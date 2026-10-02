@@ -1,9 +1,11 @@
 import datetime
+import os
 import os.path
+import tempfile
 import time
 import json
 from enum import Enum
-from sqlalchemy import cast, func
+from sqlalchemy import cast, func, or_, and_
 
 from app.db import MainDb, DbPersist
 from app.db.models import *
@@ -26,6 +28,42 @@ class DbHelper:
     @classmethod
     def _json_dumps(cls, value):
         return json.dumps(value or {}, ensure_ascii=False, default=cls._json_default)
+
+    @staticmethod
+    def recognition_summary(payload):
+        """Build the small list-view projection without raw inputs or responses."""
+        overall = payload.get("overall_result") or {}
+
+        def tmdb_identity(value):
+            if not isinstance(value, dict):
+                return None
+            media_type = value.get("media_type")
+            if isinstance(media_type, Enum):
+                media_type = media_type.value
+            return {"id": value.get("id"), "media_type": media_type,
+                    "title": value.get("title") or value.get("name")}
+
+        return {
+            "overall_result": {
+                "status": overall.get("status"),
+                "reason": overall.get("reason"),
+                "selected_provider": overall.get("selected_provider"),
+                "elapsed_ms": overall.get("elapsed_ms"),
+                "tmdb_result": tmdb_identity(overall.get("tmdb_result")),
+            },
+            "provider_results": [{
+                key: item.get(key) for key in (
+                    "attempt_id", "provider_id", "status", "normalized_result",
+                    "elapsed_ms", "error")
+            } for item in (payload.get("provider_results") or [])],
+            "tmdb_results": [{
+                "provider_id": item.get("provider_id"),
+                "status": item.get("status"),
+                "result": tmdb_identity(item.get("result")),
+            } for item in (payload.get("tmdb_results") or [])],
+            "actions": [{key: item.get(key) for key in ("sequence", "action_type", "status")}
+                        for item in (payload.get("actions") or [])],
+        }
 
     @staticmethod
     def release_session():
@@ -194,12 +232,17 @@ class DbHelper:
     @DbPersist(_db)
     def insert_recognition_record(self, payload):
         """Persist a recognition request and all provider attempts together."""
+        request_id = payload.get("request_id")
+        if self._db.query(RECOGNITIONREQUEST).filter(
+                RECOGNITIONREQUEST.REQUEST_ID == request_id).first():
+            return request_id
         request = RECOGNITIONREQUEST(
-            REQUEST_ID=payload.get("request_id"),
+            REQUEST_ID=request_id,
             ORIGINAL_NAME=payload.get("original_name"),
             SOURCE=payload.get("source"),
             STAGE=payload.get("stage"),
             CREATED_AT=payload.get("created_at"),
+            SUMMARY=self._json_dumps(self.recognition_summary(payload)),
             CONTEXT=self._json_dumps(payload.get("context")),
             ACTIONS=self._json_dumps(payload.get("actions")),
             PROVIDER_RESULTS=self._json_dumps(payload.get("provider_results")),
@@ -210,7 +253,7 @@ class DbHelper:
         attempts = []
         for result in payload.get("provider_results") or []:
             attempts.append(RECOGNITIONATTEMPT(
-                REQUEST_ID=payload.get("request_id"),
+                REQUEST_ID=request_id,
                 ATTEMPT_ID=result.get("attempt_id"),
                 PROVIDER_ID=result.get("provider_id"),
                 STATUS=result.get("status"),
@@ -222,11 +265,13 @@ class DbHelper:
                 ELAPSED_MS=result.get("elapsed_ms"),
             ))
         self._db.insert_many(RECOGNITIONATTEMPT, attempts)
-        return payload.get("request_id")
+        return request_id
 
     def get_recognition_records(self, title=None, source=None, status=None,
-                                provider_id=None, action_type=None,
-                                page=1, page_size=20):
+                                provider_id=None, action_type=None, reason=None,
+                                created_from=None, created_to=None,
+                                page=1, page_size=20, snapshot_at=None,
+                                before_cursor=None, include_total=True):
         """Return a paged recognition-record summary query."""
         page = max(int(page or 1), 1)
         page_size = min(max(int(page_size or 20), 1), 100)
@@ -237,13 +282,28 @@ class DbHelper:
             query = query.filter(RECOGNITIONREQUEST.SOURCE == source)
         if status:
             query = query.filter(RECOGNITIONREQUEST.OVERALL_RESULT.contains('"status": "' + status + '"'))
+        if reason:
+            query = query.filter(RECOGNITIONREQUEST.OVERALL_RESULT.contains('"reason": "' + reason + '"'))
+        if created_from:
+            query = query.filter(RECOGNITIONREQUEST.CREATED_AT >= created_from)
+        if created_to:
+            query = query.filter(RECOGNITIONREQUEST.CREATED_AT <= created_to)
+        if snapshot_at:
+            query = query.filter(RECOGNITIONREQUEST.CREATED_AT <= snapshot_at)
+        if before_cursor:
+            cursor_created_at, cursor_request_id = before_cursor
+            query = query.filter(or_(
+                RECOGNITIONREQUEST.CREATED_AT < cursor_created_at,
+                and_(RECOGNITIONREQUEST.CREATED_AT == cursor_created_at,
+                     RECOGNITIONREQUEST.REQUEST_ID < cursor_request_id),
+            ))
         if provider_id:
             query = query.filter(RECOGNITIONREQUEST.REQUEST_ID.in_(
                 self._db.query(RECOGNITIONATTEMPT.REQUEST_ID)
                 .filter(RECOGNITIONATTEMPT.PROVIDER_ID == provider_id).distinct()))
         if action_type:
             query = query.filter(RECOGNITIONREQUEST.ACTIONS.contains('"action_type": "' + action_type + '"'))
-        total = query.count()
+        total = query.count() if include_total else None
         records = query.order_by(RECOGNITIONREQUEST.CREATED_AT.desc(),
                                  RECOGNITIONREQUEST.REQUEST_ID.desc()) \
             .offset((page - 1) * page_size).limit(page_size).all()
@@ -258,6 +318,128 @@ class DbHelper:
         attempts = self._db.query(RECOGNITIONATTEMPT).filter(
             RECOGNITIONATTEMPT.REQUEST_ID == request_id).order_by(RECOGNITIONATTEMPT.ID.asc()).all()
         return request, attempts
+
+    def archive_recognition_records(self, older_than, archive_path, delete_archived=False,
+                                    batch_size=250):
+        """Write full old records to a new JSONL archive; DB deletion is explicit opt-in.
+
+        This is an operator-invoked maintenance primitive. It is never called by
+        request handling, startup, retention timers, or the recognition UI.
+        Existing archive paths are rejected to prevent accidental overwrite.
+        """
+        if not older_than or not archive_path:
+            raise ValueError("older_than and archive_path are required")
+        batch_size = min(max(int(batch_size or 250), 1), 1000)
+        archive_path = os.path.abspath(os.path.expanduser(archive_path))
+        archive_dir = os.path.dirname(archive_path)
+        os.makedirs(archive_dir, exist_ok=True)
+        temporary_path = None
+        archived_count = 0
+        last_created = ""
+        last_request_id = ""
+        try:
+            descriptor, temporary_path = tempfile.mkstemp(
+                prefix=".recognition-archive-", suffix=".tmp", dir=archive_dir)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as archive_file:
+                while True:
+                    query = self._db.query(RECOGNITIONREQUEST).filter(
+                        RECOGNITIONREQUEST.CREATED_AT < older_than)
+                    if last_created:
+                        query = query.filter(or_(
+                            RECOGNITIONREQUEST.CREATED_AT > last_created,
+                            and_(RECOGNITIONREQUEST.CREATED_AT == last_created,
+                                 RECOGNITIONREQUEST.REQUEST_ID > last_request_id)))
+                    requests = query.order_by(RECOGNITIONREQUEST.CREATED_AT.asc(),
+                                              RECOGNITIONREQUEST.REQUEST_ID.asc()) \
+                        .limit(batch_size).all()
+                    if not requests:
+                        break
+                    request_ids = [request.REQUEST_ID for request in requests]
+                    attempts = self._db.query(RECOGNITIONATTEMPT).filter(
+                        RECOGNITIONATTEMPT.REQUEST_ID.in_(request_ids)) \
+                        .order_by(RECOGNITIONATTEMPT.ID.asc()).all()
+                    attempts_by_request = {}
+                    for attempt in attempts:
+                        attempts_by_request.setdefault(attempt.REQUEST_ID, []).append({
+                            "id": attempt.ID,
+                            "attempt_id": attempt.ATTEMPT_ID,
+                            "provider_id": attempt.PROVIDER_ID,
+                            "status": attempt.STATUS,
+                            "input": attempt.INPUT,
+                            "raw_result": attempt.RAW_RESULT,
+                            "normalized_result": attempt.NORMALIZED_RESULT,
+                            "tmdb_results": attempt.TMDB_RESULTS,
+                            "error": attempt.ERROR,
+                            "elapsed_ms": attempt.ELAPSED_MS,
+                        })
+                    for request in requests:
+                        archive_record = {
+                            "request_id": request.REQUEST_ID,
+                            "original_name": request.ORIGINAL_NAME,
+                            "source": request.SOURCE,
+                            "stage": request.STAGE,
+                            "created_at": request.CREATED_AT,
+                            "summary": request.SUMMARY,
+                            "context": request.CONTEXT,
+                            "actions": request.ACTIONS,
+                            "provider_results": request.PROVIDER_RESULTS,
+                            "overall_result": request.OVERALL_RESULT,
+                            "tmdb_results": request.TMDB_RESULTS,
+                            "attempts": attempts_by_request.get(request.REQUEST_ID, []),
+                        }
+                        archive_file.write(json.dumps(archive_record, ensure_ascii=False,
+                                                      default=self._json_default) + "\n")
+                        archived_count += 1
+                    last_created = requests[-1].CREATED_AT
+                    last_request_id = requests[-1].REQUEST_ID
+                archive_file.flush()
+                os.fsync(archive_file.fileno())
+            if not archived_count:
+                os.unlink(temporary_path)
+                temporary_path = None
+                return {"archived_count": 0, "deleted_count": 0, "archive_path": None}
+            # Hard-link publication is atomic and fails if an archive already exists.
+            os.link(temporary_path, archive_path)
+            os.unlink(temporary_path)
+            temporary_path = None
+            directory_fd = os.open(archive_dir, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            deleted_count = 0
+            if delete_archived:
+                try:
+                    request_ids = []
+
+                    def delete_batch(batch_ids):
+                        nonlocal deleted_count
+                        if not batch_ids:
+                            return
+                        self._db.query(RECOGNITIONATTEMPT).filter(
+                            RECOGNITIONATTEMPT.REQUEST_ID.in_(batch_ids)).delete(
+                                synchronize_session=False)
+                        deleted_count += self._db.query(RECOGNITIONREQUEST).filter(
+                            RECOGNITIONREQUEST.REQUEST_ID.in_(batch_ids)).delete(
+                                synchronize_session=False)
+                    with open(archive_path, "r", encoding="utf-8") as archive_file:
+                        for line in archive_file:
+                            request_id = json.loads(line).get("request_id")
+                            if request_id:
+                                request_ids.append(request_id)
+                            if len(request_ids) >= 500:
+                                delete_batch(request_ids)
+                                request_ids = []
+                    delete_batch(request_ids)
+                    self._db.commit()
+                except Exception:
+                    self._db.rollback()
+                    raise
+            return {"archived_count": archived_count, "deleted_count": deleted_count,
+                    "archive_path": archive_path}
+        finally:
+            if temporary_path and os.path.exists(temporary_path):
+                os.unlink(temporary_path)
 
     def get_running_tasks(self):
         """

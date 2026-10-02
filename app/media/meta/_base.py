@@ -145,6 +145,7 @@ class MetaBase(object):
     def __init__(self, title, subtitle=None, fileflag=False):
         self.category_handler = Category()
         self.fanart = Fanart()
+        self.recognition_request_id = None
         if not title:
             return
         self.org_string = title

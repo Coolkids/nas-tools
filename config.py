@@ -1,6 +1,7 @@
 import os
 import shutil
 import sys
+import tempfile
 from threading import Lock
 import ruamel.yaml
 
@@ -151,10 +152,40 @@ class Config(object):
         return self._config.get(node, {})
 
     def save_config(self, new_cfg):
+        config_dir = os.path.dirname(os.path.abspath(self._config_path))
+        os.makedirs(config_dir, exist_ok=True)
+        old_mode = None
+        try:
+            old_mode = os.stat(self._config_path).st_mode & 0o777
+        except OSError:
+            pass
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=config_dir,
+                                             prefix=".config.", suffix=".tmp", delete=False) as sf:
+                temporary_path = sf.name
+                yaml = ruamel.yaml.YAML()
+                yaml.dump(new_cfg, sf)
+                sf.flush()
+                os.fsync(sf.fileno())
+            if old_mode is not None:
+                os.chmod(temporary_path, old_mode)
+            os.replace(temporary_path, self._config_path)
+            try:
+                directory_fd = os.open(config_dir, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError:
+                pass
+        except Exception:
+            if temporary_path and os.path.exists(temporary_path):
+                os.remove(temporary_path)
+            raise
+        # Publish the new in-memory snapshot only after the atomic disk swap.
         self._config = new_cfg
-        with open(self._config_path, mode='w', encoding='utf-8') as sf:
-            yaml = ruamel.yaml.YAML()
-            return yaml.dump(new_cfg, sf)
+        return True
 
     def get_config_path(self):
         return os.path.dirname(self._config_path)

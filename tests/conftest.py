@@ -12,6 +12,7 @@ os.environ.setdefault("NASTOOL_CONFIG", _config_path)
 
 @pytest.fixture(scope="session", autouse=True)
 def initialize_test_databases():
-    from app.db import init_db
+    from app.db import init_db, update_db
 
     init_db()
+    update_db()

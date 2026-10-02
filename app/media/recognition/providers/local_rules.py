@@ -1,4 +1,4 @@
-"""Adapter for the existing MetaVideo and MetaAnime title rules."""
+"""封装现有 MetaVideo 和 MetaAnime 标题解析规则。"""
 
 import time
 
@@ -30,4 +30,3 @@ class LocalRulesRecognizer(MediaNameRecognizer):
         except Exception as error:
             return ParseResult(provider_id=self.descriptor.provider_id, status="error",
                                error=str(error), elapsed_ms=int((time.monotonic() - started) * 1000))
-

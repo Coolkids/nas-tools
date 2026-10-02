@@ -18,7 +18,7 @@ from pathlib import Path
 from threading import Lock
 from urllib import parse
 
-from flask import Flask, request, json, make_response, session, send_from_directory, send_file, Response
+from flask import Flask, request, json, make_response, session, send_from_directory, send_file, Response, stream_with_context
 from flask_compress import Compress
 from flask_login import LoginManager, login_user, login_required, current_user, logout_user
 
@@ -862,19 +862,62 @@ def ai_recognition_export():
 @login_required
 def recognition_export_jsonl():
     """Stream the complete five-part recognition records as JSONL."""
+    created_from = request.args.get("created_from", "")
+    created_to = request.args.get("created_to", "")
+    try:
+        if created_from:
+            datetime.datetime.strptime(created_from, "%Y-%m-%d")
+        if created_to:
+            datetime.datetime.strptime(created_to, "%Y-%m-%d")
+    except ValueError:
+        return make_response("日期筛选格式应为 YYYY-MM-DD", 400)
     data = {
         "title": request.args.get("title", ""),
         "source": request.args.get("source", ""),
         "status": request.args.get("status", ""),
         "provider_id": request.args.get("provider_id", ""),
         "action_type": request.args.get("action_type", ""),
+        "reason": request.args.get("reason", ""),
+        "created_from": created_from,
+        "created_to": created_to,
     }
     response = Response(
-        WebAction.iter_recognition_jsonl(**data),
+        stream_with_context(WebAction.iter_recognition_jsonl(**data)),
         mimetype="application/x-ndjson",
     )
     response.headers["Content-Disposition"] = "attachment; filename=recognition-records.jsonl"
     return response
+
+
+@App.route('/recognition_export.xlsx', methods=['GET'])
+@login_required
+def recognition_export_xlsx():
+    """Export the same filtered recognition snapshot in a disk-backed workbook."""
+    created_from = request.args.get("created_from", "")
+    created_to = request.args.get("created_to", "")
+    try:
+        if created_from:
+            datetime.datetime.strptime(created_from, "%Y-%m-%d")
+        if created_to:
+            datetime.datetime.strptime(created_to, "%Y-%m-%d")
+    except ValueError:
+        return make_response("日期筛选格式应为 YYYY-MM-DD", 400)
+    data = {
+        "title": request.args.get("title", ""),
+        "source": request.args.get("source", ""),
+        "status": request.args.get("status", ""),
+        "provider_id": request.args.get("provider_id", ""),
+        "action_type": request.args.get("action_type", ""),
+        "reason": request.args.get("reason", ""),
+        "created_from": created_from,
+        "created_to": created_to,
+    }
+    return send_file(
+        WebAction.get_recognition_xlsx(**data),
+        as_attachment=True,
+        download_name="媒体识别记录.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 # base64模板过滤器

@@ -1,0 +1,103 @@
+import json
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock, patch
+
+from web.action import WebAction
+
+
+class RecognitionApiContractTest(unittest.TestCase):
+    def test_list_validates_pagination_and_date_before_query(self):
+        helper = Mock()
+        helper.get_recognition_records.return_value = (0, [])
+        with patch("web.action.DbHelper", return_value=helper):
+            invalid_page = WebAction._WebAction__get_recognition_records({"page": "abc"})
+            invalid_date = WebAction._WebAction__get_recognition_records({
+                "created_from": "2026-02-30"})
+            malformed_filters = WebAction._WebAction__get_recognition_records({
+                "title": 42, "source": ["rss"], "created_to": 20261002})
+
+        self.assertEqual({"code": 1, "msg": "分页参数无效"}, invalid_page)
+        self.assertEqual({"code": 1, "msg": "日期筛选格式应为 YYYY-MM-DD"}, invalid_date)
+        self.assertEqual(0, malformed_filters["code"])
+        helper.get_recognition_records.assert_called_once_with(
+            title="", source="", status="", provider_id="", action_type="", reason="",
+            created_from="", created_to="", page=1, page_size=20)
+
+    def test_provider_endpoint_keeps_new_provider_descriptors_dynamic(self):
+        provider = SimpleNamespace(descriptor=SimpleNamespace(
+            display_name="Third party", version="3.1", evidence_family="title",
+            config_schema={"endpoint": {"type": "string"}}))
+        registry_mock = Mock()
+        registry_mock.discover.return_value = {"fixture_third": provider}
+        registry_mock.diagnostics.return_value = []
+
+        with patch("app.media.recognition.registry.registry", registry_mock):
+            response = WebAction._WebAction__get_recognition_providers()
+
+        self.assertEqual("fixture_third", response["providers"][0]["provider_id"])
+        self.assertEqual("Third party", response["providers"][0]["display_name"])
+        self.assertEqual({"endpoint": {"type": "string"}},
+                         response["providers"][0]["config_schema"])
+
+    def test_list_preserves_parse_only_tmdb_and_provider_statuses(self):
+        summaries = [
+            {"overall_result": {"status": "success", "tmdb_status": "not_requested"},
+             "provider_results": [{"provider_id": "local_rules", "status": "success"}]},
+            {"overall_result": {"status": "failed", "reason": "no_tmdb_match"},
+             "provider_results": [{"provider_id": "local_rules", "status": "success"}]},
+            {"overall_result": {"status": "failed", "reason": "provider_error"},
+             "provider_results": [{"provider_id": "fixture_third", "status": "error"}]},
+        ]
+        rows = [SimpleNamespace(
+            SUMMARY=json.dumps(summary), REQUEST_ID=f"r{index}", ORIGINAL_NAME="Example",
+            SOURCE="test", STAGE="resolve", CREATED_AT="2026-10-02 10:00:00")
+            for index, summary in enumerate(summaries, start=1)]
+        helper = Mock()
+        helper.get_recognition_records.return_value = (len(rows), rows)
+
+        with patch("web.action.DbHelper", return_value=helper):
+            response = WebAction._WebAction__get_recognition_records({})
+
+        results = response["records"]
+        self.assertEqual("not_requested", results[0]["overall_result"]["tmdb_status"])
+        self.assertEqual("no_tmdb_match", results[1]["overall_result"]["reason"])
+        self.assertEqual("error", results[2]["provider_results"][0]["status"])
+        self.assertEqual("fixture_third", results[2]["provider_results"][0]["provider_id"])
+
+    def test_legacy_ai_action_still_returns_compatibility_projection(self):
+        old_record = SimpleNamespace(
+            ID=17, TITLE="Example", STATUS="error", ADD_TIME="2026-10-02",
+            ANITOPY_RESULT='{"name":"Example"}', AI_RESULT='{"name":"Other"}',
+            ANITOPY_TMDB="null", AI_TMDB='{"id":42}')
+        helper = Mock()
+        helper.get_ai_recognition_records.return_value = (1, [old_record])
+
+        with patch("web.action.DbHelper", return_value=helper):
+            response = WebAction().action("get_ai_recognition_records", {"page": 1})
+
+        self.assertEqual(0, response["code"])
+        self.assertEqual(17, response["records"][0]["id"])
+        self.assertEqual({"name": "Example"}, response["records"][0]["anitopy_result"])
+        self.assertEqual({"id": 42}, response["records"][0]["ai_tmdb"])
+
+    def test_export_routes_remain_authenticated_and_reject_bad_dates(self):
+        from web.main import App
+
+        client = App.test_client()
+        with patch.object(App.login_manager, "unauthorized", return_value=("", 401)):
+            for path in ("/recognition_export.jsonl", "/recognition_export.xlsx",
+                         "/ai_recognition_export.xlsx"):
+                response = client.get(path)
+                self.assertEqual(401, response.status_code, path)
+
+        # Route date validation runs after authentication; exercise the view
+        # directly to keep this contract independent of test login setup.
+        with App.test_request_context("/recognition_export.jsonl?created_from=2026-02-30"):
+            from web.main import recognition_export_jsonl
+            response = recognition_export_jsonl.__wrapped__()
+        self.assertEqual(400, response.status_code)
+
+
+if __name__ == "__main__":
+    unittest.main()

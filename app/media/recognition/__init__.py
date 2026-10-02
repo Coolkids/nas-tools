@@ -1,4 +1,4 @@
-"""Extensible media-name recognition contracts and audit records."""
+"""多媒体名称识别扩展契约与识别记录。"""
 
 from app.media.recognition.contracts import (
     MediaNameRecognizer,
@@ -12,4 +12,3 @@ __all__ = [
     "MediaNameRecognizer", "ParseResult", "RecognitionRequest",
     "RecognizerDescriptor", "registry",
 ]
-

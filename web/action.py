@@ -7,12 +7,14 @@ import os.path
 import re
 import shutil
 import signal
+import tempfile
 import uuid
 import zipfile
 import xml.etree.ElementTree as ET
+from contextlib import nullcontext
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from math import floor
+from math import floor, isfinite
 from threading import Lock
 from urllib.parse import unquote
 from xml.sax.saxutils import escape
@@ -366,24 +368,15 @@ class WebAction:
             vals = cfg_value.split("\n")
             cfg['jackett']['indexers'] = vals
             return cfg
-        # 最大支持三层赋值
+        # 支持任意层的嵌套配置，便于按解析器 descriptor 增加配置字段。
         keys = cfg_key.split(".")
         if keys:
-            if len(keys) == 1:
-                cfg[keys[0]] = cfg_value
-            elif len(keys) == 2:
-                if not cfg.get(keys[0]):
-                    cfg[keys[0]] = {}
-                cfg[keys[0]][keys[1]] = cfg_value
-            elif len(keys) == 3:
-                if cfg.get(keys[0]):
-                    if not cfg[keys[0]].get(keys[1]) or isinstance(cfg[keys[0]][keys[1]], str):
-                        cfg[keys[0]][keys[1]] = {}
-                    cfg[keys[0]][keys[1]][keys[2]] = cfg_value
-                else:
-                    cfg[keys[0]] = {}
-                    cfg[keys[0]][keys[1]] = {}
-                    cfg[keys[0]][keys[1]][keys[2]] = cfg_value
+            node = cfg
+            for key in keys[:-1]:
+                if not isinstance(node.get(key), dict):
+                    node[key] = {}
+                node = node[key]
+            node[keys[-1]] = cfg_value
 
         return cfg
 
@@ -1247,7 +1240,7 @@ class WebAction:
         """
         更新配置信息
         """
-        cfg = Config().get_config()
+        cfg = deepcopy(Config().get_config())
         data = data or {}
         strategy = data.get("recognition.decision.strategy")
         if strategy and strategy not in ("legacy", "title_evidence"):
@@ -1268,6 +1261,31 @@ class WebAction:
                     return {"code": 1, "msg": "模糊回退分数必须介于 0 和 1 之间"}
             except (TypeError, ValueError):
                 return {"code": 1, "msg": "模糊回退分数无效"}
+        timeout_key = "recognition.execution.total_timeout_seconds"
+        if timeout_key in data:
+            try:
+                timeout_value = float(data[timeout_key])
+                if not isfinite(timeout_value) or not 0.1 <= timeout_value <= 300:
+                    return {"code": 1, "msg": "识别总超时必须介于 0.1 和 300 秒之间"}
+            except (TypeError, ValueError):
+                return {"code": 1, "msg": "识别总超时必须为数字"}
+        agreement_key = "recognition.decision.agreement_bonus"
+        if agreement_key in data:
+            try:
+                bonus = float(data[agreement_key])
+                if not isfinite(bonus) or not 0 <= bonus <= 1:
+                    return {"code": 1, "msg": "解析器一致性加分必须介于 0 和 1 之间"}
+            except (TypeError, ValueError):
+                return {"code": 1, "msg": "解析器一致性加分无效"}
+        for provider_id in ("local_rules", "anitopy_ml"):
+            reliability_key = f"recognition.providers.{provider_id}.reliability"
+            if reliability_key in data:
+                try:
+                    reliability = float(data[reliability_key])
+                    if not isfinite(reliability) or not 0 <= reliability <= 1:
+                        return {"code": 1, "msg": "解析器可信度必须介于 0 和 1 之间"}
+                except (TypeError, ValueError):
+                    return {"code": 1, "msg": "解析器可信度必须为数字"}
         for key in (
                 "recognition.decision.weights.title_match",
                 "recognition.decision.weights.year_match",
@@ -1287,20 +1305,88 @@ class WebAction:
                 ai_url = cfg.get("laboratory", {}).get("ai_inference_url")
             if not str(ai_url or "").strip():
                 return {"code": 1, "msg": "启用AI推理前请输入接口地址"}
+        config_test = StringUtils.to_bool(data.get("test"), False)
+        numeric_fields = {
+            "recognition.execution.total_timeout_seconds": float,
+            "recognition.decision.agreement_bonus": float,
+            "recognition.providers.local_rules.reliability": float,
+            "recognition.providers.anitopy_ml.reliability": float,
+            "recognition.decision.title_evidence.min_cjk_chars_for_strong": int,
+            "recognition.decision.title_evidence.min_latin_chars_for_strong": int,
+            "recognition.decision.title_evidence.fuzzy_min_score": float,
+            "recognition.decision.weights.title_match": float,
+            "recognition.decision.weights.year_match": float,
+            "recognition.decision.weights.type_match": float,
+            "recognition.decision.weights.season_episode_match": float,
+            "recognition.decision.weights.input_evidence": float,
+            "recognition.decision.weights.provider_reliability": float,
+        }
         cfgs = dict(data).items()
-        # 仅测试不保存
-        config_test = False
-        # 修改配置
+        # Candidate config is detached from the live Config singleton.
         for key, value in cfgs:
-            if key == "test" and value:
-                config_test = True
+            if key == "test":
                 continue
+            if key in numeric_fields:
+                try:
+                    value = numeric_fields[key](value)
+                except (TypeError, ValueError):
+                    return {"code": 1, "msg": f"{key} 数值无效"}
             # 生效配置
             cfg = self.set_config_value(cfg, key, value)
 
+        recognition = cfg.get("recognition") or {}
+        decision = recognition.get("decision") or {}
+        selected_strategy = decision.get("strategy", "legacy")
+        if selected_strategy not in ("legacy", "title_evidence"):
+            return {"code": 1, "msg": "媒体识别策略无效"}
+        execution = recognition.get("execution") or {}
+        if execution.get("mode", "all") != "all":
+            return {"code": 1, "msg": "当前只支持完整执行所有启用的识别方式"}
+        try:
+            timeout_value = float(execution.get("total_timeout_seconds", 30))
+            if not isfinite(timeout_value) or not 0.1 <= timeout_value <= 300:
+                return {"code": 1, "msg": "识别总超时必须介于 0.1 和 300 秒之间"}
+        except (TypeError, ValueError):
+            return {"code": 1, "msg": "识别总超时必须为数字"}
+        weights = decision.get("weights") or {}
+        try:
+            weight_values = [float(weights.get(key, 0) or 0) for key in (
+                "title_match", "year_match", "type_match", "season_episode_match",
+                "input_evidence", "provider_reliability")]
+            if any(not isfinite(value) or value < 0 for value in weight_values) \
+                    or sum(weight_values) <= 0:
+                return {"code": 1, "msg": "识别权重必须为有限非负数且总和大于 0"}
+        except (TypeError, ValueError):
+            return {"code": 1, "msg": "识别权重必须为数字"}
+        title_cfg = decision.get("title_evidence") or {}
+        if title_cfg.get("on_multiple_matches", "fail") != "fail":
+            return {"code": 1, "msg": "多个 TMDB 条目命中时必须按失败处理"}
+        try:
+            agreement_bonus = float(decision.get("agreement_bonus", 0) or 0)
+            if not isfinite(agreement_bonus) or not 0 <= agreement_bonus <= 1:
+                return {"code": 1, "msg": "解析器一致性加分必须介于 0 和 1 之间"}
+        except (TypeError, ValueError):
+            return {"code": 1, "msg": "解析器一致性加分无效"}
+        for provider_id, provider_cfg in (recognition.get("providers") or {}).items():
+            if not isinstance(provider_cfg, dict) or "reliability" not in provider_cfg:
+                continue
+            try:
+                reliability = float(provider_cfg["reliability"])
+                if not isfinite(reliability) or not 0 <= reliability <= 1:
+                    return {"code": 1, "msg": f"解析器 {provider_id} 可信度必须介于 0 和 1 之间"}
+            except (TypeError, ValueError):
+                return {"code": 1, "msg": f"解析器 {provider_id} 可信度无效"}
+        if selected_strategy == "title_evidence" \
+                and (recognition.get("execution") or {}).get("mode") == "cascade":
+            return {"code": 1, "msg": "title_evidence 策略不能使用 cascade 执行模式"}
+
         # 保存配置
         if not config_test:
-            Config().save_config(cfg)
+            try:
+                Config().save_config(cfg)
+            except Exception as error:
+                log.error(f"【Config】保存配置失败：{error}")
+                return {"code": 1, "msg": "保存配置失败，旧配置保持不变"}
 
         return {"code": 0}
 
@@ -5146,63 +5232,66 @@ class WebAction:
     @staticmethod
     def __get_recognition_records(data):
         data = data or {}
+
+        def text_filter(key):
+            value = data.get(key)
+            return value.strip() if isinstance(value, str) else ""
+
         try:
             page = max(int(data.get("page") or 1), 1)
             page_size = min(max(int(data.get("page_size") or 20), 1), 100)
         except (TypeError, ValueError):
             return {"code": 1, "msg": "分页参数无效"}
+        created_from = text_filter("created_from")
+        created_to = text_filter("created_to")
+        try:
+            if created_from:
+                datetime.datetime.strptime(created_from, "%Y-%m-%d")
+                created_from += " 00:00:00.000000"
+            if created_to:
+                datetime.datetime.strptime(created_to, "%Y-%m-%d")
+                created_to += " 23:59:59.999999"
+        except ValueError:
+            return {"code": 1, "msg": "日期筛选格式应为 YYYY-MM-DD"}
         total, records = DbHelper().get_recognition_records(
-            title=(data.get("title") or "").strip(),
-            source=(data.get("source") or "").strip(),
-            status=(data.get("status") or "").strip(),
-            provider_id=(data.get("provider_id") or "").strip(),
-            action_type=(data.get("action_type") or "").strip(),
+            title=text_filter("title"),
+            source=text_filter("source"),
+            status=text_filter("status"),
+            provider_id=text_filter("provider_id"),
+            action_type=text_filter("action_type"),
+            reason=text_filter("reason"),
+            created_from=created_from,
+            created_to=created_to,
             page=page,
             page_size=page_size,
         )
         decode = WebAction.__decode_recognition_json
+
+        def summary_for(record):
+            summary = decode(record.SUMMARY) if getattr(record, "SUMMARY", None) else None
+            if summary:
+                return summary
+            # Rows created before the summary migration remain readable; only
+            # those legacy rows pay the cost of loading the full payload.
+            return DbHelper.recognition_summary({
+                "overall_result": decode(record.OVERALL_RESULT) or {},
+                "provider_results": decode(record.PROVIDER_RESULTS) or [],
+                "tmdb_results": decode(record.TMDB_RESULTS) or [],
+                "actions": decode(record.ACTIONS) or [],
+            })
+
         return {
             "code": 0,
             "total": total,
             "page": page,
             "page_size": page_size,
             "records": [{
+                **summary_for(record),
                 "request_id": record.REQUEST_ID,
                 "original_name": record.ORIGINAL_NAME,
                 "source": record.SOURCE,
                 "stage": record.STAGE,
                 "created_at": record.CREATED_AT,
-                "overall_result": {
-                    "status": (decode(record.OVERALL_RESULT) or {}).get("status"),
-                    "reason": (decode(record.OVERALL_RESULT) or {}).get("reason"),
-                    "selected_provider": (decode(record.OVERALL_RESULT) or {}).get("selected_provider"),
-                    "elapsed_ms": (decode(record.OVERALL_RESULT) or {}).get("elapsed_ms"),
-                    "tmdb_result": (lambda value: {
-                        "id": value.get("id"),
-                        "media_type": str(getattr(value.get("media_type"), "value", value.get("media_type"))),
-                        "title": value.get("title") or value.get("name"),
-                    } if isinstance(value, dict) else None)((decode(record.OVERALL_RESULT) or {}).get("tmdb_result")),
-                },
-                "provider_results": [{
-                    "provider_id": result.get("provider_id"),
-                    "status": result.get("status"),
-                    "normalized_result": result.get("normalized_result"),
-                    "elapsed_ms": result.get("elapsed_ms"),
-                    "error": result.get("error"),
-                } for result in (decode(record.PROVIDER_RESULTS) or [])],
-                "tmdb_results": [{
-                    "provider_id": result.get("provider_id"),
-                    "status": result.get("status"),
-                    "result": (lambda value: {
-                        "id": value.get("id"),
-                        "media_type": str(getattr(value.get("media_type"), "value", value.get("media_type"))),
-                        "title": value.get("title") or value.get("name"),
-                    } if isinstance(value, dict) else None)(result.get("result")),
-                } for result in (decode(record.TMDB_RESULTS) or [])],
-                "actions": [{"sequence": action.get("sequence"),
-                             "action_type": action.get("action_type"),
-                             "status": action.get("status")}
-                            for action in (decode(record.ACTIONS) or [])],
             } for record in records]
         }
 
@@ -5276,32 +5365,135 @@ class WebAction:
 
     @classmethod
     def iter_recognition_jsonl(cls, title=None, source=None, status=None,
-                               provider_id=None, action_type=None, page_size=100):
-        """Stream complete recognition requests as newline-delimited JSON."""
-        page = 1
+                               provider_id=None, action_type=None, reason=None,
+                               created_from=None, created_to=None, page_size=100):
+        """Stream one stable database snapshot as newline-delimited JSON."""
         page_size = min(max(int(page_size or 100), 1), 100)
-        while True:
-            _, records = DbHelper().get_recognition_records(
-                title=(title or "").strip(), source=(source or "").strip(),
-                status=(status or "").strip(), provider_id=(provider_id or "").strip(),
-                action_type=(action_type or "").strip(), page=page, page_size=page_size)
-            if not records:
-                break
-            for record in records:
-                yield json.dumps({
-                    "schema_version": 1,
-                    "request_id": record.REQUEST_ID,
-                    "original_name": record.ORIGINAL_NAME,
-                    "source": record.SOURCE,
-                    "stage": record.STAGE,
-                    "created_at": record.CREATED_AT,
-                    "context": cls.__decode_recognition_json(record.CONTEXT) or {},
-                    "actions": cls.__decode_recognition_json(record.ACTIONS) or [],
-                    "provider_results": cls.__decode_recognition_json(record.PROVIDER_RESULTS) or [],
-                    "overall_result": cls.__decode_recognition_json(record.OVERALL_RESULT) or {},
-                    "tmdb_results": cls.__decode_recognition_json(record.TMDB_RESULTS) or [],
-                }, ensure_ascii=False, separators=(",", ":")) + "\n"
-            page += 1
+        snapshot_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+        before_cursor = None
+        if created_from:
+            datetime.datetime.strptime(created_from, "%Y-%m-%d")
+            created_from += " 00:00:00.000000"
+        if created_to:
+            datetime.datetime.strptime(created_to, "%Y-%m-%d")
+            created_to += " 23:59:59.999999"
+        helper = DbHelper()
+        session = getattr(helper._db, "session", None)
+        transaction = (session.begin() if session is not None and not session.in_transaction()
+                      else nullcontext())
+        if session is not None and session.get_bind().dialect.name == "sqlite":
+            connection = session.connection()
+            driver_connection = getattr(connection.connection, "driver_connection", None)
+            if driver_connection is not None and not driver_connection.in_transaction:
+                # sqlite3's legacy transaction mode does not BEGIN for SELECT;
+                # issue it explicitly so later pages share the first read view.
+                connection.exec_driver_sql("BEGIN")
+        with transaction:
+            while True:
+                _, records = helper.get_recognition_records(
+                    title=(title or "").strip(), source=(source or "").strip(),
+                    status=(status or "").strip(), provider_id=(provider_id or "").strip(),
+                    action_type=(action_type or "").strip(), reason=(reason or "").strip(),
+                    created_from=(created_from or "").strip(), created_to=(created_to or "").strip(),
+                    page=1, page_size=page_size, snapshot_at=snapshot_at,
+                    before_cursor=before_cursor, include_total=False)
+                if not records:
+                    break
+                for record in records:
+                    yield json.dumps({
+                        "schema_version": 1,
+                        "request_id": record.REQUEST_ID,
+                        "original_name": record.ORIGINAL_NAME,
+                        "source": record.SOURCE,
+                        "stage": record.STAGE,
+                        "created_at": record.CREATED_AT,
+                        "context": cls.__decode_recognition_json(record.CONTEXT) or {},
+                        "actions": cls.__decode_recognition_json(record.ACTIONS) or [],
+                        "provider_results": cls.__decode_recognition_json(record.PROVIDER_RESULTS) or [],
+                        "overall_result": cls.__decode_recognition_json(record.OVERALL_RESULT) or {},
+                        "tmdb_results": cls.__decode_recognition_json(record.TMDB_RESULTS) or [],
+                    }, ensure_ascii=False, separators=(",", ":")) + "\n"
+                last_record = records[-1]
+                before_cursor = (last_record.CREATED_AT, last_record.REQUEST_ID)
+
+    @staticmethod
+    def _recognition_xlsx_row_xml(row_number, values):
+        cells = []
+        for column, value in enumerate(values):
+            text = str(value if value is not None else "")
+            text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)[:32767]
+            coordinate = "%s%s" % (WebAction._rss_import_xlsx_column_name(column), row_number)
+            cells.append('<c r="%s" t="inlineStr"><is><t xml:space="preserve">%s</t></is></c>' % (
+                coordinate, escape(text)
+            ))
+        return '<row r="%s">%s</row>' % (row_number, "".join(cells))
+
+    @classmethod
+    def get_recognition_xlsx(cls, **filters):
+        """Build a filtered workbook with disk-backed worksheet and output streams."""
+        output = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b")
+        headers = ["Request ID", "原始名称", "业务来源", "阶段", "记录时间",
+                   "上下文", "识别动作", "各识别方式结果", "整体结果", "TMDB 结果"]
+        sheet_files = []
+        with tempfile.TemporaryDirectory(prefix="recognition-xlsx-") as temp_dir:
+            sheet_path = None
+            sheet_file = None
+            sheet_index = 0
+            sheet_row = 0
+
+            def start_sheet():
+                nonlocal sheet_path, sheet_file, sheet_index, sheet_row
+                sheet_index += 1
+                sheet_row = 1
+                sheet_path = os.path.join(temp_dir, "sheet-%s.xml" % sheet_index)
+                sheet_file = open(sheet_path, "w", encoding="utf-8", newline="")
+                sheet_files.append(sheet_path)
+                sheet_file.write('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>')
+                sheet_file.write('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>')
+                sheet_file.write(cls._recognition_xlsx_row_xml(sheet_row, headers))
+
+            start_sheet()
+            for line in cls.iter_recognition_jsonl(**filters):
+                record = json.loads(line)
+                if sheet_row >= 1_048_576:
+                    sheet_file.write("</sheetData></worksheet>")
+                    sheet_file.close()
+                    start_sheet()
+                sheet_row += 1
+                values = [
+                    record.get("request_id"), record.get("original_name"), record.get("source"),
+                    record.get("stage"), record.get("created_at"),
+                    json.dumps(record.get("context"), ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(record.get("actions"), ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(record.get("provider_results"), ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(record.get("overall_result"), ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(record.get("tmdb_results"), ensure_ascii=False, separators=(",", ":")),
+                ]
+                sheet_file.write(cls._recognition_xlsx_row_xml(sheet_row, values))
+            sheet_file.write("</sheetData></worksheet>")
+            sheet_file.close()
+
+            sheet_content_types = "".join(
+                '<Override PartName="/xl/worksheets/sheet%s.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' % index
+                for index in range(1, sheet_index + 1)
+            )
+            sheet_relationships = "".join(
+                '<Relationship Id="rId%s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet%s.xml"/>' % (index, index)
+                for index in range(1, sheet_index + 1)
+            )
+            sheet_names = "".join(
+                '<sheet name="识别记录%s" sheetId="%s" r:id="rId%s"/>' % (index, index, index)
+                for index in range(1, sheet_index + 1)
+            )
+            with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>%s</Types>' % sheet_content_types)
+                archive.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+                archive.writestr("xl/workbook.xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>%s</sheets></workbook>' % sheet_names)
+                archive.writestr("xl/_rels/workbook.xml.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">%s</Relationships>' % sheet_relationships)
+                for index, path in enumerate(sheet_files, start=1):
+                    archive.write(path, "xl/worksheets/sheet%s.xml" % index)
+        output.seek(0)
+        return output
 
     @staticmethod
     def __version(data=None):

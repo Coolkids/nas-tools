@@ -1,6 +1,7 @@
 # coding: utf-8
 from sqlalchemy import Column, Float, Index, Integer, Text, text, Sequence
 from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import deferred
 
 Base = declarative_base()
 BaseMedia = declarative_base()
@@ -394,11 +395,12 @@ class RECOGNITIONREQUEST(Base):
     SOURCE = Column(Text, index=True)
     STAGE = Column(Text)
     CREATED_AT = Column(Text, index=True)
-    CONTEXT = Column(Text)
-    ACTIONS = Column(Text)
-    PROVIDER_RESULTS = Column(Text)
-    OVERALL_RESULT = Column(Text)
-    TMDB_RESULTS = Column(Text)
+    SUMMARY = Column(Text)
+    CONTEXT = deferred(Column(Text))
+    ACTIONS = deferred(Column(Text))
+    PROVIDER_RESULTS = deferred(Column(Text))
+    OVERALL_RESULT = deferred(Column(Text))
+    TMDB_RESULTS = deferred(Column(Text))
 
 
 class RECOGNITIONATTEMPT(Base):

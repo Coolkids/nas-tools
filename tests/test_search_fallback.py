@@ -134,7 +134,7 @@ class SearchFallbackTest(TestCase):
         media.get_tmdb_info = Mock(return_value={
             "id": 603,
             "media_type": MediaType.MOVIE,
-            "title": "黑客帝国"
+            "title": "The Matrix"
         })
 
         class FakeRequestUtils:
@@ -149,7 +149,7 @@ class SearchFallbackTest(TestCase):
                 )
 
         query = "黑客帝国 1 & The Matrix"
-        cache_key = (query, MediaType.MOVIE.value)
+        cache_key = (query, MediaType.MOVIE.value, query)
         TmdbWebSearchCache.delete(cache_key)
         try:
             with patch("app.media.media.RequestUtils", FakeRequestUtils):
@@ -160,3 +160,32 @@ class SearchFallbackTest(TestCase):
         self.assertEqual(603, result["id"])
         self.assertEqual(query, parse_qs(urlparse(calls[0]).query)["query"][0])
         media.get_tmdb_info.assert_called_once_with(mtype=MediaType.MOVIE, tmdbid="603")
+
+    def test_tmdb_web_multiple_results_selects_the_only_name_match(self):
+        media = object.__new__(Media)
+        media.get_tmdb_info = Mock(side_effect=[
+            {"id": 1, "media_type": MediaType.MOVIE, "title": "Unrelated Film"},
+            {"id": 2, "media_type": MediaType.MOVIE, "title": "Example Film"},
+        ])
+
+        class FakeRequestUtils:
+            def __init__(self, timeout):
+                self.timeout = timeout
+
+            def get_res(self, url):
+                return SimpleNamespace(
+                    status_code=200,
+                    text=('<a data-id="1" href="/movie/1">Other</a>'
+                          '<a data-id="2" href="/movie/2">Example Film</a>')
+                )
+
+        query = "Example Film 2022 1080p"
+        cache_key = (query, MediaType.MOVIE.value, query)
+        TmdbWebSearchCache.delete(cache_key)
+        with patch("app.media.media.RequestUtils", FakeRequestUtils), \
+                patch.object(media, "_Media__search_tmdb_allnames",
+                             return_value=({}, [])):
+            result = media._Media__search_tmdb_web(query, MediaType.MOVIE)
+        TmdbWebSearchCache.delete(cache_key)
+
+        self.assertEqual(2, result["id"])

@@ -1,2 +1,1 @@
-"""Built-in and extension media-name recognizers."""
-
+"""内置及扩展的多媒体名称识别器。"""
