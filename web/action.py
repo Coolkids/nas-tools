@@ -239,6 +239,9 @@ class WebAction:
             "get_config": self.__get_config,
             "get_system_config": self.__get_system_config,
             "get_ai_recognition_records": self.__get_ai_recognition_records,
+            "get_recognition_providers": self.__get_recognition_providers,
+            "get_recognition_records": self.__get_recognition_records,
+            "get_recognition_record_detail": self.__get_recognition_record_detail,
             "version": self.__version
         }
 
@@ -1246,6 +1249,38 @@ class WebAction:
         """
         cfg = Config().get_config()
         data = data or {}
+        strategy = data.get("recognition.decision.strategy")
+        if strategy and strategy not in ("legacy", "title_evidence"):
+            return {"code": 1, "msg": "媒体识别策略无效"}
+        for key in (
+                "recognition.decision.title_evidence.min_cjk_chars_for_strong",
+                "recognition.decision.title_evidence.min_latin_chars_for_strong"):
+            if key in data:
+                try:
+                    if int(data[key]) < 1:
+                        return {"code": 1, "msg": "名称长度阈值必须大于 0"}
+                except (TypeError, ValueError):
+                    return {"code": 1, "msg": "名称长度阈值必须为整数"}
+        fuzzy_key = "recognition.decision.title_evidence.fuzzy_min_score"
+        if fuzzy_key in data:
+            try:
+                if not 0 < float(data[fuzzy_key]) <= 1:
+                    return {"code": 1, "msg": "模糊回退分数必须介于 0 和 1 之间"}
+            except (TypeError, ValueError):
+                return {"code": 1, "msg": "模糊回退分数无效"}
+        for key in (
+                "recognition.decision.weights.title_match",
+                "recognition.decision.weights.year_match",
+                "recognition.decision.weights.type_match",
+                "recognition.decision.weights.season_episode_match",
+                "recognition.decision.weights.input_evidence",
+                "recognition.decision.weights.provider_reliability"):
+            if key in data:
+                try:
+                    if float(data[key]) < 0:
+                        return {"code": 1, "msg": "识别权重不能小于 0"}
+                except (TypeError, ValueError):
+                    return {"code": 1, "msg": "识别权重必须为数字"}
         if data.get("laboratory.ai_inference"):
             ai_url = data.get("laboratory.ai_inference_url")
             if not ai_url:
@@ -5084,6 +5119,129 @@ class WebAction:
             } for record in records]
         }
 
+    @staticmethod
+    def __get_recognition_providers(data=None):
+        from app.media.recognition.registry import registry
+
+        providers = registry.discover()
+        return {
+            "code": 0,
+            "providers": [{
+                "provider_id": provider_id,
+                "display_name": provider.descriptor.display_name,
+                "version": provider.descriptor.version,
+                "evidence_family": provider.descriptor.evidence_family,
+                "config_schema": provider.descriptor.config_schema,
+            } for provider_id, provider in sorted(providers.items())],
+            "diagnostics": registry.diagnostics(),
+        }
+
+    @staticmethod
+    def __decode_recognition_json(value):
+        try:
+            return json.loads(value) if value else None
+        except (TypeError, ValueError):
+            return {"raw": value}
+
+    @staticmethod
+    def __get_recognition_records(data):
+        data = data or {}
+        try:
+            page = max(int(data.get("page") or 1), 1)
+            page_size = min(max(int(data.get("page_size") or 20), 1), 100)
+        except (TypeError, ValueError):
+            return {"code": 1, "msg": "分页参数无效"}
+        total, records = DbHelper().get_recognition_records(
+            title=(data.get("title") or "").strip(),
+            source=(data.get("source") or "").strip(),
+            status=(data.get("status") or "").strip(),
+            provider_id=(data.get("provider_id") or "").strip(),
+            action_type=(data.get("action_type") or "").strip(),
+            page=page,
+            page_size=page_size,
+        )
+        decode = WebAction.__decode_recognition_json
+        return {
+            "code": 0,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "records": [{
+                "request_id": record.REQUEST_ID,
+                "original_name": record.ORIGINAL_NAME,
+                "source": record.SOURCE,
+                "stage": record.STAGE,
+                "created_at": record.CREATED_AT,
+                "overall_result": {
+                    "status": (decode(record.OVERALL_RESULT) or {}).get("status"),
+                    "reason": (decode(record.OVERALL_RESULT) or {}).get("reason"),
+                    "selected_provider": (decode(record.OVERALL_RESULT) or {}).get("selected_provider"),
+                    "elapsed_ms": (decode(record.OVERALL_RESULT) or {}).get("elapsed_ms"),
+                    "tmdb_result": (lambda value: {
+                        "id": value.get("id"),
+                        "media_type": str(getattr(value.get("media_type"), "value", value.get("media_type"))),
+                        "title": value.get("title") or value.get("name"),
+                    } if isinstance(value, dict) else None)((decode(record.OVERALL_RESULT) or {}).get("tmdb_result")),
+                },
+                "provider_results": [{
+                    "provider_id": result.get("provider_id"),
+                    "status": result.get("status"),
+                    "normalized_result": result.get("normalized_result"),
+                    "elapsed_ms": result.get("elapsed_ms"),
+                    "error": result.get("error"),
+                } for result in (decode(record.PROVIDER_RESULTS) or [])],
+                "tmdb_results": [{
+                    "provider_id": result.get("provider_id"),
+                    "status": result.get("status"),
+                    "result": (lambda value: {
+                        "id": value.get("id"),
+                        "media_type": str(getattr(value.get("media_type"), "value", value.get("media_type"))),
+                        "title": value.get("title") or value.get("name"),
+                    } if isinstance(value, dict) else None)(result.get("result")),
+                } for result in (decode(record.TMDB_RESULTS) or [])],
+                "actions": [{"sequence": action.get("sequence"),
+                             "action_type": action.get("action_type"),
+                             "status": action.get("status")}
+                            for action in (decode(record.ACTIONS) or [])],
+            } for record in records]
+        }
+
+    @staticmethod
+    def __get_recognition_record_detail(data):
+        request_id = (data or {}).get("request_id")
+        if not request_id:
+            return {"code": 1, "msg": "缺少识别记录 ID"}
+        request, attempts = DbHelper().get_recognition_record(request_id)
+        if not request:
+            return {"code": 1, "msg": "识别记录不存在"}
+        decode = WebAction.__decode_recognition_json
+        return {
+            "code": 0,
+            "record": {
+                "request_id": request.REQUEST_ID,
+                "original_name": request.ORIGINAL_NAME,
+                "source": request.SOURCE,
+                "stage": request.STAGE,
+                "created_at": request.CREATED_AT,
+                "context": decode(request.CONTEXT) or {},
+                "actions": decode(request.ACTIONS) or [],
+                "provider_results": decode(request.PROVIDER_RESULTS) or [],
+                "overall_result": decode(request.OVERALL_RESULT) or {},
+                "tmdb_results": decode(request.TMDB_RESULTS) or [],
+                "attempts": [{
+                    "attempt_id": item.ATTEMPT_ID,
+                    "provider_id": item.PROVIDER_ID,
+                    "status": item.STATUS,
+                    "input": decode(item.INPUT),
+                    "raw_result": decode(item.RAW_RESULT),
+                    "normalized_result": decode(item.NORMALIZED_RESULT),
+                    "tmdb_results": decode(item.TMDB_RESULTS),
+                    "error": item.ERROR,
+                    "elapsed_ms": item.ELAPSED_MS,
+                } for item in attempts],
+            }
+        }
+
     @classmethod
     def get_ai_recognition_xlsx(cls, title=None):
         """导出 AI 识别核对记录为 Excel。"""
@@ -5115,6 +5273,35 @@ class WebAction:
             for record in all_records
         ])
         return cls._make_rss_import_xlsx(rows)
+
+    @classmethod
+    def iter_recognition_jsonl(cls, title=None, source=None, status=None,
+                               provider_id=None, action_type=None, page_size=100):
+        """Stream complete recognition requests as newline-delimited JSON."""
+        page = 1
+        page_size = min(max(int(page_size or 100), 1), 100)
+        while True:
+            _, records = DbHelper().get_recognition_records(
+                title=(title or "").strip(), source=(source or "").strip(),
+                status=(status or "").strip(), provider_id=(provider_id or "").strip(),
+                action_type=(action_type or "").strip(), page=page, page_size=page_size)
+            if not records:
+                break
+            for record in records:
+                yield json.dumps({
+                    "schema_version": 1,
+                    "request_id": record.REQUEST_ID,
+                    "original_name": record.ORIGINAL_NAME,
+                    "source": record.SOURCE,
+                    "stage": record.STAGE,
+                    "created_at": record.CREATED_AT,
+                    "context": cls.__decode_recognition_json(record.CONTEXT) or {},
+                    "actions": cls.__decode_recognition_json(record.ACTIONS) or [],
+                    "provider_results": cls.__decode_recognition_json(record.PROVIDER_RESULTS) or [],
+                    "overall_result": cls.__decode_recognition_json(record.OVERALL_RESULT) or {},
+                    "tmdb_results": cls.__decode_recognition_json(record.TMDB_RESULTS) or [],
+                }, ensure_ascii=False, separators=(",", ":")) + "\n"
+            page += 1
 
     @staticmethod
     def __version(data=None):

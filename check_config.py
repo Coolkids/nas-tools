@@ -220,6 +220,61 @@ def update_config():
                 laboratory[key] = default
                 overwrite_cofig = True
 
+    # 通用名称识别配置，旧 AI 开关继续控制 anitopy-ml 是否运行。
+    recognition_defaults = {
+        'schema_version': 1,
+        'execution': {'mode': 'all', 'max_concurrency': 1, 'total_timeout_seconds': 30},
+        'decision': {
+            'strategy': 'legacy',
+            'shadow': {'enabled': True, 'strategy': 'title_evidence'},
+            'title_evidence': {
+                'on_multiple_matches': 'fail',
+                'name_sources': ['primary', 'original', 'alternative', 'translation'],
+                'normalization': ['nfkc', 'casefold', 'simplified_chinese', 'separators', 'whitespace'],
+                'require_latin_word_boundary': True,
+                'preserve_title_numbers': True,
+                'check_sequel_prefix': True,
+                'min_cjk_chars_for_strong': 3,
+                'min_latin_chars_for_strong': 4,
+                'raw_title_first': True,
+                'allow_fuzzy_fallback': False,
+                'fuzzy_min_score': 0.88,
+            },
+            'weights': {
+                'title_match': 0.55,
+                'year_match': 0.15,
+                'type_match': 0.10,
+                'season_episode_match': 0.15,
+                'input_evidence': 0.05,
+                'provider_reliability': 0.00,
+            },
+            'agreement_bonus': 0.0,
+        },
+        'providers': {
+            'local_rules': {'enabled': True},
+            'anitopy_ml': {'enabled': bool(_config.get('laboratory', {}).get('ai_inference'))},
+        },
+        'audit': {'store_raw_response': True, 'retention_days': None},
+    }
+
+    def merge_recognition_defaults(target, defaults):
+        nonlocal overwrite_cofig
+        for key, default in defaults.items():
+            if key not in target:
+                target[key] = default
+                overwrite_cofig = True
+            elif isinstance(default, dict) and isinstance(target.get(key), dict):
+                merge_recognition_defaults(target[key], default)
+
+    if not isinstance(_config.get('recognition'), dict):
+        _config['recognition'] = {}
+        overwrite_cofig = True
+    merge_recognition_defaults(_config['recognition'], recognition_defaults)
+    recognition = _config['recognition']
+    if recognition['decision']['title_evidence'].get('on_multiple_matches') != 'fail':
+        recognition['decision']['title_evidence']['on_multiple_matches'] = 'fail'
+        overwrite_cofig = True
+
     # 安全配置初始化
     if not _config.get("security"):
         _config['security'] = {

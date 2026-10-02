@@ -385,6 +385,39 @@ class AIRECOGNITIONRECORD(Base):
         return {c.name: getattr(self, c.name) for c in self.__table__.columns}
 
 
+class RECOGNITIONREQUEST(Base):
+    """One media-name recognition call and its aggregated raw outcomes."""
+    __tablename__ = 'RECOGNITION_REQUEST'
+
+    REQUEST_ID = Column(Text, primary_key=True)
+    ORIGINAL_NAME = Column(Text, index=True)
+    SOURCE = Column(Text, index=True)
+    STAGE = Column(Text)
+    CREATED_AT = Column(Text, index=True)
+    CONTEXT = Column(Text)
+    ACTIONS = Column(Text)
+    PROVIDER_RESULTS = Column(Text)
+    OVERALL_RESULT = Column(Text)
+    TMDB_RESULTS = Column(Text)
+
+
+class RECOGNITIONATTEMPT(Base):
+    """A discoverable provider attempt attached to a recognition request."""
+    __tablename__ = 'RECOGNITION_ATTEMPT'
+
+    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    REQUEST_ID = Column(Text, index=True)
+    ATTEMPT_ID = Column(Text, index=True)
+    PROVIDER_ID = Column(Text, index=True)
+    STATUS = Column(Text, index=True)
+    INPUT = Column(Text)
+    RAW_RESULT = Column(Text)
+    NORMALIZED_RESULT = Column(Text)
+    TMDB_RESULTS = Column(Text)
+    ERROR = Column(Text)
+    ELAPSED_MS = Column(Integer)
+
+
 class SITEBRUSHDOWNLOADERS(Base):
     __tablename__ = 'SITE_BRUSH_DOWNLOADERS'
 

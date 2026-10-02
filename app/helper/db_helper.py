@@ -191,6 +191,74 @@ class DbHelper:
         records = query.order_by(AIRECOGNITIONRECORD.ID.desc()).offset((page - 1) * page_size).limit(page_size).all()
         return total, records
 
+    @DbPersist(_db)
+    def insert_recognition_record(self, payload):
+        """Persist a recognition request and all provider attempts together."""
+        request = RECOGNITIONREQUEST(
+            REQUEST_ID=payload.get("request_id"),
+            ORIGINAL_NAME=payload.get("original_name"),
+            SOURCE=payload.get("source"),
+            STAGE=payload.get("stage"),
+            CREATED_AT=payload.get("created_at"),
+            CONTEXT=self._json_dumps(payload.get("context")),
+            ACTIONS=self._json_dumps(payload.get("actions")),
+            PROVIDER_RESULTS=self._json_dumps(payload.get("provider_results")),
+            OVERALL_RESULT=self._json_dumps(payload.get("overall_result")),
+            TMDB_RESULTS=self._json_dumps(payload.get("tmdb_results")),
+        )
+        self._db.insert(request)
+        attempts = []
+        for result in payload.get("provider_results") or []:
+            attempts.append(RECOGNITIONATTEMPT(
+                REQUEST_ID=payload.get("request_id"),
+                ATTEMPT_ID=result.get("attempt_id"),
+                PROVIDER_ID=result.get("provider_id"),
+                STATUS=result.get("status"),
+                INPUT=self._json_dumps(result.get("input")),
+                RAW_RESULT=self._json_dumps(result.get("raw_result")),
+                NORMALIZED_RESULT=self._json_dumps(result.get("normalized_result")),
+                TMDB_RESULTS=self._json_dumps(result.get("tmdb_results")),
+                ERROR=result.get("error"),
+                ELAPSED_MS=result.get("elapsed_ms"),
+            ))
+        self._db.insert_many(RECOGNITIONATTEMPT, attempts)
+        return payload.get("request_id")
+
+    def get_recognition_records(self, title=None, source=None, status=None,
+                                provider_id=None, action_type=None,
+                                page=1, page_size=20):
+        """Return a paged recognition-record summary query."""
+        page = max(int(page or 1), 1)
+        page_size = min(max(int(page_size or 20), 1), 100)
+        query = self._db.query(RECOGNITIONREQUEST)
+        if title:
+            query = query.filter(RECOGNITIONREQUEST.ORIGINAL_NAME.contains(title))
+        if source:
+            query = query.filter(RECOGNITIONREQUEST.SOURCE == source)
+        if status:
+            query = query.filter(RECOGNITIONREQUEST.OVERALL_RESULT.contains('"status": "' + status + '"'))
+        if provider_id:
+            query = query.filter(RECOGNITIONREQUEST.REQUEST_ID.in_(
+                self._db.query(RECOGNITIONATTEMPT.REQUEST_ID)
+                .filter(RECOGNITIONATTEMPT.PROVIDER_ID == provider_id).distinct()))
+        if action_type:
+            query = query.filter(RECOGNITIONREQUEST.ACTIONS.contains('"action_type": "' + action_type + '"'))
+        total = query.count()
+        records = query.order_by(RECOGNITIONREQUEST.CREATED_AT.desc(),
+                                 RECOGNITIONREQUEST.REQUEST_ID.desc()) \
+            .offset((page - 1) * page_size).limit(page_size).all()
+        return total, records
+
+    def get_recognition_record(self, request_id):
+        """Return one complete request and its indexed attempt rows."""
+        request = self._db.query(RECOGNITIONREQUEST).filter(
+            RECOGNITIONREQUEST.REQUEST_ID == request_id).first()
+        if not request:
+            return None, []
+        attempts = self._db.query(RECOGNITIONATTEMPT).filter(
+            RECOGNITIONATTEMPT.REQUEST_ID == request_id).order_by(RECOGNITIONATTEMPT.ID.asc()).all()
+        return request, attempts
+
     def get_running_tasks(self):
         """
         查询所有运行中的任务（用于进程恢复）

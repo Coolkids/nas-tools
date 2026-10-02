@@ -858,6 +858,25 @@ def ai_recognition_export():
     )
 
 
+@App.route('/recognition_export.jsonl', methods=['GET'])
+@login_required
+def recognition_export_jsonl():
+    """Stream the complete five-part recognition records as JSONL."""
+    data = {
+        "title": request.args.get("title", ""),
+        "source": request.args.get("source", ""),
+        "status": request.args.get("status", ""),
+        "provider_id": request.args.get("provider_id", ""),
+        "action_type": request.args.get("action_type", ""),
+    }
+    response = Response(
+        WebAction.iter_recognition_jsonl(**data),
+        mimetype="application/x-ndjson",
+    )
+    response.headers["Content-Disposition"] = "attachment; filename=recognition-records.jsonl"
+    return response
+
+
 # base64模板过滤器
 @App.template_filter('b64encode')
 def b64encode(s):
