@@ -178,30 +178,30 @@ sdist = { url = "https://files.pythonhosted.org/packages/cf/73/79ed51ed60edbf53c
 
 [[package]]
 name = "boto3"
-version = "1.43.107"
+version = "1.43.108"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "botocore" },
     { name = "jmespath" },
     { name = "s3transfer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2a/c4/c68d22d91482898f1294dab7541ad83f8bcf9df83107e6d8436d6e9dbf01/boto3-1.43.107.tar.gz", hash = "sha256:c4e0f1a0295cbb7103f2950128cf88463c076d220080a7d0f127cf834969fc3a", size = 112718, upload-time = "2026-10-01T19:31:22.283Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/48/59/fb93b6ebd9ad43eb9a58c7a6da51a0fe24ab0c04bc4d534a0bfc5eba7f59/boto3-1.43.108.tar.gz", hash = "sha256:03341f089158368acf83e921aca98b706095322ca52bc4c039a616940aa5ad41", size = 112682, upload-time = "2026-10-02T19:32:25.211Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/01/5c/a865e8902370151daf915e3a072ee57e693144838427e42c9bbd986ecb88/boto3-1.43.107-py3-none-any.whl", hash = "sha256:632a4f8298725b94144c8cd383cbdacb34624daa73221e954c3d33ac6e2528d6", size = 140043, upload-time = "2026-10-01T19:31:20.518Z" },
+    { url = "https://files.pythonhosted.org/packages/74/e4/7e88c40e9f61888e12dac0de41a5fddc2bcd1c3992d9b28e17d915cce0df/boto3-1.43.108-py3-none-any.whl", hash = "sha256:19e9da95ef0c494e27052049a42137550e66730509bb613e76eaa30ddf9a7170", size = 140045, upload-time = "2026-10-02T19:32:23.826Z" },
 ]
 
 [[package]]
 name = "botocore"
-version = "1.43.107"
+version = "1.43.108"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jmespath" },
     { name = "python-dateutil" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4d/22/3aed44a1e0b9820485124a9ad25e9bccd5539c547ef12827547c3cbeb25f/botocore-1.43.107.tar.gz", hash = "sha256:4a37fa072a00280c746313532d19b00e2dc53f1993222601df104d71d548d5b6", size = 16306128, upload-time = "2026-10-01T19:31:17.202Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/61/16/6b4477f433da2c11193802f538330ce080076c2f38d817ad437ed3cd1465/botocore-1.43.108.tar.gz", hash = "sha256:ee4f75cf3bdbb0da7912e089950e8112f692016539d939312c771499958e6cfd", size = 16312879, upload-time = "2026-10-02T19:32:20.797Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7e/39/3a0db1ba57531062cda616dae68b69faef8114939414a2a291b3aac7617b/botocore-1.43.107-py3-none-any.whl", hash = "sha256:23cbe854e815dbaccf097f7fd32b461c9e1d2ed7e0c7dcc5658218704509d840", size = 16002666, upload-time = "2026-10-01T19:31:14.463Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/0b/4670b7e23914b5cc357be5ca45fae503b57d98ecff4b3eabea70412809fd/botocore-1.43.108-py3-none-any.whl", hash = "sha256:ab9d16c6b4350aaa54ed28202dfa2998b2d735fdbf3247eb60af469d8d48a5b8", size = 16008194, upload-time = "2026-10-02T19:32:15.086Z" },
 ]
 
 [[package]]
@@ -266,11 +266,11 @@ wheels = [
 
 [[package]]
 name = "cacheout"
-version = "0.16.0"
+version = "0.17.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/d1/60/ed4c4b27b2131a0b2cc461789be2cf06866644ca462cb34a5d8fca114c15/cacheout-0.16.0.tar.gz", hash = "sha256:ee264897cbaa089ae5f406da11952697d99fa7f3583cfab69fe8a00ff8e1952d", size = 42050, upload-time = "2023-12-22T17:44:33.29Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f0/51/128413a75730da7e7ea45c5d4062c9b53d622151fd228961a65ffa70b606/cacheout-0.17.0.tar.gz", hash = "sha256:38e6ead5828e718e8451029fe9b6c0c6f9ca351cf321c73f8e06b60e4af27ad1", size = 39020, upload-time = "2026-10-03T18:28:41.557Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/72/14/a89bb55107b8a9b586c8878f47d0b7750c3688c209f05f915e70de74880d/cacheout-0.16.0-py3-none-any.whl", hash = "sha256:1a52d9aa8b1e9720d8453b061348f15795578231f9ec4ad376fec49e717d0ed8", size = 21837, upload-time = "2023-12-22T17:44:31.556Z" },
+    { url = "https://files.pythonhosted.org/packages/dc/8f/fd2133190b924467149fdf210220c98151c7af85211b8300a54e3f279c92/cacheout-0.17.0-py2.py3-none-any.whl", hash = "sha256:18e07127ae4e01fba6213a3310bb07cd7b800cac7d9c2cb7a4635e86f8e87ee0", size = 19742, upload-time = "2026-10-03T18:28:40.504Z" },
 ]
 
 [[package]]
@@ -1361,7 +1361,7 @@ wheels = [
 
 [[package]]
 name = "nas-tools"
-version = "3.1.6"
+version = "3.1.7"
 source = { virtual = "." }
 dependencies = [
     { name = "alembic" },
@@ -1427,9 +1427,9 @@ requires-dist = [
     { name = "alembic", specifier = "==1.20.0" },
     { name = "apscheduler", specifier = "==3.11.3" },
     { name = "boddle", specifier = "==0.2.9" },
-    { name = "boto3", specifier = "==1.43.107" },
-    { name = "botocore", specifier = "==1.43.107" },
-    { name = "cacheout", specifier = "==0.16.0" },
+    { name = "boto3", specifier = "==1.43.108" },
+    { name = "botocore", specifier = "==1.43.108" },
+    { name = "cacheout", specifier = "==0.17.0" },
     { name = "chalice", specifier = "==1.33.0" },
     { name = "cn2an", specifier = "==0.5.24" },
     { name = "cython", specifier = "==3.3.0" },
@@ -1458,7 +1458,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = "==1.2.4" },
     { name = "pytz", specifier = "==2026.4" },
     { name = "pyvirtualdisplay", specifier = "==3.0" },
-    { name = "qbittorrent-api", specifier = "==2026.8.1" },
+    { name = "qbittorrent-api", specifier = "==2026.10.0" },
     { name = "regex", specifier = "==2026.9.29" },
     { name = "requests", specifier = "==2.34.2" },
     { name = "ruamel-yaml", specifier = "==0.19.1" },
@@ -2020,16 +2020,16 @@ wheels = [
 
 [[package]]
 name = "qbittorrent-api"
-version = "2026.8.1"
+version = "2026.10.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "packaging" },
     { name = "requests" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/04/00/b7f41dfe8af6c3991f7182f9c14c46851379b8e66ac74c819f0952e9923d/qbittorrent_api-2026.8.1.tar.gz", hash = "sha256:9642c4528baee67216eab87022ce297048ac96df2f8c9f1cf920de078eb50b62", size = 1436760, upload-time = "2026-08-16T20:30:28.35Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bf/7f/b13f95d7409882e05912379f088b49c999914d5669ddaa956b102559403a/qbittorrent_api-2026.10.0.tar.gz", hash = "sha256:2b4c9a6be2f6476c35d10bdb149f357f03781a72506e9deca2bccef8c327e97b", size = 1457850, upload-time = "2026-10-03T16:20:49.073Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e6/60/77c7b63675f12ba492dee9f8aabab0fc61ced5d2131a83bd7e92dcc335c1/qbittorrent_api-2026.8.1-py3-none-any.whl", hash = "sha256:c17260e416ec5832c3ed7aff46fb0e2b47e70b90de182e89c34133b9d4ce5a6e", size = 71970, upload-time = "2026-08-16T20:30:26.67Z" },
+    { url = "https://files.pythonhosted.org/packages/82/63/a10d1c7ae6211845e2c099f778443d77c6460afb71860a841e90ae78369d/qbittorrent_api-2026.10.0-py3-none-any.whl", hash = "sha256:4db35298ffd469bc09f45e8ee3ae1385fabf833971150aacacd5bce43d4cb94f", size = 73898, upload-time = "2026-10-03T16:20:47.573Z" },
 ]
 
 [[package]]

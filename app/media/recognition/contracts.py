@@ -12,6 +12,7 @@ class RecognizerDescriptor:
     version: str = "1"
     evidence_family: str = ""
     config_schema: dict[str, Any] = field(default_factory=dict)
+    network_required: bool = False
 
 
 @dataclass
@@ -29,6 +30,7 @@ class ParseResult:
     raw_result: Any = None
     error: str | None = None
     elapsed_ms: int = 0
+    cache_source: str | None = None
 
 
 class MediaNameRecognizer(ABC):

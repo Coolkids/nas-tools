@@ -45,8 +45,6 @@ class SystemUtils:
         """
         if SystemUtils.is_windows():
             return OsType.WINDOWS
-        elif SystemUtils.is_synology():
-            return OsType.SYNOLOGY
         elif SystemUtils.is_docker():
             return OsType.DOCKER
         elif SystemUtils.is_macos():
@@ -90,12 +88,6 @@ class SystemUtils:
     def is_docker():
         return os.path.exists('/.dockerenv')
 
-    @staticmethod
-    def is_synology():
-        if SystemUtils.is_windows():
-            return False
-        return True if os.path.exists('/etc/VERSION') else False
-        
     @staticmethod
     def is_windows():
         return True if os.name == "nt" else False

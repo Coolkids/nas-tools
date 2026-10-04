@@ -13,6 +13,10 @@ from app.filter import Filter
 from app.helper import DbHelper
 from app.media import Media
 from app.media.meta import MetaInfo
+from app.media.recognition.records import (
+    annotate_business_short_circuit, record_business_short_circuit,
+    record_deferred_parse_result,
+)
 from app.message import Message
 from app.searcher import Searcher
 from app.subscribe import Subscribe
@@ -36,7 +40,7 @@ class RssChecker(object):
     _scheduler = None
     _rss_tasks = []
     _rss_parsers = []
-    _site_users = {
+    _rss_uses = {
         "D": "下载",
         "R": "订阅",
         "S": "搜索"
@@ -95,6 +99,11 @@ class RssChecker(object):
                     note = {}
             save_path = note.get("save_path") or ""
             recognization = note.get("recognization") or "Y"
+            try:
+                task_sites = json.loads(task.SITES) if task.SITES else {}
+            except (TypeError, ValueError):
+                task_sites = {}
+            indexers = task_sites.get("search_sites", []) if isinstance(task_sites, dict) else []
             self._rss_tasks.append({
                 "id": task.ID,
                 "name": task.NAME,
@@ -103,7 +112,7 @@ class RssChecker(object):
                 "parser_name": parser.get("name") if parser else "",
                 "interval": task.INTERVAL,
                 "uses": task.USES if task.USES != "S" else "R",
-                "uses_text": self._site_users.get(task.USES),
+                "uses_text": self._rss_uses.get(task.USES),
                 "include": task.INCLUDE,
                 "exclude": task.EXCLUDE,
                 "filter": task.FILTER,
@@ -115,7 +124,7 @@ class RssChecker(object):
                 "download_setting": task.DOWNLOAD_SETTING or "",
                 "recognization": task.RECOGNIZATION or recognization,
                 "over_edition": task.OVER_EDITION or 0,
-                "sites": json.loads(task.SITES) if task.SITES else {"rss_sites": [], "search_sites": []},
+                "sites": {"search_sites": indexers if isinstance(indexers, list) else []},
                 "filter_args": json.loads(task.FILTER_ARGS)
                 if task.FILTER_ARGS else {"restype": "", "pix": "", "team": ""},
             })
@@ -190,10 +199,15 @@ class RssChecker(object):
         res_num = 0
         no_exists = {}
         for res in rss_result:
+            title = res.get("title")
+            media_info = None
             try:
                 # 种子名
-                title = res.get('title')
                 if not title:
+                    record_business_short_circuit(
+                        "", "rss", "prefilter_rejected", "rsschecker_title_missing",
+                        {"task_id": taskid, "enclosure": res.get("enclosure")},
+                        business_status="error")
                     continue
                 # 种子链接
                 enclosure = res.get('enclosure')
@@ -216,23 +230,34 @@ class RssChecker(object):
                 meta_name = "%s %s" % (title, year) if year else title
                 if self.dbhelper.is_userrss_finished(meta_name, enclosure):
                     log.info("【RssChecker】%s 已处理过" % title)
+                    record_business_short_circuit(
+                        meta_name, "rss", "prefilter_rejected", "rsschecker_already_processed",
+                        {"task_id": taskid, "enclosure": enclosure})
                     continue
 
                 if taskinfo.get("uses") == "D":
-                    # 识别种子名称，开始检索TMDB
-                    media_info = MetaInfo(title=meta_name,
-                                          mtype=mediatype)
-                    cache_info = self.media.get_cache_info(media_info)
+                    # 先做本地解析供缓存键和规则使用，确认缓存分支后再决定是否调用 AI。
+                    media_info = MetaInfo(title=meta_name, mtype=mediatype,
+                                          include_ai=False, record=False)
+                    cache_info = (self.media.get_cache_info(media_info)
+                                  if taskinfo.get("recognization") == "Y" else {})
                     if taskinfo.get("recognization") == "Y":
                         if cache_info.get("id"):
                             # 有缓存，直接使用缓存
+                            record_deferred_parse_result(
+                                media_info, meta_name, "rss", "media_cache_hit",
+                                "rsschecker_media_cache_hit",
+                                {"task_id": taskid, "cache_entity_id": cache_info.get("id"),
+                                 "cache_entity_type": cache_info.get("type"),
+                                 "cache_title": cache_info.get("title")},
+                                business_status="reused", overall_status="success")
                             media_info.tmdb_id = cache_info.get("id")
                             media_info.type = cache_info.get("type")
                             media_info.title = cache_info.get("title")
                             media_info.year = cache_info.get("year")
                         else:
-                            media_info = self.media.get_media_info(title=meta_name,
-                                                                   mtype=mediatype)
+                            media_info = self.media.get_media_info(
+                                title=meta_name, mtype=mediatype, pre_parsed=media_info)
                             if not media_info:
                                 log.warn("【RssChecker】%s 识别媒体信息出错！" % title)
                                 continue
@@ -244,6 +269,10 @@ class RssChecker(object):
                             exist_flag, no_exists, _ = self.downloader.check_exists_medias(meta_info=media_info,
                                                                                            no_exists=no_exists)
                             if exist_flag:
+                                annotate_business_short_circuit(
+                                    media_info, "media_library_hit", "rsschecker_media_exists",
+                                    {"tmdb_id": media_info.tmdb_id, "task_id": taskid},
+                                    business_status="reused")
                                 log.info("【RssChecker】电影 %s 已存在" % media_info.get_title_string())
                                 continue
                         else:
@@ -256,6 +285,10 @@ class RssChecker(object):
                                         media_info.tmdb_id):
                                     log.info("【RssChecker】电视剧 %s %s 已存在" % (
                                         media_info.get_title_string(), media_info.get_season_episode_string()))
+                                annotate_business_short_circuit(
+                                    media_info, "media_library_hit", "rsschecker_media_exists",
+                                    {"tmdb_id": media_info.tmdb_id, "task_id": taskid},
+                                    business_status="reused")
                                 continue
                             if no_exists.get(media_info.tmdb_id):
                                 log.info("【RssChecker】%s 缺失季集：%s"
@@ -276,8 +309,24 @@ class RssChecker(object):
                     # 未匹配
                     if not match_flag:
                         log.info(f"【RssChecker】{match_msg}")
+                        if getattr(media_info, "recognition_request_id", None):
+                            annotate_business_short_circuit(
+                                media_info, "prefilter_rejected", "rsschecker_filter_rejected",
+                                {"filter_message": match_msg, "task_id": taskid})
+                        else:
+                            record_deferred_parse_result(
+                                media_info, meta_name, "rss", "prefilter_rejected",
+                                "rsschecker_filter_rejected",
+                                {"filter_message": match_msg, "task_id": taskid})
                         continue
                     else:
+                        if taskinfo.get("recognization") != "Y" \
+                                and not getattr(media_info, "recognition_request_id", None):
+                            record_deferred_parse_result(
+                                media_info, meta_name, "rss", "recognition_skipped",
+                                "rsschecker_recognition_disabled",
+                                {"task_id": taskid}, business_status="skipped",
+                                overall_status="success")
                         # 匹配优先级
                         media_info.set_torrent_info(res_order=res_order)
                         if taskinfo.get("recognization") == "Y":
@@ -297,12 +346,17 @@ class RssChecker(object):
                     # 添加下载列表
                     if not enclosure:
                         log.warn("【RssChecker】%s RSS报文中没有enclosure种子链接" % taskinfo.get("name"))
+                        annotate_business_short_circuit(
+                            media_info, "prefilter_rejected", "rsschecker_enclosure_missing",
+                            {"task_id": taskid}, business_status="error")
                         continue
                     if media_info not in rss_download_torrents:
                         rss_download_torrents.append(media_info)
                         res_num = res_num + 1
                 elif taskinfo.get("uses") == "R":
-                    media_info = MetaInfo(title=meta_name, mtype=mediatype)
+                    # 订阅规则只依赖本地标题/季集；预解析结果随后传给订阅 resolve 继续 AI。
+                    media_info = MetaInfo(title=meta_name, mtype=mediatype,
+                                          include_ai=False, record=False)
                     # 检查种子是否匹配过滤条件
                     filter_args = {
                         "include": taskinfo.get("include"),
@@ -315,6 +369,10 @@ class RssChecker(object):
                     # 未匹配
                     if not match_flag:
                         log.info(f"【RssChecker】{match_msg}")
+                        record_deferred_parse_result(
+                            media_info, meta_name, "rss", "prefilter_rejected",
+                            "rsschecker_filter_rejected",
+                            {"filter_message": match_msg, "task_id": taskid})
                         continue
                     # 添加订阅列表
                     if media_info not in rss_subscribe_torrents:
@@ -325,6 +383,14 @@ class RssChecker(object):
             except Exception as e:
                 ExceptionUtils.exception_traceback(e)
                 log.error("【RssChecker】处理RSS发生错误：%s - %s" % (str(e), traceback.format_exc()))
+                if media_info and getattr(media_info, "recognition_request_id", None):
+                    annotate_business_short_circuit(
+                        media_info, "processing_error", "rsschecker_processing_exception",
+                        {"error": str(e), "task_id": taskid}, business_status="error")
+                elif title:
+                    record_business_short_circuit(
+                        title, "rss", "processing_error", "rsschecker_processing_exception",
+                        {"error": str(e), "task_id": taskid}, business_status="error")
                 continue
         log.info("【RssChecker】%s 处理结束，匹配到 %s 个有效资源" % (taskinfo.get("name"), res_num))
         self.dbhelper.insert_rss_torrents_many(rss_download_torrents + rss_subscribe_torrents)
@@ -359,7 +425,6 @@ class RssChecker(object):
                     name=media.get_name(),
                     year=media.year,
                     season=media.begin_season,
-                    rss_sites=taskinfo.get("sites", {}).get("rss_sites"),
                     search_sites=taskinfo.get("sites", {}).get("search_sites"),
                     over_edition=True if taskinfo.get("over_edition") else False,
                     filter_restype=taskinfo.get("filter_args", {}).get("restype"),
@@ -368,6 +433,7 @@ class RssChecker(object):
                     filter_rule=taskinfo.get("filter"),
                     save_path=taskinfo.get("save_path"),
                     download_setting=taskinfo.get("download_setting"),
+                    pre_parsed=media,
                 )
                 if rss_media and code == 0:
                     self.message.send_rss_success_message(in_from=SearchType.USERRSS, media_info=rss_media)
@@ -550,16 +616,22 @@ class RssChecker(object):
         if not taskinfo:
             return
         # 识别种子名称，开始检索TMDB
-        media_info = MetaInfo(title=title)
+        media_info = MetaInfo(title=title, include_ai=False, record=False)
         cache_info = self.media.get_cache_info(media_info)
         if cache_info.get("id"):
             # 有缓存，直接使用缓存
+            record_deferred_parse_result(
+                media_info, title, "rss", "media_cache_hit", "rsschecker_media_cache_hit",
+                {"task_id": taskid, "cache_entity_id": cache_info.get("id"),
+                 "cache_entity_type": cache_info.get("type"),
+                 "cache_title": cache_info.get("title")},
+                business_status="reused", overall_status="success")
             media_info.tmdb_id = cache_info.get("id")
             media_info.type = cache_info.get("type")
             media_info.title = cache_info.get("title")
             media_info.year = cache_info.get("year")
         else:
-            media_info = self.media.get_media_info(title=title)
+            media_info = self.media.get_media_info(title=title, pre_parsed=media_info)
             if not media_info:
                 log.warn("【RssChecker】%s 识别媒体信息出错！" % title)
         # 检查是否匹配
@@ -573,6 +645,9 @@ class RssChecker(object):
         # 未匹配
         if not match_flag:
             log.info(f"【RssChecker】{match_msg}")
+            annotate_business_short_circuit(
+                media_info, "prefilter_rejected", "rsschecker_filter_rejected",
+                {"filter_message": match_msg, "task_id": taskid})
         else:
             log.info("【RssChecker】%s 识别为 %s %s 匹配成功" % (
                 title,

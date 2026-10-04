@@ -18,7 +18,7 @@ from app.utils.types import MediaType
 
 class SearchFallbackTest(TestCase):
     def test_mixed_title_keeps_numbers_and_aliases(self):
-        meta_info = MetaInfo("小丑 2 Joker 2 2024 1080p")
+        meta_info = MetaInfo("小丑 2 Joker 2 2024 1080p", include_ai=False)
 
         self.assertEqual("小丑 2", meta_info.cn_name)
         self.assertEqual("Joker 2", meta_info.en_name)
@@ -83,7 +83,8 @@ class SearchFallbackTest(TestCase):
     def test_anime_title_aliases_are_tried_by_normal_tmdb_search(self):
         meta_info = MetaInfo(
             "[喵萌奶茶屋&LoliHouse] 二十世纪电气目录 / 20 Seiki Denki Mokuroku / "
-            "Nijusseiki Denki Mokuroku - 10 [WebRip 1080p HEVC-10bit AAC][简繁日内封字幕]"
+            "Nijusseiki Denki Mokuroku - 10 [WebRip 1080p HEVC-10bit AAC][简繁日内封字幕]",
+            include_ai=False,
         )
         media = object.__new__(Media)
         media._Media__search_tmdb = Mock(return_value={"id": 204046})

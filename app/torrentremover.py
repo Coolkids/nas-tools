@@ -117,7 +117,6 @@ class TorrentRemover(object):
                     config=task.get("config")
                 )
                 log.info(f"【TorrentRemover】自动删种任务：{task.get('name')} 获取符合处理条件种子数 {len(torrents)}")
-                title = f"自动删种任务：{task.get('name')}"
                 text = ""
                 if task.get("action") == 1:
                     text = f"共暂停{len(torrents)}个种子"
@@ -157,8 +156,6 @@ class TorrentRemover(object):
                         self.downloader.delete_torrents(downloader=downloader_type,
                                                         delete_file=True,
                                                         ids=[torrent.get("id")])
-                if torrents and title and text:
-                    self.message.send_brushtask_remove_message(title=title, text=text)
             except Exception as e:
                 ExceptionUtils.exception_traceback(e)
                 log.error(f"【TorrentRemover】自动删种任务：{task.get('name')}异常：{str(e)}")

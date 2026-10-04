@@ -40,6 +40,32 @@ class RecognitionApiContractTest(unittest.TestCase):
         self.assertEqual({"endpoint": {"type": "string"}},
                          response["providers"][0]["config_schema"])
 
+    def test_parse_cache_info_and_clear_actions_are_parse_only(self):
+        parse_cache = {"entries": 7, "bytes": 1536, "generation": 2}
+        cleared_cache = {"entries": 0, "bytes": 0, "generation": 3}
+        with patch("app.media.recognition.cache.info",
+                   side_effect=[parse_cache, parse_cache, cleared_cache]) as info, \
+                patch("app.media.recognition.cache.clear") as clear:
+            status = WebAction._WebAction__get_recognition_parse_cache_info()
+            result = WebAction._WebAction__clear_recognition_parse_cache()
+
+        self.assertEqual({"code": 0, "cache": parse_cache}, status)
+        self.assertEqual({"code": 0, "cleared_entries": 7, "cache": cleared_cache}, result)
+        clear.assert_called_once_with("parse")
+        self.assertEqual([("parse",), ("parse",), ("parse",)],
+                         [call.args for call in info.call_args_list])
+
+    def test_parse_cache_clear_action_requires_login(self):
+        from web.main import App
+
+        with patch("app.media.recognition.cache.clear") as clear:
+            response = App.test_client().post("/do", data={
+                "cmd": "clear_recognition_parse_cache", "data": "{}"})
+
+        self.assertEqual(-1, response.json["code"])
+        self.assertEqual("用户未登录", response.json["msg"])
+        clear.assert_not_called()
+
     def test_list_preserves_parse_only_tmdb_and_provider_statuses(self):
         summaries = [
             {"overall_result": {"status": "success", "tmdb_status": "not_requested"},

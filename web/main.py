@@ -294,7 +294,7 @@ def wechat():
 
     if request.method == 'GET':
         if not sVerifyMsgSig and not sVerifyTimeStamp and not sVerifyNonce:
-            return "NAStool微信交互服务正常！<br>微信回调配置步聚：<br>1、在微信企业应用接收消息设置页面生成Token和EncodingAESKey并填入设置->消息通知->微信对应项，打开微信交互开关。<br>2、保存并重启本工具，保存并重启本工具，保存并重启本工具。<br>3、在微信企业应用接收消息设置页面输入此地址：http(s)://IP:PORT/wechat（IP、PORT替换为本工具的外网访问地址及端口，需要有公网IP并做好端口转发，最好有域名）。"
+            return "NAStool微信交互服务正常！<br>微信回调配置步聚：<br>1、在微信企业应用接收消息设置页面生成Token和EncodingAESKey并填入设置->消息通知->微信对应项，打开微信交互开关。<br>2、保存配置，并通过进程或容器管理工具重启本工具。<br>3、在微信企业应用接收消息设置页面输入此地址：http(s)://IP:PORT/wechat（IP、PORT替换为本工具的外网访问地址及端口，需要有公网IP并做好端口转发，最好有域名）。"
         sVerifyEchoStr = request.args.get("echostr")
         log.debug("收到微信验证请求: echostr= %s" % sVerifyEchoStr)
         ret, sEchoStr = wxcpt.VerifyURL(sVerifyMsgSig, sVerifyTimeStamp, sVerifyNonce, sVerifyEchoStr)
@@ -472,15 +472,7 @@ def telegram():
 # Synology Chat消息响应
 @App.route('/synology', methods=['POST', 'GET'])
 def synology():
-    """
-    token: bot token
-    user_id
-    username
-    post_id
-    timestamp
-    text
-    """
-    # 当前在用的交互渠道
+    """Synology Chat消息回调。"""
     interactive_client = Message().get_interactive_client(SearchType.SYNOLOGY)
     if not interactive_client:
         return 'NAStool未启用Synology Chat交互'
@@ -496,7 +488,6 @@ def synology():
         text = msg_data.get("text")
         user_id = int(msg_data.get("user_id"))
         log.info("收到Synology Chat消息：from=%s, text=%s" % (user_id, text))
-        # 获取用户名
         user_name = msg_data.get("username")
         if text:
             WebAction().handle_message_job(msg=text,

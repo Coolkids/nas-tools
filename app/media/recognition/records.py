@@ -12,6 +12,7 @@ import requests.exceptions
 from functools import wraps
 from enum import Enum
 from threading import Lock
+from app.media.recognition.settings import provider_enabled, profile_tmdb_allowed
 
 
 _current = contextvars.ContextVar("media_recognition_recorder", default=None)
@@ -181,9 +182,8 @@ def _recognition_config_snapshot():
         laboratory = config.get("laboratory", {}) if isinstance(config, dict) else {}
         snapshot = {
             "recognition": _public_recognition_config(recognition_config),
-            # 此兼容开关决定是否实际调用 AI 识别器；快照会刻意排除其服务地址。
-            "runtime": {"ai_inference_enabled": bool(
-                laboratory.get("ai_inference")) if isinstance(laboratory, dict) else False},
+            "runtime": {"ai_inference_enabled": provider_enabled(
+                "anitopy_ml", recognition_config, laboratory)},
         }
         canonical = json.dumps(snapshot, ensure_ascii=False, sort_keys=True,
                                separators=(",", ":"))
@@ -251,8 +251,8 @@ class RecognitionRecorder:
             laboratory = self._runtime_config.get("laboratory", {})
             config_snapshot = {
                 "recognition": _public_recognition_config(recognition_config_value),
-                "runtime": {"ai_inference_enabled": bool(
-                    laboratory.get("ai_inference")) if isinstance(laboratory, dict) else False},
+                "runtime": {"ai_inference_enabled": provider_enabled(
+                    "anitopy_ml", recognition_config_value, laboratory)},
             }
             canonical = json.dumps(config_snapshot, ensure_ascii=False, sort_keys=True,
                                    separators=(",", ":"))
@@ -435,6 +435,132 @@ def current_recorder():
     return _current.get()
 
 
+def annotate_business_short_circuit(meta_info, action_type, reason, details=None,
+                                    business_status="skipped"):
+    """补记名称解析结束后才确定的 RSS/索引器业务短路原因。"""
+    request_id = getattr(meta_info, "recognition_request_id", None)
+    if not request_id:
+        return False
+    details = json_safe(details or {})
+    recorder = current_recorder()
+    if recorder is not None and recorder.request_id == request_id:
+        attempt_id = None
+        for attempt in reversed(recorder.provider_results):
+            if attempt.get("provider_id") == "anitopy_ml" \
+                    and attempt.get("status") == "skipped":
+                attempt_id = attempt.get("attempt_id")
+                if str(attempt.get("error") or "").startswith("ai_deferred"):
+                    attempt["error"] = reason
+                break
+        recorder.action(action_type, status=business_status, provider_id="anitopy_ml",
+                        attempt_id=attempt_id, output=details, reason=reason)
+        recorder.overall_result["business_result"] = {
+            "status": business_status, "reason": reason, "details": details,
+        }
+        return True
+    try:
+        from app.helper.db_helper import DbHelper
+        if DbHelper().append_recognition_business_action(
+                request_id, action_type, reason, details, business_status):
+            return True
+    except Exception as error:
+        try:
+            import log
+            log.warn(f"【Recognition】补记业务短路原因失败 {request_id}：{error}")
+        except Exception:
+            pass
+    # DB 暂不可用时，修改原请求的持久化暂存，不新建重复请求记录。
+    try:
+        spool_path = os.path.join(_spool_directory(), f"{request_id}.json")
+        if not os.path.exists(spool_path):
+            return False
+        with open(spool_path, "r", encoding="utf-8") as spool_file:
+            payload = json.load(spool_file)
+        actions = payload.setdefault("actions", [])
+        attempts = payload.setdefault("provider_results", [])
+        sequence = max((int(item.get("sequence", 0)) for item in actions
+                        if isinstance(item, dict)), default=0) + 1
+        attempt_id = None
+        for attempt in reversed(attempts):
+            if attempt.get("provider_id") == "anitopy_ml" \
+                    and attempt.get("status") == "skipped":
+                attempt_id = attempt.get("attempt_id")
+                if str(attempt.get("error") or "").startswith("ai_deferred"):
+                    attempt["error"] = reason
+                break
+        actions.append({
+            "action_id": f"{request_id}:{sequence}", "sequence": sequence,
+            "action_type": action_type, "provider_id": "anitopy_ml",
+            "attempt_id": attempt_id, "status": business_status, "input": {},
+            "output": details, "reason": reason,
+            "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
+        })
+        payload.setdefault("overall_result", {})["business_result"] = {
+            "status": business_status, "reason": reason, "details": details,
+        }
+        _write_spool(payload)
+        return True
+    except Exception:
+        return False
+
+
+def record_business_short_circuit(original_name, source, action_type, reason,
+                                  details=None, business_status="skipped"):
+    """记录发生在名称解析前、因此没有解析器结果的业务过滤。"""
+    details = json_safe(details or {})
+    with recognition_scope(original_name, source=source, stage="parse_only") as recorder:
+        recorder.add_provider_result(
+            "anitopy_ml", "skipped", input={"title": original_name}, error=reason)
+        recorder.action(action_type, status=business_status, provider_id="anitopy_ml",
+                        output=details, reason=reason)
+        recorder.set_overall(status="skipped", reason=reason,
+                             parsed_result=None, selected_provider=None)
+        recorder.overall_result["business_result"] = {
+            "status": business_status, "reason": reason, "details": details,
+        }
+        return recorder.request_id
+
+
+def record_deferred_parse_result(meta_info, original_name, source, action_type, reason,
+                                 details=None, business_status="skipped",
+                                 overall_status="skipped"):
+    """在业务分支确定后保存之前暂存的本地解析和 AI 跳过结果。"""
+    from app.media.meta.metainfo import _meta_snapshot
+    from app.media.recognition import registry
+
+    processed_title = getattr(meta_info, "_recognition_processed_title", original_name)
+    processed_subtitle = getattr(meta_info, "_recognition_processed_subtitle", None)
+    used_info = getattr(meta_info, "_recognition_used_info", {}) or {}
+    with recognition_scope(original_name, source=source, stage="parse_only") as recorder:
+        if processed_title != original_name or processed_subtitle:
+            recorder.action(
+                "preprocess", input={"title": original_name,
+                                      "subtitle": getattr(meta_info, "_recognition_original_subtitle", None)},
+                output={"title": processed_title, "subtitle": processed_subtitle,
+                        "rules": used_info})
+        local_status = "success" if meta_info and meta_info.get_name() else "no_result"
+        recorder.add_provider_result(
+            "local_rules", local_status,
+            input={"title": processed_title, "subtitle": processed_subtitle},
+            normalized_result=_meta_snapshot(meta_info))
+        provider_ids = set(registry.discover()) | {"anitopy_ml"}
+        for provider_id in sorted(provider_ids - {"local_rules"}):
+            recorder.add_provider_result(
+                provider_id, "skipped", input={"title": processed_title}, error=reason)
+        recorder.action(action_type, status=business_status,
+                        provider_id="anitopy_ml", output=details or {}, reason=reason)
+        recorder.set_overall(
+            status=overall_status,
+            reason=reason if overall_status != "success" else None,
+            parsed_result=_meta_snapshot(meta_info), selected_provider="local_rules")
+        recorder.overall_result["business_result"] = {
+            "status": business_status, "reason": reason, "details": json_safe(details or {}),
+        }
+        if meta_info is not None:
+            meta_info.recognition_request_id = recorder.request_id
+        return recorder.request_id
+
+
 def recognition_remaining_seconds():
     """返回当前解析请求剩余的网络时间预算；未设置时返回空值。"""
     recorder = current_recorder()
@@ -471,6 +597,14 @@ def record_tmdb_call(method):
         recorder = current_recorder()
         if recorder is None:
             return method(self, *args, **kwargs)
+        recognition = recognition_config("recognition") or {}
+        if not profile_tmdb_allowed(recorder.stage, recognition):
+            recorder.action(
+                "tmdb_query", status="skipped", provider_id=recorder.context.get(
+                    "active_provider_id") or "local_rules",
+                input={"method": method.__name__},
+                reason="tmdb_disallowed_by_profile")
+            return None
         timeout_count = recorder._tmdb_timeout_count
         failure_count = len(recorder._tmdb_failure_events)
         provider_id = recorder.context.get("active_provider_id") or "local_rules"

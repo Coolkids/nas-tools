@@ -7,17 +7,11 @@ from tests.cases.meta_cases import meta_cases
 
 
 class MetaInfoTest(TestCase):
-    def setUp(self) -> None:
-        pass
-
-    def tearDown(self) -> None:
-        pass
-
     def test_metainfo(self):
         for info in meta_cases:
-            if not info.get("title"):
-                continue
-            meta_info = MetaInfo(title=info.get("title"), subtitle=info.get("subtitle"))
+            # This fixture validates the deterministic local parser contract.
+            meta_info = MetaInfo(title=info.get("title"), subtitle=info.get("subtitle"),
+                                 include_ai=False)
             target = {
                 "type": meta_info.type.value,
                 "cn_name": meta_info.cn_name or "",

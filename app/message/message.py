@@ -383,44 +383,6 @@ class Message(object):
                     url='downloaded'
                 )
 
-    def send_site_signin_message(self, msgs: list):
-        """
-        发送站点签到消息
-        """
-        if not msgs:
-            return
-        title = "站点签到"
-        text = "\n".join(msgs)
-        # 插入消息中心
-        self.messagecenter.insert_system_message(level="INFO", title=title, content=text)
-        # 发送消息
-        for client in self._active_clients:
-            if "site_signin" in client.get("switchs"):
-                self.__sendmsg(
-                    client=client,
-                    title=title,
-                    text=text
-                )
-
-    def send_site_message(self, title=None, text=None):
-        """
-        发送站点消息
-        """
-        if not title:
-            return
-        if not text:
-            text = ""
-        # 插入消息中心
-        self.messagecenter.insert_system_message(level="INFO", title=title, content=text)
-        # 发送消息
-        for client in self._active_clients:
-            if "site_message" in client.get("switchs"):
-                self.__sendmsg(
-                    client=client,
-                    title=title,
-                    text=text
-                )
-
     def send_transfer_fail_message(self, path, count, text):
         """
         发送转移失败的消息
@@ -439,42 +401,6 @@ class Message(object):
                     title=title,
                     text=text,
                     url="unidentification"
-                )
-
-    def send_brushtask_remove_message(self, title, text):
-        """
-        发送刷流删种的消息
-        """
-        if not title or not text:
-            return
-        # 插入消息中心
-        self.messagecenter.insert_system_message(level="INFO", title=title, content=text)
-        # 发送消息
-        for client in self._active_clients:
-            if "brushtask_remove" in client.get("switchs"):
-                self.__sendmsg(
-                    client=client,
-                    title=title,
-                    text=text,
-                    url="brushtask"
-                )
-
-    def send_brushtask_added_message(self, title, text):
-        """
-        发送刷流下种的消息
-        """
-        if not title or not text:
-            return
-        # 插入消息中心
-        self.messagecenter.insert_system_message(level="INFO", title=title, content=text)
-        # 发送消息
-        for client in self._active_clients:
-            if "brushtask_added" in client.get("switchs"):
-                self.__sendmsg(
-                    client=client,
-                    title=title,
-                    text=text,
-                    url="brushtask"
                 )
 
     def send_mediaserver_message(self, title, text, image):

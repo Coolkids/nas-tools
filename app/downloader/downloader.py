@@ -4,13 +4,11 @@ from threading import Lock
 import log
 from app.conf import ModuleConf
 from app.filetransfer import FileTransfer
-from app.helper import DbHelper, ThreadHelper, SubmoduleHelper
+from app.helper import DbHelper, SubmoduleHelper
 from app.media import Media
 from app.media.meta import MetaInfo
 from app.mediaserver import MediaServer
 from app.message import Message
-from app.sites import Sites
-from app.subtitle import Subtitle
 from app.conf import SystemConfig
 from app.utils import Torrent, StringUtils, SystemUtils, ExceptionUtils
 from app.utils.commons import singleton
@@ -36,7 +34,6 @@ class Downloader:
     mediaserver = None
     filetransfer = None
     media = None
-    sites = None
     dbhelper = None
     systemconfig = None
 
@@ -54,7 +51,6 @@ class Downloader:
         self.mediaserver = MediaServer()
         self.filetransfer = FileTransfer()
         self.media = Media()
-        self.sites = Sites()
         self.systemconfig = SystemConfig()
         # 下载器配置
         pt = Config().get_config('pt')
@@ -135,10 +131,8 @@ class Downloader:
         """
         # 标题
         title = media_info.org_string
-        # 详情页面
-        page_url = media_info.page_url
         # 默认值
-        _xpath, _hash, site_info, dl_files_folder, dl_files, retmsg = None, False, {}, "", [], ""
+        dl_files_folder, dl_files, retmsg = "", [], ""
         # 有种子文件时解析种子信息
         if torrent_file:
             url = os.path.basename(torrent_file)
@@ -152,41 +146,10 @@ class Downloader:
             if url.startswith("magnet:"):
                 content = url
             else:
-                # [XPATH]为需从详情页面解析磁力链
-                if url.startswith("["):
-                    _xpath = url[1:-1]
-                    url = page_url
-                # #XPATH#为需从详情页面解析磁力Hash
-                elif url.startswith("#"):
-                    _xpath = url[1:-1]
-                    _hash = True
-                    url = page_url
-                # 从详情页面XPATH解析下载链接
-                if _xpath:
-                    content = self.sites.parse_site_download_url(page_url=url,
-                                                                 xpath=_xpath)
-                    if not content:
-                        return None, "无法从详情页面：%s 解析出下载链接" % url
-                    # 解析出磁力链，补充Trackers
-                    if content.startswith("magnet:"):
-                        content = Torrent.add_trackers_to_magnet(url=content, title=title)
-                    # 解析出来的是HASH值，转换为磁力链
-                    elif _hash:
-                        content = Torrent.convert_hash_to_magnet(hash_text=content, title=title)
-                        if not content:
-                            return None, "%s 转换磁力链失败" % content
-                # 从HTTP链接下载种子
-                else:
-                    # 获取Cookie和ua等
-                    site_info = self.sites.get_site_attr(url)
-                    # 下载种子文件，并读取信息
-                    _, content, dl_files_folder, dl_files, retmsg = Torrent().get_torrent_info(
-                        url=url,
-                        cookie=site_info.get("cookie"),
-                        ua=site_info.get("ua"),
-                        referer=page_url if site_info.get("referer") else None,
-                        proxy=site_info.get("proxy")
-                    )
+                if url.startswith("[") or url.startswith("#"):
+                    return None, "已移除详情页规则下载，请在 RSS 中提供种子链接或磁力链接"
+                # RSS 提供的普通 HTTP 下载链接直接获取，不依赖私有站点 Cookie 配置。
+                _, content, dl_files_folder, dl_files, retmsg = Torrent().get_torrent_info(url=url)
         # 解析完成
         if retmsg:
             log.warn("【Downloader】%s" % retmsg)
@@ -194,8 +157,6 @@ class Downloader:
             return None, retmsg
 
         # 下载设置
-        if not download_setting and media_info.site:
-            download_setting = self.sites.get_site_download_setting(media_info.site)
         if download_setting:
             download_attr = self.get_download_setting(download_setting) \
                             or self.get_download_setting(self.get_default_download_setting())
@@ -258,8 +219,7 @@ class Downloader:
             if dl_type == DownloaderType.TR:
                 ret = downloader.add_torrent(content,
                                              is_paused=is_paused,
-                                             download_dir=download_dir,
-                                             cookie=site_info.get("cookie"))
+                                             download_dir=download_dir)
                 if ret:
                     downloader.change_torrent(tid=ret.id,
                                               tag=tags,
@@ -277,8 +237,7 @@ class Downloader:
                                              upload_limit=upload_limit,
                                              download_limit=download_limit,
                                              ratio_limit=ratio_limit,
-                                             seeding_time_limit=seeding_time_limit,
-                                             cookie=site_info.get("cookie"))
+                                             seeding_time_limit=seeding_time_limit)
             else:
                 ret = downloader.add_torrent(content,
                                              is_paused=is_paused,
@@ -289,23 +248,6 @@ class Downloader:
             if ret:
                 # 登记下载历史
                 self.dbhelper.insert_download_history(media_info)
-                # 下载站点字幕文件
-                if page_url \
-                        and download_dir \
-                        and dl_files \
-                        and site_info \
-                        and site_info.get("subtitle"):
-                    # 下载访问目录
-                    visit_dir = self.get_download_visit_dir(download_dir)
-                    if visit_dir:
-                        if dl_files_folder:
-                            subtitle_dir = os.path.join(visit_dir, dl_files_folder)
-                        else:
-                            subtitle_dir = visit_dir
-                        ThreadHelper().start_thread(
-                            Subtitle().download_subtitle_from_site,
-                            (media_info, site_info.get("cookie"), site_info.get("ua"), subtitle_dir)
-                        )
                 return ret, ""
             else:
                 return ret, "请检查下载任务是否已存在"
@@ -918,7 +860,7 @@ class Downloader:
             if not torrent_files:
                 return []
             for file_id, torrent_file in enumerate(torrent_files):
-                meta_info = MetaInfo(torrent_file.name)
+                meta_info = MetaInfo(torrent_file.name, include_ai=False, record=False)
                 if not meta_info.get_episode_list():
                     selected = False
                 else:
@@ -937,7 +879,7 @@ class Downloader:
             if not torrent_files:
                 return []
             for torrent_file in torrent_files:
-                meta_info = MetaInfo(torrent_file.get("name"))
+                meta_info = MetaInfo(torrent_file.get("name"), include_ai=False, record=False)
                 if not meta_info.get_episode_list() or not set(meta_info.get_episode_list()).issubset(
                         set(need_episodes)):
                     file_ids.append(torrent_file.get("index"))
@@ -1081,16 +1023,9 @@ class Downloader:
         解析种子文件，获取集数
         :return: 集数列表、种子路径
         """
-        site_info = self.sites.get_site_attr(url)
-        if not site_info.get("cookie"):
-            return [], None
         # 保存种子文件
         file_path, _, _, files, retmsg = Torrent().get_torrent_info(
-            url=url,
-            cookie=site_info.get("cookie"),
-            ua=site_info.get("ua"),
-            referer=page_url if site_info.get("referer") else None,
-            proxy=site_info.get("proxy")
+            url=url
         )
         if not files:
             log.error("【Downloader】读取种子文件集数出错：%s" % retmsg)
@@ -1099,7 +1034,7 @@ class Downloader:
         for file in files:
             if os.path.splitext(file)[-1] not in RMT_MEDIAEXT:
                 continue
-            meta = MetaInfo(file)
+            meta = MetaInfo(file, include_ai=False, record=False)
             if not meta.begin_episode:
                 continue
             episodes = list(set(episodes).union(set(meta.get_episode_list())))

@@ -32,8 +32,6 @@ METAINFO_SAVE_INTERVAL = 600
 SYNC_TRANSFER_INTERVAL = 60
 # RSS队列中处理时间间隔
 RSS_CHECK_INTERVAL = 300
-# 站点流量数据刷新时间间隔（小时）
-REFRESH_PT_DATA_INTERVAL = 6
 # 刷新订阅TMDB数据的时间间隔（小时）
 RSS_REFRESH_TMDB_INTERVAL = 6
 # 刷流删除的检查时间间隔
@@ -53,8 +51,6 @@ DEFAULT_WECHAT_PROXY = 'https://wechat.nastool.cn'
 DEFAULT_OCR_SERVER = 'https://nastool.cn'
 # 默认TMDB代理服务地址
 DEFAULT_TMDB_PROXY = 'https://tmdb.nastool.cn'
-# 默认CookieCloud服务地址
-DEFAULT_COOKIECLOUD_SERVER = 'http://nastool.cn:8088'
 # TMDB图片地址
 TMDB_IMAGE_W500_URL = 'https://image.tmdb.org/t/p/w500%s'
 TMDB_IMAGE_ORIGINAL_URL = 'https://image.tmdb.org/t/p/original%s'
@@ -68,8 +64,7 @@ DEFAULT_MOVIE_FORMAT = '{title} ({year})/{title} ({year})-{part} - {videoFormat}
 DEFAULT_TV_FORMAT = '{title} ({year})/Season {season}/{title} - {season_episode}-{part} - 第 {episode} 集'
 # WebDriver路径
 WEBDRIVER_PATH = {
-    "Docker": "/usr/lib/chromium/chromedriver",
-    "Synology": "/var/packages/NASTool/target/bin/chromedriver"
+    "Docker": "/usr/lib/chromium/chromedriver"
 }
 
 # Xvfb虚拟显示路程

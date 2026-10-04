@@ -87,9 +87,10 @@ class DoubanSync:
                                 subtitle = "第%s季" % media.begin_season
                             else:
                                 subtitle = None
-                            media_info = self.media.get_media_info(title="%s %s" % (media.get_name(), media.year or ""),
-                                                                   subtitle=subtitle,
-                                                                   mtype=media.type)
+                            media_info = self.media.get_media_info(
+                                title=getattr(media, "_recognition_original_title", None)
+                                or "%s %s" % (media.get_name(), media.year or ""),
+                                subtitle=subtitle, mtype=media.type, pre_parsed=media)
                             # 不需要自动加订阅，则直接搜索
                             if not media_info or not media_info.tmdb_info:
                                 log.warn("【Douban】%s 未查询到媒体信息" % media.get_name())
@@ -270,7 +271,8 @@ class DoubanSync:
                     continue
             media_type = MediaType.TV if douban_info.get("episodes_count") else MediaType.MOVIE
             log.info("【Douban】%s：%s %s".strip() % (media_type.value, douban_info.get("title"), douban_info.get("year")))
-            meta_info = MetaInfo(title="%s %s" % (douban_info.get("title"), douban_info.get("year") or ""))
+            meta_info = MetaInfo(title="%s %s" % (douban_info.get("title"), douban_info.get("year") or ""),
+                                 include_ai=False, record=False)
             meta_info.douban_id = doubanid
             meta_info.type = media_type
             meta_info.overview = douban_info.get("intro")

@@ -49,14 +49,31 @@ class MainDb:
     @staticmethod
     def init_db():
         with lock:
+            with _Engine.begin() as conn:
+                # 站点管理功能已移除，同时清理旧版本留下的数据表。
+                for table in ("SITE_STATISTICS_HISTORY", "SITE_USER_INFO_STATS",
+                              "SITE_USER_SEEDING_INFO", "SITE_FAVICON", "CONFIG_SITE"):
+                    conn.execute(text(f"DROP TABLE IF EXISTS {table}"))
+                # 订阅改为只保存索引器列表，清除旧版本保存的私有站点选择。
+                for table in ("RSS_MOVIES", "RSS_TVS"):
+                    try:
+                        conn.execute(text(f"UPDATE {table} SET RSS_SITES = NULL"))
+                    except Exception:
+                        # 首次创建数据库时表或旧字段尚不存在。
+                        pass
+                try:
+                    # 清理站点自动登录功能曾保存的账户凭据。
+                    conn.execute(text(
+                        "DELETE FROM SYSTEM_DICT WHERE TYPE = 'SystemConfig' AND KEY IN ('CookieUserInfo', 'CookieCloud')"))
+                except Exception:
+                    # 首次创建数据库时尚无系统配置表。
+                    pass
             # 新增唯一索引必须兼容旧数据库中的重复历史记录。
             # 迁移脚本会再次执行该步骤，init_db 则保证 create_all 本身安全。
             with _Engine.begin() as conn:
                 for table, columns in (
                         ("RSS_TORRENTS", ("ENCLOSURE",)),
-                        ("SYNC_HISTORY", ("PATH", "DEST")),
-                        ("SITE_BRUSH_TORRENTS", ("TASK_ID", "TORRENT_NAME", "ENCLOSURE")),
-                        ("SITE_STATISTICS_HISTORY", ("DATE", "URL"))):
+                        ("SYNC_HISTORY", ("PATH", "DEST"))):
                     try:
                         joined = ", ".join(columns)
                         predicate = "ENCLOSURE IS NOT NULL AND " if table == "RSS_TORRENTS" else ""

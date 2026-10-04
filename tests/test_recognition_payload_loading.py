@@ -1,4 +1,5 @@
 import importlib.util
+import datetime
 import json
 import tempfile
 import unittest
@@ -23,6 +24,50 @@ SPEC.loader.exec_module(MIGRATION)
 
 
 class RecognitionPayloadLoadingTest(unittest.TestCase):
+    def test_expired_recognition_cleanup_deletes_in_batches_and_keeps_running_rows(self):
+        engine = sa.create_engine("sqlite:///:memory:")
+        RECOGNITIONREQUEST.__table__.create(engine)
+        RECOGNITIONATTEMPT.__table__.create(engine)
+        session = sessionmaker(bind=engine)()
+
+        class TestDb:
+            @staticmethod
+            def query(*models):
+                return session.query(*models)
+
+        previous_db = DbHelper._db
+        DbHelper._db = TestDb()
+        try:
+            session.add_all([
+                RECOGNITIONREQUEST(REQUEST_ID="old-1", CREATED_AT="2026-08-01 10:00:00",
+                                   OVERALL_RESULT='{"status":"success"}'),
+                RECOGNITIONREQUEST(REQUEST_ID="old-2", CREATED_AT="2026-08-02 10:00:00",
+                                   OVERALL_RESULT='{"status":"failed"}'),
+                RECOGNITIONREQUEST(REQUEST_ID="running", CREATED_AT="2026-08-01 10:00:00",
+                                   OVERALL_RESULT='{"status":"running"}'),
+                RECOGNITIONREQUEST(REQUEST_ID="recent", CREATED_AT="2026-09-20 10:00:00",
+                                   OVERALL_RESULT='{"status":"success"}'),
+            ])
+            session.add_all([
+                RECOGNITIONATTEMPT(REQUEST_ID=request_id, ATTEMPT_ID=f"{request_id}-attempt")
+                for request_id in ("old-1", "old-2", "running", "recent")
+            ])
+            session.commit()
+
+            with patch.object(previous_db, "commit"):
+                deleted = DbHelper().delete_expired_recognition_records(
+                    30, now=datetime.datetime(2026, 10, 4), batch_size=1)
+
+            self.assertEqual(2, deleted)
+            self.assertEqual({"running", "recent"}, {
+                row.REQUEST_ID for row in session.query(RECOGNITIONREQUEST).all()})
+            self.assertEqual({"running", "recent"}, {
+                row.REQUEST_ID for row in session.query(RECOGNITIONATTEMPT).all()})
+        finally:
+            DbHelper._db = previous_db
+            session.close()
+            engine.dispose()
+
     def test_list_query_leaves_full_payload_columns_unloaded(self):
         engine = sa.create_engine("sqlite:///:memory:")
         RECOGNITIONREQUEST.__table__.create(engine)

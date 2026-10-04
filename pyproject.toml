@@ -1,15 +1,15 @@
 [project]
 name = "nas-tools"
-version = "3.1.6"
+version = "3.1.7"
 description = "NAS media library resource aggregation and automation tool"
 requires-python = ">=3.14"
 dependencies = [
     "alembic==1.20.0",
     "APScheduler==3.11.3",
     "boddle==0.2.9",
-    "boto3==1.43.107",
-    "botocore==1.43.107",
-    "cacheout==0.16.0",
+    "boto3==1.43.108",
+    "botocore==1.43.108",
+    "cacheout==0.17.0",
     "chalice==1.33.0",
     "cn2an==0.5.24",
     "Cython==3.3.0",
@@ -38,7 +38,7 @@ dependencies = [
     "python_dateutil==2.9.0.post0",
     "pytz==2026.4",
     "PyVirtualDisplay==3.0",
-    "qbittorrent_api==2026.8.1",
+    "qbittorrent_api==2026.10.0",
     "regex==2026.9.29",
     "Requests==2.34.2",
     "ruamel.yaml==0.19.1",

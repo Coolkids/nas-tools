@@ -9,10 +9,9 @@ from app.media import Media, DouBan
 from app.media.meta import MetaInfo
 from app.message import Message
 from app.searcher import Searcher
-from app.sites import Sites
 from app.subscribe import Subscribe
 from app.utils import StringUtils, Torrent
-from app.utils.types import SearchType, IndexerType
+from app.utils.types import SearchType
 from config import Config
 from web.backend.web_utils import WebUtils
 
@@ -241,14 +240,9 @@ def search_media_by_message(input_str, in_from: SearchType, user_id, user_name=N
         # 下载链接
         if SEARCH_MEDIA_TYPE[user_id] == "DOWNLOAD":
             if input_str.startswith("http"):
-                # 检查是不是有这个站点
-                site_info = Sites().get_sites(siteurl=input_str)
-                # 偿试下载种子文件
+                # 直接获取输入的种子链接。
                 filepath, content, retmsg = Torrent().save_torrent_file(
-                    url=input_str,
-                    cookie=site_info.get("cookie"),
-                    ua=site_info.get("ua"),
-                    proxy=site_info.get("proxy")
+                    url=input_str
                 )
                 # 下载种子出错
                 if not content and retmsg:
@@ -262,7 +256,7 @@ def search_media_by_message(input_str, in_from: SearchType, user_id, user_name=N
                     if title:
                         meta_info = Media().get_media_info(title=title)
                     else:
-                        meta_info = MetaInfo(title="磁力链接")
+                        meta_info = MetaInfo(title="磁力链接", include_ai=False, record=False)
                         meta_info.org_string = content
                     meta_info.set_torrent_info(
                         enclosure=content,
@@ -284,7 +278,7 @@ def search_media_by_message(input_str, in_from: SearchType, user_id, user_name=N
                 if title:
                     meta_info = Media().get_media_info(title=title)
                 else:
-                    meta_info = MetaInfo(title="磁力链接")
+                    meta_info = MetaInfo(title="磁力链接", include_ai=False, record=False)
                     meta_info.org_string = input_str
                 meta_info.set_torrent_info(
                     enclosure=input_str,
@@ -305,29 +299,13 @@ def search_media_by_message(input_str, in_from: SearchType, user_id, user_name=N
 
         # 搜索或订阅
         else:
-            # 获取字符串中可能的RSS站点列表
-            rss_sites, content = StringUtils.get_idlist_from_string(input_str,
-                                                                    [{
-                                                                        "id": site.get("name"),
-                                                                        "name": site.get("name")
-                                                                    } for site in Sites().get_sites(rss=True)])
-
-            # 索引器类型
-            indexer_type = Indexer().get_client_type()
             indexers = Indexer().get_indexers()
 
             # 获取字符串中可能的搜索站点列表
-            if indexer_type == IndexerType.BUILTIN:
-                content = input_str
-                search_sites, _ = StringUtils.get_idlist_from_string(input_str, [{
-                    "id": indexer.name,
-                    "name": indexer.name
-                } for indexer in indexers])
-            else:
-                search_sites, content = StringUtils.get_idlist_from_string(content, [{
-                    "id": indexer.name,
-                    "name": indexer.name
-                } for indexer in indexers])
+            search_sites, content = StringUtils.get_idlist_from_string(content, [{
+                "id": indexer.name,
+                "name": indexer.name
+            } for indexer in indexers])
 
             # 获取字符串中可能的下载设置
             download_setting, content = StringUtils.get_idlist_from_string(content, [{
@@ -359,8 +337,7 @@ def search_media_by_message(input_str, in_from: SearchType, user_id, user_name=N
             # 保存识别信息到临时结果中，由于消息长度限制只取前8条
             SEARCH_MEDIA_CACHE[user_id] = []
             for meta_info in medias[:8]:
-                # 合并站点和下载设置信息
-                meta_info.rss_sites = rss_sites
+                # 合并索引器和下载设置信息
                 meta_info.search_sites = search_sites
                 meta_info.set_download_info(download_setting=download_setting)
                 SEARCH_MEDIA_CACHE[user_id].append(meta_info)
@@ -473,7 +450,6 @@ def __rss_media(in_from, media_info, user_id=None, state='D', user_name=None):
                                                               season=media_info.begin_season,
                                                               mediaid=f"DB:{media_info.douban_id}",
                                                               state=state,
-                                                              rss_sites=media_info.rss_sites,
                                                               search_sites=media_info.search_sites)
     else:
         code, msg, media_info = Subscribe().add_rss_subscribe(mtype=media_info.type,
@@ -482,7 +458,6 @@ def __rss_media(in_from, media_info, user_id=None, state='D', user_name=None):
                                                               season=media_info.begin_season,
                                                               mediaid=media_info.tmdb_id,
                                                               state=state,
-                                                              rss_sites=media_info.rss_sites,
                                                               search_sites=media_info.search_sites)
     if code == 0:
         log.info("【Web】%s %s 已添加订阅" % (media_info.type.value, media_info.get_title_string()))

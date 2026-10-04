@@ -8,11 +8,43 @@ from unittest.mock import Mock, patch
 
 from app.media import media as media_module
 from app.media.media import Media
+from app.media.recognition import cache as recognition_cache
 from app.media.recognition.records import recognition_scope
 from app.utils.types import MediaType
 
 
 class ForcedRecognitionTraceTest(unittest.TestCase):
+    def test_forced_tmdb_retry_clears_only_tmdb_cache_and_keeps_ai_parse_cache(self):
+        meta_info = SimpleNamespace(
+            get_name=lambda: "Example Show", year="2024", type=MediaType.TV,
+            begin_season=1,
+        )
+        media = object.__new__(Media)
+        media.meta = Mock()
+        media._rmt_match_mode = media_module.MatchMode.NORMAL
+        ai_value = {"provider_id": "anitopy_ml", "parsed": {"title": "Example Show"}}
+        runtime = {"cache": {"enabled": True, "parse": {
+            "enabled": True, "ttl_seconds": 60, "max_entries": 8,
+            "max_bytes": 4096, "max_entry_bytes": 1024,
+        }}}
+        tmdb_result = {"id": 77, "media_type": "tv", "name": "Example Show",
+                       "genres": ["Drama"]}
+
+        with patch("app.media.recognition.cache.recognition_config",
+                   return_value=runtime), \
+                patch.object(media, "_Media__make_cache_key", return_value="tmdb-key"), \
+                patch.object(media, "_Media__search_tmdb", return_value=tmdb_result), \
+                patch.object(media, "_Media__insert_media_cache"), \
+                patch("app.media.recognition.records._write_spool", return_value=None):
+            recognition_cache.clear("parse")
+            recognition_cache.put("parse", "ai-key", ai_value)
+            result = media._search_media_info_force_impl(meta_info)
+            cached_ai = recognition_cache.get("parse", "ai-key")
+
+        self.assertEqual(tmdb_result, result)
+        media.meta.delete_meta_data.assert_called_once_with("tmdb-key")
+        self.assertEqual(ai_value, cached_ai)
+
     def test_forced_retry_skips_legacy_sleep_when_deadline_cannot_fit_retry(self):
         media = object.__new__(Media)
         media.meta = Mock()

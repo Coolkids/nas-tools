@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import tempfile
+from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
@@ -38,6 +39,48 @@ class MediaParentFallbackTest(TestCase):
         media._ai_inference = False
         media._ai_inference_url = None
         return media
+
+    def test_file_resolution_uses_ai_result_before_directory_fallback(self):
+        media = self._media()
+        media._ai_inference = True
+        media._ai_inference_url = "http://ai.local"
+        runtime = {
+            "recognition": {"providers": {"anitopy_ml": {"enabled": True}}},
+            "laboratory": {"ai_inference": True, "ai_inference_url": "http://ai.local"},
+        }
+        config = SimpleNamespace(
+            get_config=lambda section=None: runtime if section is None else runtime.get(section, {}),
+            get_config_path=lambda: "/tmp/nas-tools-file-ai-result-test",
+        )
+        resolved = FakeMetaInfo("AI Parsed Show", "2024", MediaType.TV, 1)
+        resolved.tmdb_info = {"id": 19, "media_type": "tv", "name": "AI Parsed Show"}
+        database = Mock()
+        database.insert_recognition_record.side_effect = lambda record: record["request_id"]
+
+        with tempfile.TemporaryDirectory() as directory:
+            file_path = os.path.join(directory, "AI.Parsed.Show.S01E01.mkv")
+            with open(file_path, "w", encoding="utf-8"):
+                pass
+            with patch("config.Config", return_value=config), \
+                    patch.object(media, "get_media_info", return_value=resolved) as resolve, \
+                    patch("app.media.media.MetaInfo") as local_parse, \
+                    patch.object(Media, "_Media__meta_snapshot", return_value={
+                        "name": "AI Parsed Show", "season": "1", "episode": "1",
+                    }), \
+                    patch.object(Media, "_Media__json_safe", side_effect=lambda value: value), \
+                    patch("app.media.recognition.records._write_spool", return_value=None), \
+                    patch("app.helper.db_helper.DbHelper", return_value=database):
+                result = media.get_media_info_on_files(file_path)
+
+        self.assertIs(resolved, result[file_path])
+        resolve.assert_called_once_with(title="AI.Parsed.Show.S01E01.mkv",
+                                        mtype=None, chinese=True)
+        local_parse.assert_not_called()
+        payload = database.insert_recognition_record.call_args.args[0]
+        self.assertEqual("AI.Parsed.Show.S01E01.mkv", payload["original_name"])
+        self.assertEqual("success", payload["overall_result"]["status"])
+        self.assertEqual(19, payload["overall_result"]["tmdb_result"]["id"])
+        self.assertNotIn("fallback", [action["action_type"] for action in payload["actions"]])
 
     def test_unparsed_file_uses_parent_then_grandparent_and_records_each_fallback(self):
         with tempfile.TemporaryDirectory() as directory:

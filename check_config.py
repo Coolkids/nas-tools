@@ -129,7 +129,7 @@ def check_config():
     else:
         print("配置文件格式错误，找不到media配置项！")
 
-    # 检查站点配置
+    # 检查下载器配置
     if Config().get_config('pt'):
         pt_client = Config().get_config('pt').get('pt_client')
         print("下载软件设置为：%s" % pt_client)
@@ -156,14 +156,6 @@ def check_config():
         if search_auto:
             print("微信等移动端渠道搜索已开启自动择优下载")
 
-        ptsignin_cron = Config().get_config('pt').get('ptsignin_cron')
-        if not ptsignin_cron:
-            print("站点自动签到时间未配置，站点签到功能已关闭")
-
-        pt_check_interval = Config().get_config('pt').get('pt_check_interval')
-        if not pt_check_interval:
-            print("RSS订阅周期未配置，RSS订阅功能已关闭")
-
         pt_monitor = Config().get_config('pt').get('pt_monitor')
         if not pt_monitor:
             print("下载软件监控未开启，下载器监控功能已关闭")
@@ -186,7 +178,19 @@ def update_config():
     """
     _config = Config().get_config()
     _dbhelper = DbHelper()
+    _dbhelper.remove_message_client_switch('site_signin')
     overwrite_cofig = False
+
+    # 已移除站点自动签到配置，升级时一并清除旧字段。
+    pt_config = _config.get('pt') or {}
+    if isinstance(pt_config, dict) and 'ptsignin_cron' in pt_config:
+        pt_config.pop('ptsignin_cron')
+        overwrite_cofig = True
+    message_config = _config.get('message') or {}
+    message_switch = message_config.get('switch') or {}
+    if isinstance(message_switch, dict) and 'site_signin' in message_switch:
+        message_switch.pop('site_signin')
+        overwrite_cofig = True
 
     # 密码初始化
     login_password = _config.get("app", {}).get("login_password") or "password"
@@ -222,8 +226,16 @@ def update_config():
 
     # 通用名称识别配置，旧 AI 开关继续控制 anitopy-ml 是否运行。
     recognition_defaults = {
-        'schema_version': 1,
-        'execution': {'mode': 'all', 'max_concurrency': 1, 'total_timeout_seconds': 30},
+        'schema_version': 2,
+        'profiles': {
+            'parse_only': {'providers': 'all_enabled', 'network_allowed': True,
+                           'tmdb_allowed': False, 'conflict_policy': 'unresolved'},
+            'resolve': {'providers': 'all_enabled', 'network_allowed': True,
+                        'tmdb_allowed': True},
+        },
+        'execution': {'mode': 'all', 'max_concurrency': 1,
+                      'max_inflight_provider_requests': 4,
+                      'total_timeout_seconds': 30},
         'decision': {
             'strategy': 'legacy',
             'shadow': {'enabled': True, 'strategy': 'title_evidence'},
@@ -262,17 +274,28 @@ def update_config():
         'providers': {
             'local_rules': {'enabled': True, 'reliability': 0.5},
             'anitopy_ml': {'enabled': bool(_config.get('laboratory', {}).get('ai_inference')),
-                           'reliability': 0.5},
+                           'reliability': 0.5, 'model_revision': 'unknown'},
         },
         'cache': {
             'enabled': True,
             'parse_ttl_seconds': 86400,
+            'parse': {'enabled': True, 'ttl_seconds': 86400, 'max_entries': 4096,
+                      'max_bytes': 67108864, 'max_entry_bytes': 1048576,
+                      'singleflight': True},
             'tmdb_ttl_seconds': 3600,
             'decision_ttl_seconds': 3600,
             'negative_ttl_seconds': 300,
         },
         'audit': {'store_raw_response': True, 'retention_days': None},
     }
+
+    from app.media.recognition.settings import (
+        migrate_legacy_ai_provider, migrate_legacy_parse_ttl,
+    )
+    if migrate_legacy_ai_provider(_config):
+        overwrite_cofig = True
+    if migrate_legacy_parse_ttl(_config):
+        overwrite_cofig = True
 
     def merge_recognition_defaults(target, defaults):
         nonlocal overwrite_cofig
@@ -573,11 +596,6 @@ def update_config():
                     switchs.append("rss_added")
                 if switch.get("rss_finished"):
                     switchs.append("rss_finished")
-                if switch.get("site_signin"):
-                    switchs.append("site_signin")
-                switchs.append('site_message')
-                switchs.append('brushtask_added')
-                switchs.append('brushtask_remove')
                 switchs.append('mediaserver_message')
             if message.get('telegram'):
                 token = message.get('telegram', {}).get('telegram_token')
@@ -721,45 +739,9 @@ def update_config():
     except Exception as e:
         ExceptionUtils.exception_traceback(e)
 
-    # 站点兼容旧配置
-    try:
-        sites = _dbhelper.get_config_site()
-        for site in sites:
-            if not site.NOTE or str(site.NOTE).find('{') != -1:
-                continue
-            # 是否解析种子详情为|分隔的第1位
-            site_parse = str(site.NOTE).split("|")[0] or "Y"
-            # 站点过滤规则为|分隔的第2位
-            rule_groupid = str(site.NOTE).split("|")[1] if site.NOTE and len(
-                str(site.NOTE).split("|")) > 1 else ""
-            # 站点未读消息为|分隔的第3位
-            site_unread_msg_notify = str(site.NOTE).split("|")[2] if site.NOTE and len(
-                str(site.NOTE).split("|")) > 2 else "Y"
-            # 自定义UA为|分隔的第4位
-            ua = str(site.NOTE).split("|")[3] if site.NOTE and len(
-                str(site.NOTE).split("|")) > 3 else ""
-            # 是否开启浏览器仿真为|分隔的第5位
-            chrome = str(site.NOTE).split("|")[4] if site.NOTE and len(
-                str(site.NOTE).split("|")) > 4 else "N"
-            # 是否使用代理为|分隔的第6位
-            proxy = str(site.NOTE).split("|")[5] if site.NOTE and len(
-                str(site.NOTE).split("|")) > 5 else "N"
-            _dbhelper.update_config_site_note(tid=site.ID, note=json.dumps({
-                "parse": site_parse,
-                "rule": rule_groupid,
-                "message": site_unread_msg_notify,
-                "ua": ua,
-                "chrome": chrome,
-                "proxy": proxy
-            }))
-
-    except Exception as e:
-        ExceptionUtils.exception_traceback(e)
-
     # 订阅兼容旧配置
     try:
         def __parse_rss_desc(desc):
-            rss_sites = []
             search_sites = []
             over_edition = False
             restype = None
@@ -769,12 +751,7 @@ def update_config():
             total = None
             current = None
             notes = str(desc).split('#')
-            # 订阅站点
-            if len(notes) > 0:
-                if notes[0]:
-                    rss_sites = [s for s in str(notes[0]).split(
-                        '|') if s and len(s) < 20]
-            # 搜索站点
+            # 索引器选择
             if len(notes) > 1:
                 if notes[1]:
                     search_sites = [s for s in str(notes[1]).split('|') if s]
@@ -803,7 +780,6 @@ def update_config():
                     if len(ep_info) > 1:
                         current = int(ep_info[1]) if ep_info[1] else None
             return {
-                "rss_sites": rss_sites,
                 "search_sites": search_sites,
                 "over_edition": over_edition,
                 "restype": restype,

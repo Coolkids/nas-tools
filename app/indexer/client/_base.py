@@ -7,6 +7,11 @@ from app.filter import Filter
 from app.helper import ProgressHelper
 from app.media import Media
 from app.media.meta import MetaInfo
+from app.media.recognition.records import (
+    annotate_business_short_circuit,
+    record_deferred_parse_result,
+    record_business_short_circuit,
+)
 from app.utils import DomUtils, RequestUtils, StringUtils, ExceptionUtils
 from app.utils.types import MediaType, SearchType
 from config import Config
@@ -251,6 +256,11 @@ class _IIndexClient(metaclass=ABCMeta):
                 description = item.get('description')
             if not torrent_name:
                 index_error += 1
+                record_business_short_circuit(
+                    description or "", "indexer", "prefilter_rejected",
+                    "indexer_title_missing",
+                    {"description": description, "indexer": self.index_type},
+                    business_status="error")
                 continue
             enclosure = item.get('enclosure')
             size = item.get('size')
@@ -265,12 +275,19 @@ class _IIndexClient(metaclass=ABCMeta):
             # 全匹配模式下，非公开站点，过滤掉做种数为0的
             if filter_args.get("seeders") and not indexer.public and str(seeders) == "0":
                 log.info(f"【{self.index_type}】{torrent_name} 做种数为0")
+                record_business_short_circuit(
+                    torrent_name, "indexer", "prefilter_rejected", "indexer_seeders_zero",
+                    {"filter": "seeders", "seeders": seeders, "indexer": self.index_type})
                 index_rule_fail += 1
                 continue
             # 识别种子名称
-            meta_info = MetaInfo(title=torrent_name, subtitle=description)
+            meta_info = MetaInfo(title=torrent_name, subtitle=description,
+                                 include_ai=False, record=False)
             if not meta_info.get_name():
                 log.info(f"【{self.index_type}】{torrent_name} 无法识别到名称")
+                record_deferred_parse_result(
+                    meta_info, torrent_name, "indexer", "prefilter_rejected",
+                    "local_parse_no_name", {"filter": "name_parse", "indexer": self.index_type})
                 index_match_fail += 1
                 continue
             # 大小及促销等
@@ -283,27 +300,46 @@ class _IIndexClient(metaclass=ABCMeta):
             if meta_info.type == MediaType.TV and filter_args.get("type") == MediaType.MOVIE:
                 log.info(
                     f"【{self.index_type}】{torrent_name} 是 {meta_info.type.value}，不匹配类型：{filter_args.get('type').value}")
+                record_deferred_parse_result(
+                    meta_info, torrent_name, "indexer", "prefilter_rejected",
+                    "indexer_type_mismatch",
+                    {"filter": "type", "expected": MediaType.MOVIE.value,
+                     "actual": MediaType.TV.value, "indexer": self.index_type})
                 index_rule_fail += 1
                 continue
             # 检查订阅过滤规则匹配
-            match_flag, res_order, match_msg = self.filter.check_torrent_filter(meta_info=meta_info,
-                                                                                filter_args=filter_args,
-                                                                                uploadvolumefactor=uploadvolumefactor,
-                                                                                downloadvolumefactor=downloadvolumefactor)
+            match_flag, res_order, match_msg = self.filter.check_torrent_filter(
+                meta_info=meta_info, filter_args=filter_args)
             if not match_flag:
                 log.info(f"【{self.index_type}】{match_msg}")
+                record_deferred_parse_result(
+                    meta_info, torrent_name, "indexer", "prefilter_rejected",
+                    "indexer_filter_rejected",
+                    {"filter_message": match_msg, "indexer": self.index_type})
                 index_rule_fail += 1
                 continue
             # 识别媒体信息
             if not match_media:
-                # 不过滤
-                media_info = meta_info
+                # 初始过滤通过后再执行 AI；前面的预解析尚未写记录，
+                # 因此只为本次完整解析保留一条结果记录。
+                media_info = MetaInfo(title=torrent_name, subtitle=description,
+                                      pre_parsed=meta_info)
+                media_info.set_torrent_info(size=size,
+                                            imdbid=imdbid,
+                                            upload_volume_factor=uploadvolumefactor,
+                                            download_volume_factor=downloadvolumefactor)
             else:
                 # 0-识别并模糊匹配；1-识别并精确匹配
                 if meta_info.imdb_id \
                         and match_media.imdb_id \
                         and str(meta_info.imdb_id) == str(match_media.imdb_id):
                     # IMDBID匹配，合并媒体数据
+                    record_deferred_parse_result(
+                        meta_info, torrent_name, "indexer", "media_cache_hit",
+                        "indexer_imdb_match",
+                        {"imdb_id": meta_info.imdb_id, "tmdb_id": match_media.tmdb_id,
+                         "indexer": self.index_type},
+                        business_status="reused", overall_status="success")
                     media_info = self.media.merge_media_info(meta_info, match_media)
                 else:
                     # 查询缓存
@@ -311,24 +347,48 @@ class _IIndexClient(metaclass=ABCMeta):
                     if match_media \
                             and str(cache_info.get("id")) == str(match_media.tmdb_id):
                         # 缓存匹配，合并媒体数据
+                        record_deferred_parse_result(
+                            meta_info, torrent_name, "indexer", "media_cache_hit",
+                            "indexer_media_cache_match",
+                            {"cache_entity_id": cache_info.get("id"),
+                             "cache_entity_type": cache_info.get("type"),
+                             "matched_tmdb_id": match_media.tmdb_id,
+                             "indexer": self.index_type},
+                            business_status="reused", overall_status="success")
                         media_info = self.media.merge_media_info(meta_info, match_media)
                     else:
                         # 重新识别
-                        media_info = self.media.get_media_info(title=torrent_name, subtitle=description, chinese=False)
+                        media_info = self.media.get_media_info(
+                            title=torrent_name, subtitle=description, chinese=False,
+                            pre_parsed=meta_info)
                         if not media_info:
                             log.warn(f"【{self.index_type}】{torrent_name} 识别媒体信息出错！")
                             index_error += 1
+                            record_business_short_circuit(
+                                torrent_name, "indexer", "indexer_resolution_failed",
+                                "indexer_media_info_unavailable",
+                                {"indexer": self.index_type}, business_status="error")
                             continue
                         elif not media_info.tmdb_info:
                             log.info(
                                 f"【{self.index_type}】{torrent_name} 识别为 {media_info.get_name()} 未匹配到媒体信息")
                             index_match_fail += 1
+                            annotate_business_short_circuit(
+                                media_info, "indexer_resolution_failed",
+                                "indexer_tmdb_no_result",
+                                {"parsed_name": media_info.get_name(),
+                                 "indexer": self.index_type}, business_status="error")
                             continue
                         # TMDBID是否匹配
                         if str(media_info.tmdb_id) != str(match_media.tmdb_id):
                             log.info(
                                 f"【{self.index_type}】{torrent_name} 识别为 {media_info.type.value} {media_info.get_title_string()} 不匹配")
                             index_match_fail += 1
+                            annotate_business_short_circuit(
+                                media_info, "prefilter_rejected", "indexer_tmdb_id_mismatch",
+                                {"recognized_tmdb_id": media_info.tmdb_id,
+                                 "matched_tmdb_id": match_media.tmdb_id,
+                                 "indexer": self.index_type})
                             continue
                         # 合并媒体数据
                         media_info = self.media.merge_media_info(media_info, match_media)
@@ -339,6 +399,11 @@ class _IIndexClient(metaclass=ABCMeta):
                         log.info(
                             f"【{self.index_type}】{torrent_name} 是 {media_info.type.value}，不是 {filter_args.get('type').value}")
                         index_rule_fail += 1
+                        annotate_business_short_circuit(
+                            media_info, "prefilter_rejected", "indexer_post_resolve_type_mismatch",
+                            {"expected_type": filter_args.get("type").value,
+                             "actual_type": media_info.type.value,
+                             "indexer": self.index_type})
                         continue
                 # 洗版
                 if match_media.over_edition:
@@ -347,6 +412,9 @@ class _IIndexClient(metaclass=ABCMeta):
                             and media_info.get_episode_list():
                         log.info(f"【{self.index_type}】{media_info.get_title_string()}{media_info.get_season_string()} "
                                  f"正在洗版，过滤掉季集不完整的资源：{torrent_name} {description}")
+                        annotate_business_short_circuit(
+                            media_info, "prefilter_rejected", "indexer_edition_incomplete",
+                            {"tmdb_id": media_info.tmdb_id, "indexer": self.index_type})
                         continue
                     # 检查优先级是否更好
                     if match_media.res_order \
@@ -357,6 +425,11 @@ class _IIndexClient(metaclass=ABCMeta):
                             f"当前资源优先级：{100 - int(res_order)}，"
                             f"跳过低优先级或同优先级资源：{torrent_name}"
                         )
+                        annotate_business_short_circuit(
+                            media_info, "prefilter_rejected", "indexer_edition_not_better",
+                            {"tmdb_id": media_info.tmdb_id,
+                             "current_order": match_media.res_order,
+                             "candidate_order": res_order, "indexer": self.index_type})
                         continue
             # 检查标题是否匹配季、集、年
             if not self.filter.is_torrent_match_sey(media_info,
@@ -366,6 +439,12 @@ class _IIndexClient(metaclass=ABCMeta):
                 log.info(
                     f"【{self.index_type}】{torrent_name} 识别为 {media_info.type.value} {media_info.get_title_string()} {media_info.get_season_episode_string()} 不匹配季/集/年份")
                 index_match_fail += 1
+                annotate_business_short_circuit(
+                    media_info, "prefilter_rejected", "indexer_season_episode_year_mismatch",
+                    {"expected_season": filter_args.get("season"),
+                     "expected_episode": filter_args.get("episode"),
+                     "expected_year": filter_args.get("year"),
+                     "indexer": self.index_type})
                 continue
 
             # 匹配到了
@@ -388,6 +467,9 @@ class _IIndexClient(metaclass=ABCMeta):
                 ret_array.append(media_info)
             else:
                 index_rule_fail += 1
+                annotate_business_short_circuit(
+                    media_info, "prefilter_rejected", "indexer_duplicate_result",
+                    {"indexer": self.index_type}, business_status="reused")
         # 循环结束
         # 计算耗时
         end_time = datetime.datetime.now()

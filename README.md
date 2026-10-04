@@ -59,7 +59,7 @@ nohup uv run python run.py &
 
 * 申请消息通知服务
   1) 微信（推荐）：在 https://work.weixin.qq.com/ 申请企业微信自建应用，获得企业ID、自建应用secret、agentid， 微信扫描自建应用二维码可实现在微信中使用消息服务，无需打开企业微信
-  2) Telegram（推荐）：关注BotFather申请机器人获取token，关注getuserID拿到chat_id。该渠道支持远程控制，详情参考："5、配置微信/Telegram/Slack/Synology Chat远程控制"。
+  2) Telegram（推荐）：关注BotFather申请机器人获取token，关注getuserID拿到chat_id。该渠道支持远程控制，详情参考："5、配置微信/Telegram/Slack远程控制"。
   3) Slack：在 https://api.slack.com/apps 申请应用，该渠道支持远程控制，详情参考频道说明。
   4) Synology Chat：在群晖中安装Synology Chat套件，点击Chat界面"右上角头像->整合->机器人"创建机器人，"传出URL"设置为："NAStool地址/synology"，"传入URL"及"令牌"填入到NAStool消息服务设置中，该渠道支持远程控制。
   5) 其它：仍然会持续增加对通知渠道的支持，API KEY获取方式类似，不一一说明。
@@ -78,7 +78,7 @@ nohup uv run python run.py &
   5) RustFS只针对S3/云原生场景，**注意，使用RustFS，媒体库应当设置为/bucket名/类别名**，例如,bucket的名字叫cloud,电影的分类文件夹名叫movie，则媒体库电影路径为：/cloud/movie,最好母集用s3fs挂载到/cloud/movie，只读就行。使用前请以运行NASTool的用户配置`NASTOOL`别名，例如：`rc alias set NASTOOL http://RustFS地址:9000 access_key secret_key`。
 
 
-* 启动程序并配置：Docker默认使用3000端口启动（群晖套件默认3003端口），默认用户密码：admin/password（docker需要参考教程提前映射好端口、下载目录、媒体库目录）。登录管理界面后，在设置中根据每个配置项的提示在WEB页面修改好配置并重启生效（基础设置中有标红星的是必须要配置的，如TMDB APIKEY等），每一个配置项后都有小问号，点击会有详细的配置说明，推荐阅读。
+* 启动程序并配置：Docker默认使用3000端口启动，默认用户密码：admin/password（docker需要参考教程提前映射好端口、下载目录、媒体库目录）。登录管理界面后，在设置中根据每个配置项的提示在WEB页面修改好配置（基础设置中有标红星的是必须要配置的，如TMDB APIKEY等），每一个配置项后都有小问号，点击会有详细的配置说明，推荐阅读。需要重启生效的配置，请通过运行进程或容器管理工具重启。
 
 ### 3、设置媒体库服务器
 支持 Emby、Jellyfin、Plex，设置媒体服务器后可以对本地资源进行判重避免重复下载，同时能标识本地已存在的资源：

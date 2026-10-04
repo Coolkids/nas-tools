@@ -6,32 +6,15 @@ import warnings
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
-from version import APP_VERSION
-
 warnings.filterwarnings('ignore')
 
-# 运行环境判断
-is_windows_exe = getattr(sys, 'frozen', False) and (os.name == "nt")
+# Windows 打包版使用可执行文件旁的配置目录；托盘界面已移除。
+is_windows_exe = getattr(sys, 'frozen', False) and os.name == "nt"
 if is_windows_exe:
-    # 托盘相关库
-    import threading
-    from windows.trayicon import TrayIcon, NullWriter
-
-    # 初始化环境变量
-    os.environ["NASTOOL_CONFIG"] = os.path.join(os.path.dirname(sys.executable),
-                                                "config",
-                                                "config.yaml").replace("\\", "/")
-    os.environ["NASTOOL_LOG"] = os.path.join(os.path.dirname(sys.executable),
-                                             "config",
-                                             "logs").replace("\\", "/")
-    os.environ["NASTOOL_VERSION"] = APP_VERSION
-    try:
-        config_dir = os.path.join(os.path.dirname(sys.executable),
-                                  "config").replace("\\", "/")
-        if not os.path.exists(config_dir):
-            os.makedirs(config_dir)
-    except Exception as err:
-        print(str(err))
+    config_dir = os.path.join(os.path.dirname(sys.executable), "config").replace("\\", "/")
+    os.environ["NASTOOL_CONFIG"] = os.path.join(config_dir, "config.yaml")
+    os.environ["NASTOOL_LOG"] = os.path.join(config_dir, "logs")
+    os.makedirs(config_dir, exist_ok=True)
 
 from config import Config
 import log
@@ -39,8 +22,7 @@ from web.main import App
 from app.utils import SystemUtils, ConfigLoadCache
 from app.utils.commons import INSTANCES
 from app.db import init_db, update_db, init_data
-from app.helper import IndexerHelper, DisplayHelper, ChromeHelper
-from app.brushtask import BrushTask
+from app.helper import DisplayHelper, ChromeHelper
 from app.rsschecker import RssChecker
 from app.scheduler import run_scheduler, restart_scheduler
 from app.sync import run_monitor, restart_monitor
@@ -128,16 +110,12 @@ def start_service():
     run_scheduler()
     # 启动监控服务
     run_monitor()
-    # 启动刷流服务
-    BrushTask()
     # 启动自定义订阅服务
     RssChecker()
     # 启动自动删种服务
     TorrentRemover()
     # 启动播放限速服务
     SpeedLimiter()
-    # 加载索引器配置
-    IndexerHelper()
     # 初始化浏览器
     if not is_windows_exe:
         ChromeHelper().init_driver()
@@ -190,24 +168,5 @@ monitor_config()
 
 # 本地运行
 if __name__ == '__main__':
-    # Windows启动托盘
-    if is_windows_exe:
-        homepage = Config().get_config('app').get('domain')
-        if not homepage:
-            homepage = "http://localhost:%s" % str(Config().get_config('app').get('web_port'))
-        log_path = os.environ.get("NASTOOL_LOG")
-
-        sys.stdout = NullWriter()
-        sys.stderr = NullWriter()
-
-
-        def traystart():
-            TrayIcon(homepage, log_path)
-
-
-        if len(os.popen("tasklist| findstr %s" % os.path.basename(sys.executable), 'r').read().splitlines()) <= 2:
-            p1 = threading.Thread(target=traystart, daemon=True)
-            p1.start()
-
     # gunicorn 启动
     App.run(**get_run_config())

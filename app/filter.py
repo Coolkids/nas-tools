@@ -245,17 +245,11 @@ class Filter:
                 return False
         return True
 
-    def check_torrent_filter(self,
-                             meta_info,
-                             filter_args,
-                             uploadvolumefactor=None,
-                             downloadvolumefactor=None):
+    def check_torrent_filter(self, meta_info, filter_args):
         """
         对种子进行过滤
         :param meta_info: 名称识别后的MetaBase对象
         :param filter_args: 过滤条件的字典
-        :param uploadvolumefactor: 种子的上传因子 传空不过滤
-        :param downloadvolumefactor: 种子的下载因子 传空不过滤
         :return: 是否匹配，匹配的优先值，匹配信息，值越大越优先
         """
         # 过滤质量
@@ -285,13 +279,6 @@ class Filter:
                     meta_info.resource_team = resource_team
             elif not re.search(r"%s" % team, meta_info.resource_team, re.I):
                 return False, 0, f"{meta_info.org_string} {meta_info.resource_team} 不符合制作组/字幕组 {team} 要求"
-        # 过滤促销
-        if filter_args.get("sp_state"):
-            ul_factor, dl_factor = filter_args.get("sp_state").split()
-            if uploadvolumefactor and ul_factor not in ("*", str(uploadvolumefactor)):
-                return False, 0, f"{meta_info.org_string} 不符合促销要求"
-            if downloadvolumefactor and dl_factor not in ("*", str(downloadvolumefactor)):
-                return False, 0, f"{meta_info.org_string} 不符合促销要求"
         # 过滤包含
         if filter_args.get("include"):
             include = filter_args.get("include")

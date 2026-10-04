@@ -11,10 +11,6 @@ class SystemConfig:
     systemconfig = {
         # 默认下载设置
         "DefaultDownloadSetting": None,
-        # CookieCloud的设置
-        "CookieCloud": {},
-        # 自动获取Cookie的用户信息
-        "CookieUserInfo": {},
         # 用户自定义CSS/JavsScript
         "CustomScript": {},
         # 播放限速设置

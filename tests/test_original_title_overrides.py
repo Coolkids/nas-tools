@@ -102,3 +102,31 @@ class OriginalTitleOverridesTest(TestCase):
         override_action = next(action for action in record["actions"]
                                if action["action_type"] == "resolution_overrides")
         self.assertEqual(2022, override_action["input"]["year"])
+
+    def test_original_title_resolve_reuses_supplied_local_parse(self):
+        media = object.__new__(Media)
+        media.tmdb = object()
+        parsed = FakeMetaInfo("Local parser title")
+        resolved = FakeMetaInfo("Requested show")
+        config = {
+            "recognition": {"providers": {"anitopy_ml": {
+                "enabled": True, "endpoint": "http://ai.local"}}},
+            "laboratory": {"ai_inference": True, "ai_inference_url": "http://ai.local"},
+        }
+        database = Mock()
+        database.insert_recognition_record.side_effect = lambda record: record["request_id"]
+        with patch("app.media.media.recognition_config",
+                   side_effect=lambda section=None: config.get(section, config)), \
+                patch.object(media, "_Media__recognition_provider_enabled", return_value=True), \
+                patch.object(media, "_Media__has_additional_recognizer", return_value=False), \
+                patch.object(media, "_Media__get_media_info_with_providers",
+                             return_value=resolved) as resolve, \
+                patch.object(media, "_Media__meta_snapshot", return_value={"name": "Requested show"}), \
+                patch.object(media, "_Media__json_safe", side_effect=lambda value: value), \
+                patch("app.media.recognition.records._write_spool", return_value=None), \
+                patch("app.helper.db_helper.DbHelper", return_value=database):
+            result = media.get_media_info_original_title(
+                title="Requested show S01", name="Requested show", pre_parsed=parsed)
+
+        self.assertIs(resolved, result)
+        self.assertIs(parsed, resolve.call_args.kwargs["pre_parsed"])

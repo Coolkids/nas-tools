@@ -10,7 +10,6 @@ from app.media import Media, DouBan
 from app.media.meta import MetaInfo
 from app.message import Message
 from app.searcher import Searcher
-from app.sites import Sites
 from app.indexer import Indexer
 from app.utils import Torrent
 from app.utils.types import MediaType, SearchType
@@ -26,7 +25,6 @@ class Subscribe:
     message = None
     media = None
     downloader = None
-    sites = None
     douban = None
     filter = None
 
@@ -37,7 +35,6 @@ class Subscribe:
         self.message = Message()
         self.media = Media()
         self.downloader = Downloader()
-        self.sites = Sites()
         self.douban = DouBan()
         self.indexer = Indexer()
         self.filter = Filter()
@@ -47,7 +44,6 @@ class Subscribe:
                           season=None,
                           fuzzy_match=False,
                           mediaid=None,
-                          rss_sites=None,
                           search_sites=None,
                           over_edition=False,
                           filter_restype=None,
@@ -59,7 +55,8 @@ class Subscribe:
                           total_ep=None,
                           current_ep=None,
                           state="D",
-                          rssid=None):
+                          rssid=None,
+                          pre_parsed=None):
         """
         添加电影、电视剧订阅
         :param mtype: 类型，电影、电视剧、动漫
@@ -69,8 +66,7 @@ class Subscribe:
         :param season: 第几季，数字
         :param fuzzy_match: 是否模糊匹配
         :param mediaid: 媒体ID，DB:/BG:/TMDBID
-        :param rss_sites: 订阅站点列表，为空则表示全部站点
-        :param search_sites: 搜索站点列表，为空则表示全部站点
+        :param search_sites: 索引器列表，为空则表示全部索引器
         :param over_edition: 是否选版
         :param filter_restype: 质量过滤
         :param filter_pix: 分辨率过滤
@@ -87,7 +83,6 @@ class Subscribe:
         if not name:
             return -1, "标题或类型有误", None
         year = int(year) if str(year).isdigit() else ""
-        rss_sites = rss_sites or []
         search_sites = search_sites or []
         over_edition = 1 if over_edition else 0
         filter_rule = int(filter_rule) if str(filter_rule).isdigit() else None
@@ -113,7 +108,8 @@ class Subscribe:
                                                     season=season,
                                                     mtype=mtype,
                                                     strict=True if year else False,
-                                                    cache=False)
+                                                    cache=False,
+                                                    pre_parsed=pre_parsed)
             # 检查TMDB信息
             if not media_info or not media_info.tmdb_info:
                 return 1, "无法TMDB查询到媒体信息", None
@@ -153,7 +149,6 @@ class Subscribe:
                                                    total=total,
                                                    lack=lack,
                                                    state=state,
-                                                   rss_sites=rss_sites,
                                                    search_sites=search_sites,
                                                    over_edition=over_edition,
                                                    filter_restype=filter_restype,
@@ -174,7 +169,6 @@ class Subscribe:
                     self.dbhelper.delete_rss_movie(rssid=rssid)
                 code = self.dbhelper.insert_rss_movie(media_info=media_info,
                                                       state=state,
-                                                      rss_sites=rss_sites,
                                                       search_sites=search_sites,
                                                       over_edition=over_edition,
                                                       filter_restype=filter_restype,
@@ -189,7 +183,8 @@ class Subscribe:
                                                       keyword=keyword)
         else:
             # 模糊匹配
-            media_info = MetaInfo(title=name, mtype=mtype)
+            media_info = MetaInfo(title=name, mtype=mtype, include_ai=False,
+                                  ai_skip_reason="subscription_fuzzy_match")
             media_info.title = name
             media_info.type = mtype
             if season:
@@ -199,7 +194,6 @@ class Subscribe:
                     self.dbhelper.delete_rss_movie(rssid=rssid)
                 code = self.dbhelper.insert_rss_movie(media_info=media_info,
                                                       state="R",
-                                                      rss_sites=rss_sites,
                                                       search_sites=search_sites,
                                                       over_edition=over_edition,
                                                       filter_restype=filter_restype,
@@ -217,7 +211,6 @@ class Subscribe:
                                                    total=0,
                                                    lack=0,
                                                    state="R",
-                                                   rss_sites=rss_sites,
                                                    search_sites=search_sites,
                                                    over_edition=over_edition,
                                                    filter_restype=filter_restype,
@@ -298,13 +291,11 @@ class Subscribe:
         """
         ret_dict = {}
         rss_movies = self.dbhelper.get_rss_movies(rssid=rid, state=state)
-        rss_sites_valid = self.sites.get_site_names(rss=True)
         search_sites_valid = self.indexer.get_indexer_names()
         for rss_movie in rss_movies:
             desc = rss_movie.DESC
             note = rss_movie.NOTE
             tmdbid = rss_movie.TMDBID
-            rss_sites = json.loads(rss_movie.RSS_SITES) if rss_movie.RSS_SITES else []
             search_sites = json.loads(rss_movie.SEARCH_SITES) if rss_movie.SEARCH_SITES else []
             over_edition = True if rss_movie.OVER_EDITION == 1 else False
             filter_restype = rss_movie.FILTER_RESTYPE
@@ -318,7 +309,6 @@ class Subscribe:
             # 兼容旧配置
             if desc and desc.find('{') != -1:
                 desc = self.__parse_rss_desc(desc)
-                rss_sites = desc.get("rss_sites")
                 search_sites = desc.get("search_sites")
                 over_edition = True if desc.get("over_edition") == 'Y' else False
                 filter_restype = desc.get("restype")
@@ -332,7 +322,6 @@ class Subscribe:
                 note_info = self.__parse_rss_desc(note)
             else:
                 note_info = {}
-            rss_sites = [site for site in rss_sites if site in rss_sites_valid]
             search_sites = [site for site in search_sites if site in search_sites_valid]
             ret_dict[str(rss_movie.ID)] = {
                 "id": rss_movie.ID,
@@ -341,7 +330,6 @@ class Subscribe:
                 "tmdbid": rss_movie.TMDBID,
                 "image": rss_movie.IMAGE,
                 "overview": rss_movie.DESC,
-                "rss_sites": rss_sites,
                 "search_sites": search_sites,
                 "over_edition": over_edition,
                 "filter_restype": filter_restype,
@@ -363,13 +351,11 @@ class Subscribe:
     def get_subscribe_tvs(self, rid=None, state=None):
         ret_dict = {}
         rss_tvs = self.dbhelper.get_rss_tvs(rssid=rid, state=state)
-        rss_sites_valid = self.sites.get_site_names(rss=True)
         search_sites_valid = self.indexer.get_indexer_names()
         for rss_tv in rss_tvs:
             desc = rss_tv.DESC
             note = rss_tv.NOTE
             tmdbid = rss_tv.TMDBID
-            rss_sites = json.loads(rss_tv.RSS_SITES) if rss_tv.RSS_SITES else []
             search_sites = json.loads(rss_tv.SEARCH_SITES) if rss_tv.SEARCH_SITES else []
             over_edition = True if rss_tv.OVER_EDITION == 1 else False
             filter_restype = rss_tv.FILTER_RESTYPE
@@ -385,7 +371,6 @@ class Subscribe:
             # 兼容旧配置
             if desc and desc.find('{') != -1:
                 desc = self.__parse_rss_desc(desc)
-                rss_sites = desc.get("rss_sites")
                 search_sites = desc.get("search_sites")
                 over_edition = True if desc.get("over_edition") == 'Y' else False
                 filter_restype = desc.get("restype")
@@ -401,7 +386,6 @@ class Subscribe:
                 note_info = self.__parse_rss_desc(note)
             else:
                 note_info = {}
-            rss_sites = [site for site in rss_sites if site in rss_sites_valid]
             search_sites = [site for site in search_sites if site in search_sites_valid]
             ret_dict[str(rss_tv.ID)] = {
                 "id": rss_tv.ID,
@@ -411,7 +395,6 @@ class Subscribe:
                 "tmdbid": rss_tv.TMDBID,
                 "image": rss_tv.IMAGE,
                 "overview": rss_tv.DESC,
-                "rss_sites": rss_sites,
                 "search_sites": search_sites,
                 "over_edition": over_edition,
                 "filter_restype": filter_restype,
@@ -545,7 +528,8 @@ class Subscribe:
         综合返回媒体信息
         """
         if tmdbid and not str(tmdbid).startswith("DB:"):
-            media_info = MetaInfo(title="%s %s".strip() % (name, year))
+            media_info = MetaInfo(title="%s %s".strip() % (name, year),
+                                  include_ai=False, record=False)
             tmdb_info = self.media.get_tmdb_info(mtype=mtype, tmdbid=tmdbid)
             media_info.set_tmdb_info(tmdb_info)
         else:

@@ -216,7 +216,7 @@ class FileTransfer:
             log.debug("【Rmt】%s 目录下没有找到字幕文件..." % dir_name)
         else:
             log.debug("【Rmt】字幕文件清单：" + str(file_list))
-            metainfo = MetaInfo(title=file_name)
+            metainfo = MetaInfo(title=file_name, include_ai=False, record=False)
             for file_item in file_list:
                 sub_file_name = re.sub(_zhtw_sub_re,
                                        ".",
@@ -226,7 +226,7 @@ class FileTransfer:
                                               flags=re.I),
                                        flags=re.I)
                 sub_file_name = re.sub(_eng_sub_re, ".", sub_file_name, flags=re.I)
-                sub_metainfo = MetaInfo(title=os.path.basename(file_item))
+                sub_metainfo = MetaInfo(title=os.path.basename(file_item), include_ai=False, record=False)
                 if (os.path.splitext(file_name)[0] == os.path.splitext(sub_file_name)[0]) or \
                         (sub_metainfo.cn_name and sub_metainfo.cn_name == metainfo.cn_name) \
                         or (sub_metainfo.en_name and sub_metainfo.en_name == metainfo.en_name):
@@ -1097,7 +1097,7 @@ class FileTransfer:
                     continue
                 files = PathUtils.get_dir_files(dest_path, RMT_MEDIAEXT)
                 for file in files:
-                    file_meta_info = MetaInfo(os.path.basename(file))
+                    file_meta_info = MetaInfo(os.path.basename(file), include_ai=False, record=False)
                     if not file_meta_info.get_season_list() or not file_meta_info.get_episode_list():
                         continue
                     if file_meta_info.get_name() != meta_info.title:
@@ -1290,7 +1290,7 @@ class FileTransfer:
             rssid = self.dbhelper.get_rss_movie_id(title=title, year=year, tmdbid=tmdbid)
         else:
             if not tmdbid:
-                meta_info = MetaInfo(title=title)
+                meta_info = MetaInfo(title=title, include_ai=False, record=False)
                 title = meta_info.get_name()
                 season = meta_info.get_season_string()
                 if season:

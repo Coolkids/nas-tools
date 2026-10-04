@@ -43,7 +43,7 @@ class RecognitionTimeoutTest(TestCase):
                     "decision": {"strategy": "legacy", "shadow": {"enabled": False}},
                 }
             if section == "laboratory":
-                return {"ai_inference": True, "ai_inference_url": "http://ai.local"}
+                return {"ai_inference": False, "ai_inference_url": ""}
             return {}
 
         media = Media.__new__(Media)

@@ -1,9 +1,7 @@
 from flask import Blueprint, request
 from flask_restx import Api, reqparse, Resource
 
-from app.brushtask import BrushTask
 from app.rsschecker import RssChecker
-from app.sites import Sites
 from app.utils import TokenCache
 from config import Config
 from web.action import WebAction
@@ -27,7 +25,7 @@ Apiv1 = Api(apiv1_bp,
 user = Apiv1.namespace('user', description='用户')
 system = Apiv1.namespace('system', description='系统')
 config = Apiv1.namespace('config', description='设置')
-site = Apiv1.namespace('site', description='站点')
+indexer = Apiv1.namespace('indexer', description='索引器')
 service = Apiv1.namespace('service', description='服务')
 subscribe = Apiv1.namespace('subscribe', description='订阅')
 rss = Apiv1.namespace('rss', description='自定义RSS')
@@ -37,7 +35,6 @@ download = Apiv1.namespace('download', description='下载')
 organization = Apiv1.namespace('organization', description='整理')
 torrentremover = Apiv1.namespace('torrentremover', description='自动删种')
 library = Apiv1.namespace('library', description='媒体库')
-brushtask = Apiv1.namespace('brushtask', description='刷流')
 media = Apiv1.namespace('media', description='媒体')
 sync = Apiv1.namespace('sync', description='目录同步')
 filterrule = Apiv1.namespace('filterrule', description='过滤规则')
@@ -220,7 +217,7 @@ class ServiceNetworkTest(ClientResource):
 class ServiceRun(ClientResource):
     parser = reqparse.RequestParser()
     parser.add_argument('item', type=str,
-                        help='服务名称（autoremovetorrents、pttransfer、ptsignin、sync、rssdownload、douban、subscribe_search_all）',
+                        help='服务名称（autoremovetorrents、pttransfer、sync、douban、subscribe_search_all）',
                         location='form',
                         required=True)
 
@@ -232,201 +229,13 @@ class ServiceRun(ClientResource):
         return WebAction().api_action(cmd='sch', data=self.parser.parse_args())
 
 
-@site.route('/statistics')
-class SiteStatistic(ApiResource):
-    @staticmethod
-    def get():
-        """
-        获取站点数据明细（密钥认证）
-        """
-        # 返回站点信息
-        return {
-            "code": 0,
-            "success": True,
-            "data": {
-                "user_statistics": WebAction().get_site_user_statistics({"encoding": "DICT"}).get("data")
-            }
-        }
-
-
-@site.route('/sites')
-class SiteSites(ApiResource):
-    @staticmethod
-    def get():
-        """
-        获取所有站点配置（密钥认证）
-        """
-        return {
-            "code": 0,
-            "success": True,
-            "data": {
-                "user_sites": Sites().get_sites()
-            }
-        }
-
-
-@site.route('/update')
-class SiteUpdate(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('site_name', type=str, help='站点名称', location='form', required=True)
-    parser.add_argument('site_id', type=int, help='更新站点ID', location='form')
-    parser.add_argument('site_pri', type=str, help='优先级', location='form')
-    parser.add_argument('site_rssurl', type=str, help='RSS地址', location='form')
-    parser.add_argument('site_signurl', type=str, help='站点地址', location='form')
-    parser.add_argument('site_cookie', type=str, help='Cookie', location='form')
-    parser.add_argument('site_note', type=str, help='站点属性', location='form')
-    parser.add_argument('site_include', type=str, help='站点用途', location='form')
-
-    @site.doc(parser=parser)
-    def post(self):
-        """
-        新增/删除站点
-        """
-        return WebAction().api_action(cmd='update_site', data=self.parser.parse_args())
-
-
-@site.route('/info')
-class SiteInfo(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('id', type=int, help='站点ID', location='form', required=True)
-
-    @site.doc(parser=parser)
-    def post(self):
-        """
-        查询单个站点详情
-        """
-        return WebAction().api_action(cmd='get_site', data=self.parser.parse_args())
-
-
-@site.route('/favicon')
-class SiteFavicon(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('name', type=str, help='站点名称', location='form', required=True)
-
-    @site.doc(parser=parser)
-    def post(self):
-        """
-        获取站点图标(Base64)
-        """
-        return WebAction().api_action(cmd='get_site_favicon', data=self.parser.parse_args())
-
-
-@site.route('/test')
-class SiteTest(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('id', type=int, help='站点ID', location='form', required=True)
-
-    @site.doc(parser=parser)
-    def post(self):
-        """
-        测试站点连通性
-        """
-        return WebAction().api_action(cmd='test_site', data=self.parser.parse_args())
-
-
-@site.route('/delete')
-class SiteDelete(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('id', type=int, help='站点ID', location='form', required=True)
-
-    @site.doc(parser=parser)
-    def post(self):
-        """
-        删除站点
-        """
-        return WebAction().api_action(cmd='del_site', data=self.parser.parse_args())
-
-
-@site.route('/statistics/activity')
-class SiteStatisticsActivity(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('name', type=str, help='站点名称', location='form', required=True)
-
-    @site.doc(parser=parser)
-    def post(self):
-        """
-        查询站点 上传/下载/做种数据
-        """
-        return WebAction().api_action(cmd='get_site_activity', data=self.parser.parse_args())
-
-
-@site.route('/check')
-class SiteCheck(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('url', type=str, help='站点地址', location='form', required=True)
-
-    @site.doc(parser=parser)
-    def post(self):
-        """
-        检查站点是否支持FREE/HR检测
-        """
-        return WebAction().api_action(cmd='check_site_attr', data=self.parser.parse_args())
-
-
-@site.route('/statistics/history')
-class SiteStatisticsHistory(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('days', type=int, help='时间范围（天）', location='form', required=True)
-
-    @site.doc(parser=parser)
-    def post(self):
-        """
-        查询所有站点历史数据
-        """
-        return WebAction().api_action(cmd='get_site_history', data=self.parser.parse_args())
-
-
-@site.route('/statistics/seedinfo')
-class SiteStatisticsSeedinfo(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('name', type=str, help='站点名称', location='form', required=True)
-
-    @site.doc(parser=parser)
-    def post(self):
-        """
-        查询站点做种分布
-        """
-        return WebAction().api_action(cmd='get_site_seeding_info', data=self.parser.parse_args())
-
-
-@site.route('/resources')
-class SiteResources(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('id', type=str, help='站点索引ID', location='form', required=True)
-    parser.add_argument('page', type=int, help='页码', location='form')
-    parser.add_argument('keyword', type=str, help='站点名称', location='form')
-
-    @site.doc(parser=parser)
-    def post(self):
-        """
-        查询站点资源列表
-        """
-        return WebAction().api_action(cmd='list_site_resources', data=self.parser.parse_args())
-
-
-@site.route('/list')
-class SiteList(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('basic', type=int, help='只查询基本信息（0-否/1-是）', location='form')
-    parser.add_argument('rss', type=int, help='订阅（0-否/1-是）', location='form')
-    parser.add_argument('brush', type=int, help='刷流（0-否/1-是）', location='form')
-    parser.add_argument('signin', type=int, help='签到（0-否/1-是）', location='form')
-    parser.add_argument('statistic', type=int, help='数据统计（0-否/1-是）', location='form')
-
-    def post(self):
-        """
-        查询站点列表
-        """
-        return WebAction().api_action(cmd='get_sites', data=self.parser.parse_args())
-
-
-@site.route('/indexers')
-class SiteIndexers(ClientResource):
+@indexer.route('/list')
+class IndexerList(ClientResource):
 
     @staticmethod
     def post():
         """
-        查询站点索引列表
+        查询索引器列表
         """
         return WebAction().api_action(cmd='get_indexers')
 
@@ -884,17 +693,6 @@ class SystemPath(ClientResource):
         return WebAction().api_action(cmd='get_sub_path', data=self.parser.parse_args())
 
 
-@system.route('/restart')
-class SystemRestart(ClientResource):
-
-    @staticmethod
-    def post():
-        """
-        重启
-        """
-        return WebAction().api_action(cmd='restart')
-
-
 @system.route('/update')
 class SystemUpdate(ClientResource):
 
@@ -1046,8 +844,7 @@ class SubscribeAdd(ClientResource):
     parser.add_argument('rssid', type=int, help='已有订阅ID', location='form')
     parser.add_argument('mediaid', type=str, help='TMDBID/DB:豆瓣ID', location='form')
     parser.add_argument('fuzzy_match', type=int, help='模糊匹配（0-否/1-是）', location='form')
-    parser.add_argument('rss_sites', type=list, help='RSS站点', location='form')
-    parser.add_argument('search_sites', type=list, help='搜索站点', location='form')
+    parser.add_argument('search_sites', type=list, help='索引器', location='form')
     parser.add_argument('over_edition', type=int, help='洗版（0-否/1-是）', location='form')
     parser.add_argument('filter_restype', type=str, help='资源类型', location='form')
     parser.add_argument('filter_pix', type=str, help='分辨率', location='form')
@@ -1566,175 +1363,6 @@ class MediaSubtitleDownload(ClientResource):
         下载单个文件字幕
         """
         return WebAction().api_action(cmd='download_subtitle', data=self.parser.parse_args())
-
-
-@brushtask.route('/update')
-class BrushTaskUpdate(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('brushtask_id', type=str, help='刷流任务ID', location='form')
-    parser.add_argument('brushtask_name', type=str, help='任务名称', location='form', required=True)
-    parser.add_argument('brushtask_site', type=int, help='站点', location='form', required=True)
-    parser.add_argument('brushtask_interval', type=int, help='刷新间隔(分钟)', location='form', required=True)
-    parser.add_argument('brushtask_downloader', type=int, help='下载器', location='form', required=True)
-    parser.add_argument('brushtask_totalsize', type=int, help='保种体积(GB)', location='form', required=True)
-    parser.add_argument('brushtask_state', type=str, help='状态（Y/N）', location='form', required=True)
-    parser.add_argument('brushtask_transfer', type=str, help='转移到媒体库（Y/N）', location='form')
-    parser.add_argument('brushtask_sendmessage', type=str, help='消息推送（Y/N）', location='form')
-    parser.add_argument('brushtask_forceupload', type=str, help='强制做种（Y/N）', location='form')
-    parser.add_argument('brushtask_free', type=str, help='促销（FREE/2XFREE）', location='form')
-    parser.add_argument('brushtask_hr', type=str, help='Hit&Run（HR）', location='form')
-    parser.add_argument('brushtask_torrent_size', type=int, help='种子大小(GB)', location='form')
-    parser.add_argument('brushtask_include', type=str, help='包含', location='form')
-    parser.add_argument('brushtask_exclude', type=str, help='排除', location='form')
-    parser.add_argument('brushtask_dlcount', type=int, help='同时下载任务数', location='form')
-    parser.add_argument('brushtask_peercount', type=int, help='做种人数限制', location='form')
-    parser.add_argument('brushtask_seedtime', type=float, help='做种时间(小时)', location='form')
-    parser.add_argument('brushtask_seedratio', type=float, help='分享率', location='form')
-    parser.add_argument('brushtask_seedsize', type=int, help='上传量(GB)', location='form')
-    parser.add_argument('brushtask_dltime', type=float, help='下载耗时(小时)', location='form')
-    parser.add_argument('brushtask_avg_upspeed', type=int, help='平均上传速度(KB/S)', location='form')
-    parser.add_argument('brushtask_iatime', type=float, help='未活动时间(小时)', location='form')
-    parser.add_argument('brushtask_pubdate', type=int, help='发布时间（小时）', location='form')
-    parser.add_argument('brushtask_upspeed', type=int, help='上传限速（KB/S）', location='form')
-    parser.add_argument('brushtask_downspeed', type=int, help='下载限速（KB/S）', location='form')
-
-    @brushtask.doc(parser=parser)
-    def post(self):
-        """
-        新增/修改刷流任务
-        """
-        return WebAction().api_action(cmd='add_brushtask', data=self.parser.parse_args())
-
-
-@brushtask.route('/delete')
-class BrushTaskDelete(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('id', type=str, help='刷流任务ID', location='form', required=True)
-
-    @brushtask.doc(parser=parser)
-    def post(self):
-        """
-        删除刷流任务
-        """
-        return WebAction().api_action(cmd='del_brushtask', data=self.parser.parse_args())
-
-
-@brushtask.route('/info')
-class BrushTaskInfo(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('id', type=str, help='刷流任务ID', location='form', required=True)
-
-    @brushtask.doc(parser=parser)
-    def post(self):
-        """
-        刷流任务详情
-        """
-        return WebAction().api_action(cmd='brushtask_detail', data=self.parser.parse_args())
-
-
-@brushtask.route('/list')
-class BrushTaskList(ClientResource):
-    @staticmethod
-    def post():
-        """
-        查询所有刷流任务
-        """
-        return {
-            "code": 0,
-            "success": True,
-            "data": {
-                "tasks": BrushTask().get_brushtask_info()
-            }
-        }
-
-
-@brushtask.route('/torrents')
-class BrushTaskTorrents(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('id', type=str, help='刷流任务ID', location='form', required=True)
-
-    @brushtask.doc(parser=parser)
-    def post(self):
-        """
-        查询刷流任务种子明细
-        """
-        return WebAction().api_action(cmd='list_brushtask_torrents', data=self.parser.parse_args())
-
-
-@brushtask.route('/downloader/update')
-class BrushTaskDownloaderUpdate(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('test', type=int, help='测试（0-否/1-是）', location='form', required=True)
-    parser.add_argument('id', type=int, help='下载器ID', location='form')
-    parser.add_argument('name', type=str, help='名称', location='form', required=True)
-    parser.add_argument('type', type=str, help='类型（qbittorrent/transmission）', location='form', required=True)
-    parser.add_argument('host', type=str, help='地址', location='form', required=True)
-    parser.add_argument('port', type=int, help='端口', location='form', required=True)
-    parser.add_argument('username', type=str, help='用户名', location='form')
-    parser.add_argument('password', type=str, help='密码', location='form')
-    parser.add_argument('save_dir', type=str, help='保存目录', location='form')
-
-    @brushtask.doc(parser=parser)
-    def post(self):
-        """
-        新增/修改刷流下载器
-        """
-        return WebAction().api_action(cmd='add_downloader', data=self.parser.parse_args())
-
-
-@brushtask.route('/downloader/delete')
-class BrushTaskDownloaderDelete(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('id', type=int, help='下载器ID', location='form', required=True)
-
-    @brushtask.doc(parser=parser)
-    def post(self):
-        """
-        删除刷流下载器
-        """
-        return WebAction().api_action(cmd='delete_downloader', data=self.parser.parse_args())
-
-
-@brushtask.route('/downloader/info')
-class BrushTaskDownloaderInfo(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('id', type=int, help='下载器ID', location='form', required=True)
-
-    @brushtask.doc(parser=parser)
-    def post(self):
-        """
-        刷流下载器详情
-        """
-        return WebAction().api_action(cmd='get_downloader', data=self.parser.parse_args())
-
-
-@brushtask.route('/downloader/list')
-class BrushTaskDownloaderList(ClientResource):
-    @staticmethod
-    def post():
-        """
-        查询所有刷流下载器
-        """
-        return {
-            "code": 0,
-            "success": True,
-            "data": {
-                "downloaders": BrushTask().get_downloader_info()
-            }
-        }
-
-
-@brushtask.route('/run')
-class BrushTaskRun(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('id', type=int, help='刷流任务ID', location='form', required=True)
-
-    @brushtask.doc(parser=parser)
-    def post(self):
-        """
-        刷流下载器详情
-        """
-        return WebAction().api_action(cmd='run_brushtask', data=self.parser.parse_args())
 
 
 @filterrule.route('/list')

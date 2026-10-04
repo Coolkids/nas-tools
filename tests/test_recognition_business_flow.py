@@ -88,8 +88,13 @@ class RecognitionBusinessFlowTest(TestCase):
         self.assertEqual("success", record["overall_result"]["status"])
         self.assertEqual(481, record["overall_result"]["tmdb_result"]["id"])
         self.assertEqual("Example Show", record["overall_result"]["parsed_result"]["name"])
-        self.assertEqual("success", record["provider_results"][0]["status"])
-        self.assertEqual("local_rules", record["provider_results"][0]["provider_id"])
+        ai_attempt = next(item for item in record["provider_results"]
+                          if item["provider_id"] == "anitopy_ml")
+        self.assertEqual("skipped", ai_attempt["status"])
+        self.assertEqual("ai_inference_disabled", ai_attempt["error"])
+        local_attempt = next(item for item in record["provider_results"]
+                             if item["provider_id"] == "local_rules")
+        self.assertEqual("success", local_attempt["status"])
         self.assertEqual("success", record["tmdb_results"][0]["status"])
         self.assertEqual("Example Show", record["tmdb_results"][0]["result"]["name"])
         self.assertIn("preprocess", [action["action_type"] for action in record["actions"]])

@@ -19,6 +19,7 @@ class AnitopyMlRecognizer(MediaNameRecognizer):
         display_name="anitopy-ml",
         evidence_family="ml_model",
         config_schema={"endpoint": {"type": "string"}},
+        network_required=True,
     )
 
     def __init__(self, endpoint=None, timeout=10):
@@ -35,8 +36,12 @@ class AnitopyMlRecognizer(MediaNameRecognizer):
         if not url.endswith("/v1/parse"):
             url = f"{url}/v1/parse"
         try:
+            timeout = self.timeout
+            remaining = request.context.get("remaining_timeout_seconds")
+            if remaining is not None:
+                timeout = max(min(float(timeout), float(remaining)), 0.001)
             response = RequestUtils(
-                timeout=self.timeout,
+                timeout=timeout,
                 headers={"Content-Type": "application/json", "User-Agent": Config().get_ua()},
             ).post_res(url=url, json={"title": request.title})
             if not response or response.status_code != 200:

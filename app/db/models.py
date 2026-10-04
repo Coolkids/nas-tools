@@ -41,21 +41,6 @@ class CONFIGRSSPARSER(Base):
     SYSDEF = Column(Text)
 
 
-class CONFIGSITE(Base):
-    __tablename__ = 'CONFIG_SITE'
-
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
-    NAME = Column(Text)
-    PRI = Column(Text)
-    RSSURL = Column(Text)
-    SIGNURL = Column(Text)
-    COOKIE = Column(Text)
-    INCLUDE = Column(Text)
-    EXCLUDE = Column(Text)
-    SIZE = Column(Text)
-    NOTE = Column(Text)
-
-
 class CONFIGSYNCPATHS(Base):
     __tablename__ = 'CONFIG_SYNC_PATHS'
 
@@ -233,7 +218,6 @@ class RSSMOVIES(Base):
     KEYWORD = Column(Text)
     TMDBID = Column(Text)
     IMAGE = Column(Text)
-    RSS_SITES = Column(Text)
     SEARCH_SITES = Column(Text)
     OVER_EDITION = Column(Integer)
     FILTER_ORDER = Column(Integer)
@@ -279,7 +263,6 @@ class RSSTVS(Base):
     SEASON = Column(Text)
     TMDBID = Column(Text)
     IMAGE = Column(Text)
-    RSS_SITES = Column(Text)
     SEARCH_SITES = Column(Text)
     OVER_EDITION = Column(Integer)
     FILTER_ORDER = Column(Integer)
@@ -418,130 +401,6 @@ class RECOGNITIONATTEMPT(Base):
     TMDB_RESULTS = Column(Text)
     ERROR = Column(Text)
     ELAPSED_MS = Column(Integer)
-
-
-class SITEBRUSHDOWNLOADERS(Base):
-    __tablename__ = 'SITE_BRUSH_DOWNLOADERS'
-
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
-    NAME = Column(Text)
-    TYPE = Column(Text)
-    HOST = Column(Text)
-    PORT = Column(Text)
-    USERNAME = Column(Text)
-    PASSWORD = Column(Text)
-    SAVE_DIR = Column(Text)
-    NOTE = Column(Text)
-
-    def as_dict(self):
-        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
-
-
-class SITEBRUSHTASK(Base):
-    __tablename__ = 'SITE_BRUSH_TASK'
-
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
-    NAME = Column(Text, index=True)
-    SITE = Column(Text)
-    FREELEECH = Column(Text)
-    RSS_RULE = Column(Text)
-    REMOVE_RULE = Column(Text)
-    SEED_SIZE = Column(Text)
-    INTEVAL = Column(Text)
-    DOWNLOADER = Column(Text)
-    TRANSFER = Column(Text)
-    DOWNLOAD_COUNT = Column(Text)
-    REMOVE_COUNT = Column(Text)
-    DOWNLOAD_SIZE = Column(Text)
-    UPLOAD_SIZE = Column(Text)
-    SENDMESSAGE = Column(Text)
-    FORCEUPLOAD = Column(Text)
-    STATE = Column(Text)
-    LST_MOD_DATE = Column(Text)
-
-
-class SITEBRUSHTORRENTS(Base):
-    __tablename__ = 'SITE_BRUSH_TORRENTS'
-    __table_args__ = (
-        Index('UN_INDX_SITE_BRUSH_TORRENTS_TASK_NAME_ENCLOSURE',
-              'TASK_ID', 'TORRENT_NAME', 'ENCLOSURE', unique=True),
-        Index('INDX_SITE_BRUSH_TORRENTS_TASK_DOWNLOAD',
-              'TASK_ID', 'DOWNLOAD_ID'),
-    )
-
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
-    TASK_ID = Column(Text, index=True)
-    TORRENT_NAME = Column(Text)
-    TORRENT_SIZE = Column(Text)
-    ENCLOSURE = Column(Text)
-    DOWNLOADER = Column(Text)
-    DOWNLOAD_ID = Column(Text)
-    LST_MOD_DATE = Column(Text)
-
-    def as_dict(self):
-        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
-
-
-class SITESTATISTICSHISTORY(Base):
-    __tablename__ = 'SITE_STATISTICS_HISTORY'
-    __table_args__ = (
-        Index('UN_INDX_SITE_STATISTICS_HISTORY_DS', 'DATE', 'URL', unique=True),
-    )
-
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
-    SITE = Column(Text)
-    DATE = Column(Text)
-    USER_LEVEL = Column(Text)
-    UPLOAD = Column(Text)
-    DOWNLOAD = Column(Text)
-    RATIO = Column(Text)
-    SEEDING = Column(Integer, server_default=text("0"))
-    LEECHING = Column(Integer, server_default=text("0"))
-    SEEDING_SIZE = Column(Integer, server_default=text("0"))
-    BONUS = Column(Float, server_default=text("0.0"))
-    URL = Column(Text)
-
-
-class SITEUSERINFOSTATS(Base):
-    __tablename__ = 'SITE_USER_INFO_STATS'
-    __table_args__ = (
-        Index('INDX_SITE_USER_INFO_STATS_URL', 'URL'),
-    )
-
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
-    SITE = Column(Text, index=True)
-    USERNAME = Column(Text)
-    USER_LEVEL = Column(Text)
-    JOIN_AT = Column(Text)
-    UPDATE_AT = Column(Text)
-    UPLOAD = Column(Integer)
-    DOWNLOAD = Column(Integer)
-    RATIO = Column(Float)
-    SEEDING = Column(Integer)
-    LEECHING = Column(Integer)
-    SEEDING_SIZE = Column(Integer)
-    BONUS = Column(Float)
-    URL = Column(Text, unique=True)
-    MSG_UNREAD = Column(Integer)
-    EXT_INFO = Column(Text)
-
-
-class SITEFAVICON(Base):
-    __tablename__ = 'SITE_FAVICON'
-
-    SITE = Column(Text, primary_key=True)
-    URL = Column(Text)
-    FAVICON = Column(Text)
-
-
-class SITEUSERSEEDINGINFO(Base):
-    __tablename__ = 'SITE_USER_SEEDING_INFO'
-
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
-    SITE = Column(Text, index=True)
-    SEEDING_INFO = Column(Text, server_default=text("'[]'"))
-    UPDATE_AT = Column(Text)
-    URL = Column(Text, unique=True)
 
 
 class SYNCHISTORY(Base):

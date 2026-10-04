@@ -4,7 +4,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import log
 from app.conf import ModuleConf
 from app.helper import ProgressHelper, SubmoduleHelper
-from app.indexer.client import BuiltinIndexer
 from app.utils import ExceptionUtils, StringUtils
 from app.utils.commons import singleton
 from app.utils.types import SearchType, IndexerType
@@ -28,9 +27,11 @@ class Indexer(object):
 
     def init_config(self):
         self.progress = ProgressHelper()
-        self._client_type = ModuleConf.INDEXER_DICT.get(
-            Config().get_config("pt").get('search_indexer') or 'builtin'
-        )
+        configured_indexer = Config().get_config("pt").get('search_indexer') or 'jackett'
+        self._client_type = ModuleConf.INDEXER_DICT.get(configured_indexer)
+        if not self._client_type:
+            log.error("配置的索引器类型 %s 不受支持，默认使用 Jackett" % configured_indexer)
+            self._client_type = ModuleConf.INDEXER_DICT.get('jackett')
         self._client = self.__get_client(self._client_type)
 
     def __build_class(self, ctype, conf):
@@ -61,42 +62,11 @@ class Indexer(object):
             } for index in self.get_indexers()
         ]
 
-    def get_indexer_hash_dict(self):
-        """
-        获取索引器Hash字典
-        """
-        IndexerDict = {}
-        for item in self.get_indexers() or []:
-            IndexerDict[StringUtils.md5_hash(item.name)] = {
-                "id": item.id,
-                "name": item.name,
-                "public": item.public,
-                "builtin": item.builtin
-            }
-        return IndexerDict
-
     def get_indexer_names(self):
         """
         获取当前索引器的索引站点名称
         """
         return [indexer.name for indexer in self.get_indexers()]
-
-    @staticmethod
-    def get_builtin_indexers(check=True, public=True, indexer_id=None):
-        """
-        获取内置索引器的索引站点
-        """
-        return BuiltinIndexer().get_indexers(check=check, public=public, indexer_id=indexer_id)
-
-    @staticmethod
-    def list_builtin_resources(index_id, page=0, keyword=None):
-        """
-        获取内置索引器的资源列表
-        :param index_id: 内置站点ID
-        :param page: 页码
-        :param keyword: 搜索关键字
-        """
-        return BuiltinIndexer().list(index_id=index_id, page=page, keyword=keyword)
 
     def __get_client(self, ctype: IndexerType, conf=None):
         return self.__build_class(ctype=ctype.value, conf=conf)
@@ -122,8 +92,7 @@ class Indexer(object):
         根据关键字调用 Index API 检索
         :param key_word: 检索的关键字，不能为空
         :param filter_args: 过滤条件，对应属性为空则不过滤，{"season":季, "episode":集, "year":年, "type":类型, "site":站点,
-                            "":, "restype":质量, "pix":分辨率, "sp_state":促销状态, "key":其它关键字}
-                            sp_state: 为UL DL，* 代表不关心，
+                            "restype":质量, "pix":分辨率, "key":其它关键字}
         :param match_media: 需要匹配的媒体信息
         :param in_from: 搜索渠道
         :return: 命中的资源媒体信息列表

@@ -4,6 +4,7 @@ import os.path
 import tempfile
 import time
 import json
+import uuid
 from enum import Enum
 from sqlalchemy import cast, func, or_, and_
 
@@ -47,6 +48,7 @@ class DbHelper:
             "overall_result": {
                 "status": overall.get("status"),
                 "reason": overall.get("reason"),
+                "business_result": overall.get("business_result"),
                 "selected_provider": overall.get("selected_provider"),
                 "elapsed_ms": overall.get("elapsed_ms"),
                 "tmdb_result": tmdb_identity(overall.get("tmdb_result")),
@@ -267,6 +269,71 @@ class DbHelper:
         self._db.insert_many(RECOGNITIONATTEMPT, attempts)
         return request_id
 
+    @DbPersist(_db)
+    def append_recognition_business_action(self, request_id, action_type, reason,
+                                           details=None, business_status="skipped"):
+        """Append a late business-branch decision to its original parse record."""
+        request = self._db.query(RECOGNITIONREQUEST).filter(
+            RECOGNITIONREQUEST.REQUEST_ID == request_id).first()
+        if not request:
+            return False
+
+        def load_json(value, fallback):
+            try:
+                parsed = json.loads(value) if value else fallback
+                return parsed if isinstance(parsed, type(fallback)) else fallback
+            except (TypeError, json.JSONDecodeError):
+                return fallback
+
+        actions = load_json(request.ACTIONS, [])
+        attempts = load_json(request.PROVIDER_RESULTS, [])
+        overall = load_json(request.OVERALL_RESULT, {})
+        ai_attempt = next((item for item in reversed(attempts)
+                           if item.get("provider_id") == "anitopy_ml"
+                           and item.get("status") == "skipped"), None)
+        update_ai_error = bool(ai_attempt and str(ai_attempt.get("error") or "")
+                               .startswith("ai_deferred"))
+        sequence = max((int(item.get("sequence", 0)) for item in actions
+                        if isinstance(item, dict)), default=0) + 1
+        action = {
+            "action_id": f"{request_id}:{sequence}",
+            "sequence": sequence,
+            "action_type": action_type,
+            "provider_id": "anitopy_ml",
+            "attempt_id": ai_attempt.get("attempt_id") if ai_attempt else None,
+            "status": business_status,
+            "input": {},
+            "output": details or {},
+            "reason": reason,
+            "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
+        }
+        actions.append(action)
+        if update_ai_error:
+            ai_attempt["error"] = reason
+        overall["business_result"] = {
+            "status": business_status,
+            "reason": reason,
+            "details": details or {},
+        }
+        payload = {
+            "overall_result": overall,
+            "provider_results": attempts,
+            "tmdb_results": load_json(request.TMDB_RESULTS, []),
+            "actions": actions,
+        }
+        request.ACTIONS = self._json_dumps(actions)
+        request.PROVIDER_RESULTS = self._json_dumps(attempts)
+        request.OVERALL_RESULT = self._json_dumps(overall)
+        request.SUMMARY = self._json_dumps(self.recognition_summary(payload))
+
+        if update_ai_error:
+            attempt_row = self._db.query(RECOGNITIONATTEMPT).filter(
+                RECOGNITIONATTEMPT.REQUEST_ID == request_id,
+                RECOGNITIONATTEMPT.ATTEMPT_ID == ai_attempt.get("attempt_id")).first()
+            if attempt_row:
+                attempt_row.ERROR = reason
+        return True
+
     def get_recognition_records(self, title=None, source=None, status=None,
                                 provider_id=None, action_type=None, reason=None,
                                 created_from=None, created_to=None,
@@ -318,6 +385,35 @@ class DbHelper:
         attempts = self._db.query(RECOGNITIONATTEMPT).filter(
             RECOGNITIONATTEMPT.REQUEST_ID == request_id).order_by(RECOGNITIONATTEMPT.ID.asc()).all()
         return request, attempts
+
+    @DbPersist(_db)
+    def delete_expired_recognition_records(self, retention_days, now=None, batch_size=500):
+        """删除超过保留期限的识别请求及其解析器明细，跳过仍在运行的请求。"""
+        retention_days = int(retention_days)
+        if not 1 <= retention_days <= 36500:
+            raise ValueError("识别记录保留天数必须介于 1 和 36500 之间")
+        batch_size = min(max(int(batch_size or 500), 1), 2000)
+        now = now or datetime.datetime.now()
+        older_than = (now - datetime.timedelta(days=retention_days)).strftime(
+            "%Y-%m-%d %H:%M:%S.%f")
+        deleted_count = 0
+        while True:
+            request_ids = [row[0] for row in self._db.query(
+                RECOGNITIONREQUEST.REQUEST_ID).filter(
+                    RECOGNITIONREQUEST.CREATED_AT < older_than,
+                    or_(RECOGNITIONREQUEST.OVERALL_RESULT.is_(None),
+                        RECOGNITIONREQUEST.OVERALL_RESULT.notlike('%"status"%running%'))
+                ).order_by(RECOGNITIONREQUEST.CREATED_AT.asc(),
+                           RECOGNITIONREQUEST.REQUEST_ID.asc()).limit(batch_size).all()]
+            if not request_ids:
+                break
+            self._db.query(RECOGNITIONATTEMPT).filter(
+                RECOGNITIONATTEMPT.REQUEST_ID.in_(request_ids)).delete(
+                    synchronize_session=False)
+            deleted_count += self._db.query(RECOGNITIONREQUEST).filter(
+                RECOGNITIONREQUEST.REQUEST_ID.in_(request_ids)).delete(
+                    synchronize_session=False)
+        return deleted_count
 
     def archive_recognition_records(self, older_than, archive_path, delete_archived=False,
                                     batch_size=250):
@@ -866,104 +962,6 @@ class DbHelper:
         """
         self._db.query(RSSTVEPISODES).delete()
 
-    def get_config_site(self, ):
-        """
-        查询所有站点信息
-        """
-        return self._db.query(CONFIGSITE).order_by(cast(CONFIGSITE.PRI, Integer).asc())
-
-    def get_site_by_id(self, tid):
-        """
-        查询1个站点信息
-        """
-        return self._db.query(CONFIGSITE).filter(CONFIGSITE.ID == int(tid)).all()
-
-    def get_site_by_name(self, name):
-        """
-        基于站点名称查询站点信息
-        :return:
-        """
-        return self._db.query(CONFIGSITE).filter(CONFIGSITE.NAME == name).all()
-
-    @DbPersist(_db)
-    def insert_config_site(self, name, site_pri, rssurl, signurl, cookie, note, rss_uses):
-        """
-        插入站点信息
-        """
-        if not name:
-            return
-        self._db.insert(CONFIGSITE(
-            NAME=name,
-            PRI=site_pri,
-            RSSURL=rssurl,
-            SIGNURL=signurl,
-            COOKIE=cookie,
-            NOTE=note,
-            INCLUDE=rss_uses
-        ))
-
-    @DbPersist(_db)
-    def delete_config_site(self, tid):
-        """
-        删除站点信息
-        """
-        if not tid:
-            return
-        self._db.query(CONFIGSITE).filter(CONFIGSITE.ID == int(tid)).delete()
-
-    @DbPersist(_db)
-    def update_config_site(self, tid, name, site_pri, rssurl, signurl, cookie, note, rss_uses):
-        """
-        更新站点信息
-        """
-        if not tid:
-            return
-        self._db.query(CONFIGSITE).filter(CONFIGSITE.ID == int(tid)).update(
-            {
-                "NAME": name,
-                "PRI": site_pri,
-                "RSSURL": rssurl,
-                "SIGNURL": signurl,
-                "COOKIE": cookie,
-                "NOTE": note,
-                "INCLUDE": rss_uses
-            }
-        )
-
-    @DbPersist(_db)
-    def update_config_site_note(self, tid, note):
-        """
-        更新站点属性
-        """
-        if not tid:
-            return
-        self._db.query(CONFIGSITE).filter(CONFIGSITE.ID == int(tid)).update(
-            {
-                "NOTE": note
-            }
-        )
-
-    @DbPersist(_db)
-    def update_site_cookie_ua(self, tid, cookie, ua=None):
-        """
-        更新站点Cookie和ua
-        """
-        if not tid:
-            return
-        rec = self._db.query(CONFIGSITE).filter(CONFIGSITE.ID == int(tid)).first()
-        if rec.NOTE:
-            note = json.loads(rec.NOTE)
-            if ua:
-                note['ua'] = ua
-        else:
-            note = {}
-        self._db.query(CONFIGSITE).filter(CONFIGSITE.ID == int(tid)).update(
-            {
-                "COOKIE": cookie,
-                "NOTE": json.dumps(note)
-            }
-        )
-
     def get_config_filter_group(self, gid=None):
         """
         查询过滤规则组
@@ -1022,17 +1020,6 @@ class DbHelper:
                 return items[0].ID
         else:
             return ""
-
-    def get_rss_movie_sites(self, rssid):
-        """
-        获取订阅电影站点
-        """
-        if not rssid:
-            return ""
-        ret = self._db.query(RSSMOVIES.DESC).filter(RSSMOVIES.ID == int(rssid)).first()
-        if ret:
-            return ret[0]
-        return ""
 
     @DbPersist(_db)
     def update_rss_movie_tmdb(self, rid, tmdbid, title, year, image, desc, note):
@@ -1102,7 +1089,6 @@ class DbHelper:
     @DbPersist(_db)
     def insert_rss_movie(self, media_info,
                          state='D',
-                         rss_sites=None,
                          search_sites=None,
                          over_edition=0,
                          filter_restype=None,
@@ -1120,8 +1106,6 @@ class DbHelper:
         """
         if search_sites is None:
             search_sites = []
-        if rss_sites is None:
-            rss_sites = []
         if not media_info:
             return -1
         if not media_info.title:
@@ -1133,7 +1117,6 @@ class DbHelper:
             YEAR=media_info.year,
             TMDBID=media_info.tmdb_id,
             IMAGE=media_info.get_message_image(),
-            RSS_SITES=json.dumps(rss_sites),
             SEARCH_SITES=json.dumps(search_sites),
             OVER_EDITION=over_edition,
             FILTER_RESTYPE=filter_restype,
@@ -1232,17 +1215,6 @@ class DbHelper:
         else:
             return ""
 
-    def get_rss_tv_sites(self, rssid):
-        """
-        获取订阅电视剧站点
-        """
-        if not rssid:
-            return ""
-        ret = self._db.query(RSSTVS).filter(RSSTVS.ID == int(rssid)).first()
-        if ret:
-            return ret
-        return ""
-
     @DbPersist(_db)
     def update_rss_tv_tmdb(self, rid, tmdbid, title, year, total, lack, image, desc, note):
         """
@@ -1298,7 +1270,6 @@ class DbHelper:
                       total,
                       lack=0,
                       state="D",
-                      rss_sites=None,
                       search_sites=None,
                       over_edition=0,
                       filter_restype=None,
@@ -1318,8 +1289,6 @@ class DbHelper:
         """
         if search_sites is None:
             search_sites = []
-        if rss_sites is None:
-            rss_sites = []
         if not media_info:
             return -1
         if not media_info.title:
@@ -1336,7 +1305,6 @@ class DbHelper:
             SEASON=season_str,
             TMDBID=media_info.tmdb_id,
             IMAGE=media_info.get_message_image(),
-            RSS_SITES=json.dumps(rss_sites),
             SEARCH_SITES=json.dumps(search_sites),
             OVER_EDITION=over_edition,
             FILTER_RESTYPE=filter_restype,
@@ -1573,346 +1541,6 @@ class DbHelper:
             func.substr(TRANSFERHISTORY.DATE, 1, 10)
         ).order_by(TRANSFERHISTORY.DATE).all()
 
-    @DbPersist(_db)
-    def update_site_user_statistics_site_name(self, new_name, old_name):
-        """
-        更新站点用户数据中站点名称
-        """
-        self._db.query(SITEUSERINFOSTATS).filter(SITEUSERINFOSTATS.SITE == old_name).update(
-            {
-                "SITE": new_name
-            }
-        )
-
-    @DbPersist(_db)
-    def update_site_user_statistics(self, site_user_infos: list):
-        """
-        更新站点用户粒度数据
-        """
-        if not site_user_infos:
-            return
-        update_at = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))
-        for site_user_info in site_user_infos:
-            site = site_user_info.site_name
-            username = site_user_info.username
-            user_level = site_user_info.user_level
-            join_at = site_user_info.join_at
-            upload = site_user_info.upload
-            download = site_user_info.download
-            ratio = site_user_info.ratio
-            seeding = site_user_info.seeding
-            seeding_size = site_user_info.seeding_size
-            leeching = site_user_info.leeching
-            bonus = site_user_info.bonus
-            url = site_user_info.site_url
-            msg_unread = site_user_info.message_unread
-            if not self.is_exists_site_user_statistics(url):
-                self._db.insert(SITEUSERINFOSTATS(
-                    SITE=site,
-                    USERNAME=username,
-                    USER_LEVEL=user_level,
-                    JOIN_AT=join_at,
-                    UPDATE_AT=update_at,
-                    UPLOAD=upload,
-                    DOWNLOAD=download,
-                    RATIO=ratio,
-                    SEEDING=seeding,
-                    LEECHING=leeching,
-                    SEEDING_SIZE=seeding_size,
-                    BONUS=bonus,
-                    URL=url,
-                    MSG_UNREAD=msg_unread
-                ))
-            else:
-                self._db.query(SITEUSERINFOSTATS).filter(SITEUSERINFOSTATS.URL == url).update(
-                    {
-                        "SITE": site,
-                        "USERNAME": username,
-                        "USER_LEVEL": user_level,
-                        "JOIN_AT": join_at,
-                        "UPDATE_AT": update_at,
-                        "UPLOAD": upload,
-                        "DOWNLOAD": download,
-                        "RATIO": ratio,
-                        "SEEDING": seeding,
-                        "LEECHING": leeching,
-                        "SEEDING_SIZE": seeding_size,
-                        "BONUS": bonus,
-                        "MSG_UNREAD": msg_unread
-                    }
-                )
-
-    def is_exists_site_user_statistics(self, url):
-        """
-        判断站点数据是滞存在
-        """
-        count = self._db.query(SITEUSERINFOSTATS).filter(SITEUSERINFOSTATS.URL == url).count()
-        if count > 0:
-            return True
-        else:
-            return False
-
-    @DbPersist(_db)
-    def update_site_favicon(self, site_user_infos: list):
-        """
-        更新站点图标数据
-        """
-        if not site_user_infos:
-            return
-        for site_user_info in site_user_infos:
-            site_icon = "data:image/ico;base64," + \
-                        site_user_info.site_favicon if site_user_info.site_favicon else site_user_info.site_url \
-                                                                                        + "/favicon.ico"
-            if not self.is_exists_site_favicon(site_user_info.site_name):
-                self._db.insert(SITEFAVICON(
-                    SITE=site_user_info.site_name,
-                    URL=site_user_info.site_url,
-                    FAVICON=site_icon
-                ))
-            elif site_user_info.site_favicon:
-                self._db.query(SITEFAVICON).filter(SITEFAVICON.SITE == site_user_info.site_name).update(
-                    {
-                        "URL": site_user_info.site_url,
-                        "FAVICON": site_icon
-                    }
-                )
-
-    def is_exists_site_favicon(self, site):
-        """
-        判断站点图标是否存在
-        """
-        count = self._db.query(SITEFAVICON).filter(SITEFAVICON.SITE == site).count()
-        if count > 0:
-            return True
-        else:
-            return False
-
-    def get_site_favicons(self, site=None):
-        """
-        查询站点数据历史
-        """
-        if site:
-            return self._db.query(SITEFAVICON).filter(SITEFAVICON.SITE == site).all()
-        else:
-            return self._db.query(SITEFAVICON).all()
-
-    @DbPersist(_db)
-    def update_site_seed_info_site_name(self, new_name, old_name):
-        """
-        更新站点做种数据中站点名称
-        :param new_name: 新的站点名称
-        :param old_name: 原始站点名称
-        :return:
-        """
-        self._db.query(SITEUSERSEEDINGINFO).filter(SITEUSERSEEDINGINFO.SITE == old_name).update(
-            {
-                "SITE": new_name
-            }
-        )
-
-    @DbPersist(_db)
-    def update_site_seed_info(self, site_user_infos: list):
-        """
-        更新站点做种数据
-        """
-        if not site_user_infos:
-            return
-        update_at = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))
-        for site_user_info in site_user_infos:
-            if not self.is_site_seeding_info_exist(url=site_user_info.site_url):
-                self._db.insert(SITEUSERSEEDINGINFO(
-                    SITE=site_user_info.site_name,
-                    UPDATE_AT=update_at,
-                    SEEDING_INFO=site_user_info.seeding_info,
-                    URL=site_user_info.site_url
-                ))
-            else:
-                self._db.query(SITEUSERSEEDINGINFO).filter(SITEUSERSEEDINGINFO.URL == site_user_info.site_url).update(
-                    {
-                        "SITE": site_user_info.site_name,
-                        "UPDATE_AT": update_at,
-                        "SEEDING_INFO": site_user_info.seeding_info
-                    }
-                )
-
-    def is_site_user_statistics_exists(self, url):
-        """
-        判断站点用户数据是否存在
-        """
-        if not url:
-            return False
-        count = self._db.query(SITEUSERINFOSTATS).filter(SITEUSERINFOSTATS.URL == url).count()
-        if count > 0:
-            return True
-        else:
-            return False
-
-    def get_site_user_statistics(self, num=100, strict_urls=None):
-        """
-        查询站点数据历史
-        """
-        if strict_urls:
-            # 根据站点优先级排序
-            return self._db.query(SITEUSERINFOSTATS) \
-                .join(CONFIGSITE, SITEUSERINFOSTATS.SITE == CONFIGSITE.NAME) \
-                .filter(SITEUSERINFOSTATS.URL.in_(tuple(strict_urls + ["__DUMMY__"]))) \
-                .order_by(cast(CONFIGSITE.PRI, Integer).asc()).limit(num).all()
-        else:
-            return self._db.query(SITEUSERINFOSTATS).limit(num).all()
-
-    def is_site_statistics_history_exists(self, url, date):
-        """
-        判断站点历史数据是否存在
-        """
-        if not url or not date:
-            return False
-        count = self._db.query(SITESTATISTICSHISTORY).filter(SITESTATISTICSHISTORY.URL == url,
-                                                             SITESTATISTICSHISTORY.DATE == date).count()
-        if count > 0:
-            return True
-        else:
-            return False
-
-    @DbPersist(_db)
-    def update_site_statistics_site_name(self, new_name, old_name):
-        """
-        更新站点做种数据中站点名称
-        :param new_name: 新站点名称
-        :param old_name: 原始站点名称
-        :return:
-        """
-        self._db.query(SITESTATISTICSHISTORY).filter(SITESTATISTICSHISTORY.SITE == old_name).update(
-            {
-                "SITE": new_name
-            }
-        )
-
-    @DbPersist(_db)
-    def insert_site_statistics_history(self, site_user_infos: list):
-        """
-        插入站点数据
-        """
-        if not site_user_infos:
-            return
-        date_now = time.strftime('%Y-%m-%d', time.localtime(time.time()))
-        rows = []
-        seen_urls = set()
-        for site_user_info in site_user_infos:
-            site = site_user_info.site_name
-            upload = site_user_info.upload
-            user_level = site_user_info.user_level
-            download = site_user_info.download
-            ratio = site_user_info.ratio
-            seeding = site_user_info.seeding
-            seeding_size = site_user_info.seeding_size
-            leeching = site_user_info.leeching
-            bonus = site_user_info.bonus
-            url = site_user_info.site_url
-            if not url or url in seen_urls:
-                continue
-            seen_urls.add(url)
-            rows.append({
-                "SITE": site, "USER_LEVEL": user_level, "DATE": date_now,
-                "UPLOAD": upload, "DOWNLOAD": download, "RATIO": ratio,
-                "SEEDING": seeding, "LEECHING": leeching,
-                "SEEDING_SIZE": seeding_size, "BONUS": bonus, "URL": url
-            })
-        self._db.upsert_many(
-            SITESTATISTICSHISTORY,
-            rows,
-            ("DATE", "URL"),
-            ("SITE", "USER_LEVEL", "UPLOAD", "DOWNLOAD", "RATIO", "SEEDING",
-             "LEECHING", "SEEDING_SIZE", "BONUS")
-        )
-
-    def get_site_statistics_history(self, site, days=30):
-        """
-        查询站点数据历史
-        """
-        return self._db.query(SITESTATISTICSHISTORY).filter(
-            SITESTATISTICSHISTORY.SITE == site).order_by(
-            SITESTATISTICSHISTORY.DATE.asc()
-        ).limit(days)
-
-    def get_site_seeding_info(self, site):
-        """
-        查询站点做种信息
-        """
-        return self._db.query(SITEUSERSEEDINGINFO.SEEDING_INFO).filter(
-            SITEUSERSEEDINGINFO.SITE == site).first()
-
-    def is_site_seeding_info_exist(self, url):
-        """
-        判断做种数据是否已存在
-        """
-        count = self._db.query(SITEUSERSEEDINGINFO).filter(
-            SITEUSERSEEDINGINFO.URL == url).count()
-        if count > 0:
-            return True
-        else:
-            return False
-
-    def get_site_statistics_recent_sites(self, days=7, strict_urls=None):
-        """
-        查询近期上传下载量
-        """
-        # 查询最大最小日期
-        if strict_urls is None:
-            strict_urls = []
-
-        b_date = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
-        date_ret = self._db.query(func.max(SITESTATISTICSHISTORY.DATE),
-                                  func.MIN(SITESTATISTICSHISTORY.DATE)).filter(
-            SITESTATISTICSHISTORY.DATE > b_date).all()
-        if date_ret and date_ret[0][0]:
-            total_upload = 0
-            total_download = 0
-            ret_site_uploads = []
-            ret_site_downloads = []
-            min_date = date_ret[0][1]
-            # 查询开始值
-            if strict_urls:
-                subquery = self._db.query(SITESTATISTICSHISTORY.SITE.label("SITE"),
-                                          SITESTATISTICSHISTORY.DATE.label("DATE"),
-                                          func.sum(SITESTATISTICSHISTORY.UPLOAD).label("UPLOAD"),
-                                          func.sum(SITESTATISTICSHISTORY.DOWNLOAD).label("DOWNLOAD")).filter(
-                    SITESTATISTICSHISTORY.DATE >= min_date,
-                    SITESTATISTICSHISTORY.URL.in_(tuple(strict_urls + ["__DUMMY__"]))).group_by(
-                    SITESTATISTICSHISTORY.SITE, SITESTATISTICSHISTORY.DATE).subquery()
-            else:
-                subquery = self._db.query(SITESTATISTICSHISTORY.SITE.label("SITE"),
-                                          SITESTATISTICSHISTORY.DATE.label("DATE"),
-                                          func.sum(SITESTATISTICSHISTORY.UPLOAD).label("UPLOAD"),
-                                          func.sum(SITESTATISTICSHISTORY.DOWNLOAD).label("DOWNLOAD")).filter(
-                    SITESTATISTICSHISTORY.DATE >= min_date).group_by(
-                    SITESTATISTICSHISTORY.SITE, SITESTATISTICSHISTORY.DATE).subquery()
-            rets = self._db.query(subquery.c.SITE,
-                                  func.min(subquery.c.UPLOAD),
-                                  func.min(subquery.c.DOWNLOAD),
-                                  func.max(subquery.c.UPLOAD),
-                                  func.max(subquery.c.DOWNLOAD)).group_by(subquery.c.SITE).all()
-            ret_sites = []
-            for ret_b in rets:
-                # 如果最小值都是0，可能时由于近几日没有更新数据，或者cookie过期，正常有数据的话，第二天能正常
-                ret_b = list(ret_b)
-                if ret_b[1] == 0 and ret_b[2] == 0:
-                    ret_b[1] = ret_b[3]
-                    ret_b[2] = ret_b[4]
-                ret_sites.append(ret_b[0])
-                if int(ret_b[1]) < int(ret_b[3]):
-                    total_upload += int(ret_b[3]) - int(ret_b[1])
-                    ret_site_uploads.append(int(ret_b[3]) - int(ret_b[1]))
-                else:
-                    ret_site_uploads.append(0)
-                if int(ret_b[2]) < int(ret_b[4]):
-                    total_download += int(ret_b[4]) - int(ret_b[2])
-                    ret_site_downloads.append(int(ret_b[4]) - int(ret_b[2]))
-                else:
-                    ret_site_downloads.append(0)
-            return total_upload, total_download, ret_sites, ret_site_uploads, ret_site_downloads
-        else:
-            return 0, 0, [], [], []
-
     def is_exists_download_history(self, title, tmdbid, mtype=None):
         """
         查询下载历史是否存在
@@ -1993,252 +1621,6 @@ class DbHelper:
             return True
         else:
             return False
-
-    @DbPersist(_db)
-    def insert_brushtask(self, brush_id, item):
-        """
-        新增刷流任务
-        """
-        if not brush_id:
-            self._db.insert(SITEBRUSHTASK(
-                NAME=item.get('name'),
-                SITE=item.get('site'),
-                FREELEECH=item.get('free'),
-                RSS_RULE=str(item.get('rss_rule')),
-                REMOVE_RULE=str(item.get('remove_rule')),
-                SEED_SIZE=item.get('seed_size'),
-                INTEVAL=item.get('interval'),
-                DOWNLOADER=item.get('downloader'),
-                TRANSFER=item.get('transfer'),
-                DOWNLOAD_COUNT='0',
-                REMOVE_COUNT='0',
-                DOWNLOAD_SIZE='0',
-                UPLOAD_SIZE='0',
-                STATE=item.get('state'),
-                LST_MOD_DATE=time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())),
-                SENDMESSAGE=item.get('sendmessage'),
-                FORCEUPLOAD=item.get('forceupload')
-            ))
-        else:
-            self._db.query(SITEBRUSHTASK).filter(SITEBRUSHTASK.ID == int(brush_id)).update(
-                {
-                    "NAME": item.get('name'),
-                    "SITE": item.get('site'),
-                    "FREELEECH": item.get('free'),
-                    "RSS_RULE": str(item.get('rss_rule')),
-                    "REMOVE_RULE": str(item.get('remove_rule')),
-                    "SEED_SIZE": item.get('seed_size'),
-                    "INTEVAL": item.get('interval'),
-                    "DOWNLOADER": item.get('downloader'),
-                    "TRANSFER": item.get('transfer'),
-                    "STATE": item.get('state'),
-                    "LST_MOD_DATE": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())),
-                    "SENDMESSAGE": item.get('sendmessage'),
-                    "FORCEUPLOAD": item.get('forceupload')
-                }
-            )
-
-    @DbPersist(_db)
-    def delete_brushtask(self, brush_id):
-        """
-        删除刷流任务
-        """
-        self._db.query(SITEBRUSHTASK).filter(SITEBRUSHTASK.ID == int(brush_id)).delete()
-        self._db.query(SITEBRUSHTORRENTS).filter(SITEBRUSHTORRENTS.TASK_ID == brush_id).delete()
-
-    def get_brushtasks(self, brush_id=None):
-        """
-        查询刷流任务
-        """
-        if brush_id:
-            return self._db.query(SITEBRUSHTASK).filter(SITEBRUSHTASK.ID == int(brush_id)).first()
-        else:
-            # 根据站点优先级排序
-            return self._db.query(SITEBRUSHTASK) \
-                .join(CONFIGSITE, SITEBRUSHTASK.SITE == CONFIGSITE.ID) \
-                .order_by(cast(CONFIGSITE.PRI, Integer).asc()).all()
-
-    def get_brushtask_totalsize(self, brush_id):
-        """
-        查询刷流任务总体积
-        """
-        if not brush_id:
-            return 0
-        ret = self._db.query(func.sum(cast(SITEBRUSHTORRENTS.TORRENT_SIZE,
-                                           Integer))).filter(SITEBRUSHTORRENTS.TASK_ID == brush_id,
-                                                             SITEBRUSHTORRENTS.DOWNLOAD_ID != '0').first()
-        if ret:
-            return ret[0] or 0
-        else:
-            return 0
-
-    @DbPersist(_db)
-    def add_brushtask_download_count(self, brush_id):
-        """
-        增加刷流下载数
-        """
-        if not brush_id:
-            return
-        self._db.query(SITEBRUSHTASK).filter(SITEBRUSHTASK.ID == int(brush_id)).update(
-            {
-                "DOWNLOAD_COUNT": SITEBRUSHTASK.DOWNLOAD_COUNT + 1,
-                "LST_MOD_DATE": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))
-            }
-        )
-
-    def get_brushtask_remove_size(self, brush_id):
-        """
-        获取已删除种子的上传量
-        """
-        if not brush_id:
-            return 0
-        return self._db.query(SITEBRUSHTORRENTS.TORRENT_SIZE).filter(SITEBRUSHTORRENTS.TASK_ID == brush_id,
-                                                                     SITEBRUSHTORRENTS.DOWNLOAD_ID == '0').all()
-
-    @DbPersist(_db)
-    def add_brushtask_upload_count(self, brush_id, upload_size, download_size, remove_count):
-        """
-        更新上传下载量和删除种子数
-        """
-        if not brush_id:
-            return
-        delete_upsize = 0
-        delete_dlsize = 0
-        remove_sizes = self.get_brushtask_remove_size(brush_id)
-        for remove_size in remove_sizes:
-            if not remove_size[0]:
-                continue
-            if str(remove_size[0]).find(",") != -1:
-                sizes = str(remove_size[0]).split(",")
-                delete_upsize += int(sizes[0] or 0)
-                if len(sizes) > 1:
-                    delete_dlsize += int(sizes[1] or 0)
-            else:
-                delete_upsize += int(remove_size[0])
-        self._db.query(SITEBRUSHTASK).filter(SITEBRUSHTASK.ID == int(brush_id)).update({
-            "REMOVE_COUNT": SITEBRUSHTASK.REMOVE_COUNT + remove_count,
-            "UPLOAD_SIZE": int(upload_size) + delete_upsize,
-            "DOWNLOAD_SIZE": int(download_size) + delete_dlsize,
-        })
-
-    @DbPersist(_db)
-    def insert_brushtask_torrent(self, brush_id, title, enclosure, downloader, download_id, size):
-        """
-        增加刷流下载的种子信息
-        """
-        if not brush_id:
-            return
-        self._db.upsert_many(SITEBRUSHTORRENTS, [{
-            "TASK_ID": brush_id,
-            "TORRENT_NAME": title,
-            "TORRENT_SIZE": size,
-            "ENCLOSURE": enclosure,
-            "DOWNLOADER": downloader,
-            "DOWNLOAD_ID": download_id,
-            "LST_MOD_DATE": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))
-        }], ("TASK_ID", "TORRENT_NAME", "ENCLOSURE"),
-            ("TORRENT_SIZE", "DOWNLOADER", "DOWNLOAD_ID", "LST_MOD_DATE"))
-
-    def get_brushtask_torrents(self, brush_id, active=True):
-        """
-        查询刷流任务所有种子
-        """
-        if not brush_id:
-            return []
-        if active:
-            return self._db.query(SITEBRUSHTORRENTS).filter(
-                SITEBRUSHTORRENTS.TASK_ID == int(brush_id),
-                SITEBRUSHTORRENTS.DOWNLOAD_ID != '0').all()
-        else:
-            return self._db.query(SITEBRUSHTORRENTS).filter(
-                SITEBRUSHTORRENTS.TASK_ID == int(brush_id)
-            ).order_by(SITEBRUSHTORRENTS.LST_MOD_DATE.desc()).all()
-
-    def is_brushtask_torrent_exists(self, brush_id, title, enclosure):
-        """
-        查询刷流任务种子是否已存在
-        """
-        if not brush_id:
-            return False
-        count = self._db.query(SITEBRUSHTORRENTS).filter(SITEBRUSHTORRENTS.TASK_ID == brush_id,
-                                                         SITEBRUSHTORRENTS.TORRENT_NAME == title,
-                                                         SITEBRUSHTORRENTS.ENCLOSURE == enclosure).count()
-        if count > 0:
-            return True
-        else:
-            return False
-
-    @DbPersist(_db)
-    def update_brushtask_torrent_state(self, ids: list):
-        """
-        更新刷流种子的状态
-        """
-        if not ids:
-            return
-        for _id in ids:
-            self._db.query(SITEBRUSHTORRENTS).filter(SITEBRUSHTORRENTS.TASK_ID == _id[1],
-                                                     SITEBRUSHTORRENTS.DOWNLOAD_ID == _id[2]).update(
-                {
-                    "TORRENT_SIZE": _id[0],
-                    "DOWNLOAD_ID": '0'
-                }
-            )
-
-    @DbPersist(_db)
-    def delete_brushtask_torrent(self, brush_id, download_id):
-        """
-        删除刷流种子记录
-        """
-        if not download_id or not brush_id:
-            return
-        self._db.query(SITEBRUSHTORRENTS).filter(SITEBRUSHTORRENTS.TASK_ID == brush_id,
-                                                 SITEBRUSHTORRENTS.DOWNLOAD_ID == download_id).delete()
-
-    def get_user_downloaders(self, did=None):
-        """
-        查询自定义下载器
-        """
-        if did:
-            return self._db.query(SITEBRUSHDOWNLOADERS).filter(SITEBRUSHDOWNLOADERS.ID == int(did)).first()
-        else:
-            return self._db.query(SITEBRUSHDOWNLOADERS).all()
-
-    @DbPersist(_db)
-    def update_user_downloader(self, did, name, dtype, user_config, note):
-        """
-        新增自定义下载器
-        """
-        if did:
-            self._db.query(SITEBRUSHDOWNLOADERS).filter(SITEBRUSHDOWNLOADERS.ID == int(did)).update(
-                {
-                    "NAME": name,
-                    "TYPE": dtype,
-                    "HOST": user_config.get("host"),
-                    "PORT": user_config.get("port"),
-                    "USERNAME": user_config.get("username"),
-                    "PASSWORD": user_config.get("password"),
-                    "SAVE_DIR": user_config.get("save_dir"),
-                    "NOTE": note
-                }
-            )
-        else:
-            self._db.insert(SITEBRUSHDOWNLOADERS(
-                NAME=name,
-                TYPE=dtype,
-                HOST=user_config.get("host"),
-                PORT=user_config.get("port"),
-                USERNAME=user_config.get("username"),
-                PASSWORD=user_config.get("password"),
-                SAVE_DIR=user_config.get("save_dir"),
-                NOTE=note
-            ))
-
-    @DbPersist(_db)
-    def delete_user_downloader(self, did):
-        """
-        删除自定义下载器
-        """
-        self._db.query(SITEBRUSHDOWNLOADERS).filter(SITEBRUSHDOWNLOADERS.ID == int(did)).delete()
 
     @DbPersist(_db)
     def add_filter_group(self, name, default='N'):
@@ -2362,7 +1744,7 @@ class DbHelper:
                     "DOWNLOAD_SETTING": item.get("download_setting"),
                     "RECOGNIZATION": item.get("recognization"),
                     "OVER_EDITION": int(item.get("over_edition")) if str(item.get("over_edition")).isdigit() else 0,
-                    "SITES": json.dumps(item.get("sites")),
+                    "SITES": json.dumps({"search_sites": (item.get("sites") or {}).get("search_sites", [])}),
                     "FILTER_ARGS": json.dumps(item.get("filter_args")),
                     "NOTE": ""
                 }
@@ -2383,7 +1765,7 @@ class DbHelper:
                 DOWNLOAD_SETTING=item.get("download_setting"),
                 RECOGNIZATION=item.get("recognization"),
                 OVER_EDITION=item.get("over_edition"),
-                SITES=json.dumps(item.get("sites")),
+                SITES=json.dumps({"search_sites": (item.get("sites") or {}).get("search_sites", [])}),
                 FILTER_ARGS=json.dumps(item.get("filter_args")),
                 PROCESS_COUNT='0'
             ))
@@ -2784,6 +2166,21 @@ class DbHelper:
         if cid:
             return self._db.query(MESSAGECLIENT).filter(MESSAGECLIENT.ID == int(cid)).all()
         return self._db.query(MESSAGECLIENT).order_by(MESSAGECLIENT.TYPE).all()
+
+    @DbPersist(_db)
+    def remove_message_client_switch(self, switch_name):
+        """从已保存的消息客户端中移除废弃的推送开关。"""
+        changed = 0
+        for client in self._db.query(MESSAGECLIENT).all():
+            try:
+                switchs = json.loads(client.SWITCHS) if client.SWITCHS else []
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(switchs, list) and switch_name in switchs:
+                client.SWITCHS = json.dumps(
+                    [item for item in switchs if item != switch_name], ensure_ascii=False)
+                changed += 1
+        return changed
 
     @DbPersist(_db)
     def insert_message_client(self,

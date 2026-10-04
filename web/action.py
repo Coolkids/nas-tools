@@ -6,7 +6,6 @@ import json
 import os.path
 import re
 import shutil
-import signal
 import tempfile
 import uuid
 import zipfile
@@ -24,7 +23,6 @@ from flask_login import logout_user, current_user
 from werkzeug.security import generate_password_hash
 
 import log
-from app.brushtask import BrushTask
 from app.conf import SystemConfig, ModuleConf
 from app.doubansync import DoubanSync
 from app.downloader import Downloader
@@ -32,20 +30,17 @@ from app.downloader.client import Qbittorrent, Transmission
 from app.filetransfer import FileTransfer
 from app.filter import Filter
 from app.helper import DbHelper, ProgressHelper, ThreadHelper, \
-    MetaHelper, DisplayHelper, WordsHelper, CookieCloudHelper
+    MetaHelper, WordsHelper
 from app.indexer import Indexer
 from app.media import Category, Media, Bangumi, DouBan
 from app.media.meta import MetaInfo, MetaBase
 from app.mediaserver import MediaServer
 from app.message import Message, MessageCenter
-from app.rss import Rss
 from app.rsschecker import RssChecker
-from app.scheduler import stop_scheduler
-from app.sites import Sites
-from app.sites.sitecookie import SiteCookie
+from app.scheduler import Scheduler, restart_scheduler
 from app.subscribe import Subscribe
 from app.subtitle import Subtitle
-from app.sync import Sync, stop_monitor
+from app.sync import Sync
 from app.torrentremover import TorrentRemover
 from app.speedlimiter import SpeedLimiter
 from app.utils import StringUtils, EpisodeFormat, RequestUtils, PathUtils, \
@@ -68,7 +63,7 @@ class WebAction:
     _rss_import_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='rss-excel-import')
     _rss_import_columns = [
         ('标题*', 'name'), ('年份', 'year'), ('自定义搜索词', 'keyword'), ('季号', 'season'),
-        ('模糊匹配', 'fuzzy_match'), ('RSS站点', 'rss_sites'), ('搜索站点', 'search_sites'),
+        ('模糊匹配', 'fuzzy_match'), ('索引器', 'search_sites'),
         ('洗版', 'over_edition'), ('资源类型', 'filter_restype'), ('分辨率', 'filter_pix'),
         ('制作组/字幕组', 'filter_team'), ('过滤规则', 'filter_rule'), ('下载设置', 'download_setting'),
         ('保存路径', 'save_path'), ('总集数', 'total_ep'), ('开始订阅集数', 'current_ep')
@@ -91,11 +86,6 @@ class WebAction:
             "rename_udf": self.__rename_udf,
             "delete_history": self.__delete_history,
             "logging": self.__logging,
-            "update_site": self.__update_site,
-            "get_site": self.__get_site,
-            "del_site": self.__del_site,
-            "get_site_favicon": self.__get_site_favicon,
-            "restart": self.__restart,
             "reset_db_version": self.__reset_db_version,
             "logout": self.__logout,
             "update_config": self.__update_config,
@@ -122,13 +112,6 @@ class WebAction:
             "rss_detail": self.__rss_detail,
             "truncate_blacklist": self.truncate_blacklist,
             "truncate_rsshistory": self.truncate_rsshistory,
-            "add_brushtask": self.__add_brushtask,
-            "del_brushtask": self.__del_brushtask,
-            "brushtask_detail": self.__brushtask_detail,
-            "get_brushtask_info": self.__get_brushtask_info,
-            "add_downloader": self.__add_downloader,
-            "delete_downloader": self.__delete_downloader,
-            "get_downloader": self.__get_downloader,
             "name_test": self.__name_test,
             "rule_test": self.__rule_test,
             "net_test": self.__net_test,
@@ -139,13 +122,9 @@ class WebAction:
             "add_filterrule": self.__add_filterrule,
             "del_filterrule": self.__del_filterrule,
             "filterrule_detail": self.__filterrule_detail,
-            "get_site_activity": self.__get_site_activity,
-            "get_site_history": self.__get_site_history,
             "get_recommend": self.get_recommend,
             "get_downloaded": self.get_downloaded,
-            "get_site_seeding_info": self.__get_site_seeding_info,
             "clear_tmdb_cache": self.__clear_tmdb_cache,
-            "check_site_attr": self.__check_site_attr,
             "refresh_process": self.__refresh_process,
             "restory_backup": self.__restory_backup,
             "start_mediasync": self.__start_mediasync,
@@ -158,8 +137,6 @@ class WebAction:
             "delete_rssparser": self.__delete_rssparser,
             "update_rssparser": self.__update_rssparser,
             "run_userrss": self.__run_userrss,
-            "run_brushtask": self.__run_brushtask,
-            "list_site_resources": self.__list_site_resources,
             "list_rss_articles": self.__list_rss_articles,
             "rss_article_test": self.__rss_article_test,
             "list_rss_history": self.__list_rss_history,
@@ -199,7 +176,6 @@ class WebAction:
             "get_users": self.get_users,
             "get_filterrules": self.get_filterrules,
             "get_downloading": self.get_downloading,
-            "test_site": self.__test_site,
             "get_sub_path": self.__get_sub_path,
             "restore_transfer_history": self.__restore_transfer_history,
             "rename_file": self.__rename_file,
@@ -213,12 +189,9 @@ class WebAction:
             "check_message_client": self.__check_message_client,
             "get_message_client": self.__get_message_client,
             "test_message_client": self.__test_message_client,
-            "get_sites": self.__get_sites,
             "get_indexers": self.__get_indexers,
             "get_download_dirs": self.__get_download_dirs,
             "find_hardlinks": self.__find_hardlinks,
-            "update_sites_cookie_ua": self.__update_sites_cookie_ua,
-            "set_site_captcha_code": self.__set_site_captcha_code,
             "update_torrent_remove_task": self.__update_torrent_remove_task,
             "get_torrent_remove_task": self.__get_torrent_remove_task,
             "delete_torrent_remove_task": self.__delete_torrent_remove_task,
@@ -226,11 +199,8 @@ class WebAction:
             "auto_remove_torrents": self.__auto_remove_torrents,
             "get_douban_history": self.get_douban_history,
             "delete_douban_history": self.__delete_douban_history,
-            "list_brushtask_torrents": self.__list_brushtask_torrents,
             "set_system_config": self.__set_system_config,
-            "get_site_user_statistics": self.get_site_user_statistics,
             "send_custom_message": self.send_custom_message,
-            "cookiecloud_sync": self.__cookiecloud_sync,
             "media_detail": self.media_detail,
             "media_similar": self.__media_similar,
             "media_recommendations": self.__media_recommendations,
@@ -242,6 +212,8 @@ class WebAction:
             "get_system_config": self.__get_system_config,
             "get_ai_recognition_records": self.__get_ai_recognition_records,
             "get_recognition_providers": self.__get_recognition_providers,
+            "get_recognition_parse_cache_info": self.__get_recognition_parse_cache_info,
+            "clear_recognition_parse_cache": self.__clear_recognition_parse_cache,
             "get_recognition_records": self.__get_recognition_records,
             "get_recognition_record_detail": self.__get_recognition_record_detail,
             "version": self.__version
@@ -279,28 +251,6 @@ class WebAction:
         }
 
     @staticmethod
-    def restart_server():
-        """
-        停止进程
-        """
-        # 停止定时服务
-        stop_scheduler()
-        # 停止监控
-        stop_monitor()
-        # 签退
-        logout_user()
-        # 关闭虚拟显示
-        DisplayHelper().quit()
-        # 重启进程
-        if os.name == "nt":
-            os.kill(os.getpid(), getattr(signal, "SIGKILL", signal.SIGTERM))
-        elif SystemUtils.is_synology():
-            os.system(
-                "ps -ef | grep -v grep | grep 'python run.py'|awk '{print $2}'|xargs kill -9")
-        else:
-            os.system("pm2 restart NAStool")
-
-    @staticmethod
     def handle_message_job(msg, in_from=SearchType.OT, user_id=None, user_name=None):
         """
         处理消息事件
@@ -310,15 +260,12 @@ class WebAction:
         commands = {
             "/ptr": {"func": TorrentRemover().auto_remove_torrents, "desp": "删种"},
             "/ptt": {"func": Downloader().transfer, "desp": "下载文件转移"},
-            "/pts": {"func": Sites().signin, "desp": "站点签到"},
             "/rst": {"func": Sync().transfer_all_sync, "desp": "目录同步"},
-            "/rss": {"func": Rss().rssdownload, "desp": "RSS订阅"},
             "/db": {"func": DoubanSync().sync, "desp": "豆瓣同步"},
             "/ssa": {"func": Subscribe().subscribe_search_all, "desp": "订阅搜索"},
             "/tbl": {"func": WebAction().truncate_blacklist, "desp": "清理转移缓存"},
             "/trh": {"func": WebAction().truncate_rsshistory, "desp": "清理RSS缓存"},
-            "/utf": {"func": WebAction().unidentification, "desp": "重新识别"},
-            "/udt": {"func": WebAction().update_system, "desp": "系统更新"}
+            "/utf": {"func": WebAction().unidentification, "desp": "重新识别"}
         }
         command = commands.get(msg)
         message = Message()
@@ -447,11 +394,10 @@ class WebAction:
         commands = {
             "autoremovetorrents": TorrentRemover().auto_remove_torrents,
             "pttransfer": Downloader().transfer,
-            "ptsignin": Sites().signin,
             "sync": Sync().transfer_all_sync,
-            "rssdownload": Rss().rssdownload,
             "douban": DoubanSync().sync,
             "subscribe_search_all": Subscribe().subscribe_search_all,
+            "recognition_record_cleanup": Scheduler().cleanup_expired_recognition_records,
         }
         sch_item = data.get("item")
         if sch_item and commands.get(sch_item):
@@ -636,7 +582,7 @@ class WebAction:
             if title:
                 media_info = Media().get_media_info(title=title)
             else:
-                media_info = MetaInfo(title="磁力链接")
+                media_info = MetaInfo(title="磁力链接", include_ai=False, record=False)
                 media_info.org_string = magnet
             media_info.set_torrent_info(enclosure=magnet,
                                         download_volume_factor=0,
@@ -966,7 +912,7 @@ class WebAction:
                         else:
                             log.info(f"【History】{del_msg}")
                     else:
-                        meta_info = MetaInfo(title=source_filename)
+                        meta_info = MetaInfo(title=source_filename, include_ai=False, record=False)
                         meta_info.title = paths[0].TITLE
                         meta_info.category = paths[0].CATEGORY
                         meta_info.year = paths[0].YEAR
@@ -998,7 +944,7 @@ class WebAction:
                                 # 有集数的电视剧，删除对应的集数文件
                                 for dest_file in PathUtils.get_dir_files(dest_path):
                                     file_meta_info = MetaInfo(
-                                        os.path.basename(dest_file))
+                                        os.path.basename(dest_file), include_ai=False, record=False)
                                     if file_meta_info.get_episode_list() and set(
                                             file_meta_info.get_episode_list()
                                     ).issubset(set(meta_info.get_episode_list())):
@@ -1086,137 +1032,6 @@ class WebAction:
                     log_list = []
         return {"loglist": log_list}
 
-    def __update_site(self, data):
-        """
-        维护站点信息
-        """
-
-        def __is_site_duplicate(query_name, query_tid):
-            # 检查是否重名
-            _sites = self.dbhelper.get_site_by_name(name=query_name)
-            for site in _sites:
-                site_id = site.ID
-                if str(site_id) != str(query_tid):
-                    return True
-            return False
-
-        tid = data.get('site_id')
-        name = data.get('site_name')
-        site_pri = data.get('site_pri')
-        rssurl = data.get('site_rssurl')
-        signurl = data.get('site_signurl')
-        cookie = data.get('site_cookie')
-        note = data.get('site_note')
-        if isinstance(note, dict):
-            note = json.dumps(note)
-        rss_uses = data.get('site_include')
-
-        if __is_site_duplicate(name, tid):
-            return {"code": 400, "msg": "站点名称重复"}
-
-        if tid:
-            sites = self.dbhelper.get_site_by_id(tid)
-            # 站点不存在
-            if not sites:
-                return {"code": 400, "msg": "站点不存在"}
-
-            old_name = sites[0].NAME
-
-            ret = self.dbhelper.update_config_site(tid=tid,
-                                                   name=name,
-                                                   site_pri=site_pri,
-                                                   rssurl=rssurl,
-                                                   signurl=signurl,
-                                                   cookie=cookie,
-                                                   note=note,
-                                                   rss_uses=rss_uses)
-            if ret and (name != old_name):
-                # 更新历史站点数据信息
-                self.dbhelper.update_site_user_statistics_site_name(
-                    name, old_name)
-                self.dbhelper.update_site_seed_info_site_name(name, old_name)
-                self.dbhelper.update_site_statistics_site_name(name, old_name)
-
-        else:
-            ret = self.dbhelper.insert_config_site(name=name,
-                                                   site_pri=site_pri,
-                                                   rssurl=rssurl,
-                                                   signurl=signurl,
-                                                   cookie=cookie,
-                                                   note=note,
-                                                   rss_uses=rss_uses)
-        # 生效站点配置
-        Sites().init_config()
-        # 初始化刷流任务
-        BrushTask().init_config()
-        return {"code": ret}
-
-    @staticmethod
-    def __get_site(data):
-        """
-        查询单个站点信息
-        """
-        tid = data.get("id")
-        site_free = False
-        site_2xfree = False
-        site_hr = False
-        if tid:
-            ret = Sites().get_sites(siteid=tid)
-            if ret.get("rssurl"):
-                site_attr = Sites().get_grapsite_conf(ret.get("rssurl"))
-                if site_attr.get("FREE"):
-                    site_free = True
-                if site_attr.get("2XFREE"):
-                    site_2xfree = True
-                if site_attr.get("HR"):
-                    site_hr = True
-        else:
-            ret = []
-        return {"code": 0, "site": ret, "site_free": site_free, "site_2xfree": site_2xfree, "site_hr": site_hr}
-
-    @staticmethod
-    def __get_sites(data):
-        """
-        查询多个站点信息
-        """
-        rss = True if data.get("rss") else False
-        brush = True if data.get("brush") else False
-        signin = True if data.get("signin") else False
-        statistic = True if data.get("statistic") else False
-        basic = True if data.get("basic") else False
-        if basic:
-            sites = Sites().get_site_dict(rss=rss,
-                                          brush=brush,
-                                          signin=signin,
-                                          statistic=statistic)
-        else:
-            sites = Sites().get_sites(rss=rss,
-                                      brush=brush,
-                                      signin=signin,
-                                      statistic=statistic)
-        return {"code": 0, "sites": sites}
-
-    def __del_site(self, data):
-        """
-        删除单个站点信息
-        """
-        tid = data.get("id")
-        if tid:
-            ret = self.dbhelper.delete_config_site(tid)
-            Sites().init_config()
-            BrushTask().init_config()
-            return {"code": ret}
-        else:
-            return {"code": 0}
-
-    def __restart(self, data):
-        """
-        重启
-        """
-        # 退出主进程
-        self.restart_server()
-        return {"code": 0}
-
     def __reset_db_version(self, data):
         """
         重置数据库版本
@@ -1299,15 +1114,12 @@ class WebAction:
                         return {"code": 1, "msg": "识别权重不能小于 0"}
                 except (TypeError, ValueError):
                     return {"code": 1, "msg": "识别权重必须为数字"}
-        if data.get("laboratory.ai_inference"):
-            ai_url = data.get("laboratory.ai_inference_url")
-            if not ai_url:
-                ai_url = cfg.get("laboratory", {}).get("ai_inference_url")
-            if not str(ai_url or "").strip():
-                return {"code": 1, "msg": "启用AI推理前请输入接口地址"}
         config_test = StringUtils.to_bool(data.get("test"), False)
         numeric_fields = {
+            "pt.search_rss_interval": int,
+            "recognition.records.cleanup.retention_days": int,
             "recognition.execution.total_timeout_seconds": float,
+            "recognition.execution.max_inflight_provider_requests": int,
             "recognition.decision.agreement_bonus": float,
             "recognition.providers.local_rules.reliability": float,
             "recognition.providers.anitopy_ml.reliability": float,
@@ -1320,12 +1132,31 @@ class WebAction:
             "recognition.decision.weights.season_episode_match": float,
             "recognition.decision.weights.input_evidence": float,
             "recognition.decision.weights.provider_reliability": float,
+            "recognition.cache.parse.ttl_seconds": int,
+            "recognition.cache.parse.max_entries": int,
+            "recognition.cache.parse.max_bytes": int,
+            "recognition.cache.parse.max_entry_bytes": int,
+        }
+        boolean_fields = {
+            "recognition.records.cleanup.enabled",
+            "recognition.providers.anitopy_ml.enabled",
+            "recognition.cache.enabled",
+            "recognition.cache.parse.enabled",
+            "recognition.cache.parse.singleflight",
+            "recognition.profiles.parse_only.network_allowed",
+            "recognition.profiles.parse_only.tmdb_allowed",
+            "recognition.profiles.resolve.network_allowed",
+            "recognition.profiles.resolve.tmdb_allowed",
         }
         cfgs = dict(data).items()
         # Candidate config is detached from the live Config singleton.
         for key, value in cfgs:
             if key == "test":
                 continue
+            if key == "recognition.providers.anitopy_ml.enabled":
+                value = StringUtils.to_bool(value, False)
+            elif key in boolean_fields:
+                value = StringUtils.to_bool(value, False)
             if key in numeric_fields:
                 try:
                     value = numeric_fields[key](value)
@@ -1334,7 +1165,73 @@ class WebAction:
             # 生效配置
             cfg = self.set_config_value(cfg, key, value)
 
+        if "pt.search_rss_interval" in data:
+            value = int(cfg.get("pt", {}).get("search_rss_interval") or 0)
+            if value and not 6 <= value <= 8760:
+                return {"code": 1, "msg": "订阅搜索周期必须为 0 或介于 6 小时和 365 天之间"}
+        if "recognition.records.cleanup.retention_days" in data:
+            cleanup = (((cfg.get("recognition") or {}).get("records") or {}).get("cleanup") or {})
+            try:
+                retention_days = int(cleanup.get("retention_days") or 0)
+            except (TypeError, ValueError):
+                return {"code": 1, "msg": "媒体识别记录保留天数无效"}
+            if not 1 <= retention_days <= 36500:
+                return {"code": 1, "msg": "媒体识别记录保留天数必须介于 1 和 36500 天之间"}
+
+        # 旧设置页和新识别配置共用一个有效 AI 开关和接口地址。
+        legacy_enabled_key = "laboratory.ai_inference"
+        provider_enabled_key = "recognition.providers.anitopy_ml.enabled"
+        if provider_enabled_key in data:
+            ai_enabled = StringUtils.to_bool(data[provider_enabled_key], False)
+        elif legacy_enabled_key in data:
+            ai_enabled = StringUtils.to_bool(data[legacy_enabled_key], False)
+        else:
+            ai_enabled = None
+        if ai_enabled is not None:
+            cfg = self.set_config_value(cfg, provider_enabled_key, ai_enabled)
+            cfg = self.set_config_value(cfg, legacy_enabled_key, ai_enabled)
+
+        legacy_endpoint_key = "laboratory.ai_inference_url"
+        provider_endpoint_key = "recognition.providers.anitopy_ml.endpoint"
+        if provider_endpoint_key in data:
+            ai_endpoint = str(data[provider_endpoint_key] or "").strip()
+        elif legacy_endpoint_key in data:
+            ai_endpoint = str(data[legacy_endpoint_key] or "").strip()
+        else:
+            ai_endpoint = None
+        if ai_endpoint is not None:
+            cfg = self.set_config_value(cfg, provider_endpoint_key, ai_endpoint)
+            cfg = self.set_config_value(cfg, legacy_endpoint_key, ai_endpoint)
+
         recognition = cfg.get("recognition") or {}
+        profiles = recognition.get("profiles") or {}
+        for profile_name in ("parse_only", "resolve"):
+            profile = profiles.get(profile_name) or {}
+            if not isinstance(profile, dict):
+                return {"code": 1, "msg": f"识别配置 {profile_name} 必须为对象"}
+            selected_providers = profile.get("providers", "all_enabled")
+            if selected_providers != "all_enabled" and (
+                    not isinstance(selected_providers, list)
+                    or any(not isinstance(provider_id, str) or not provider_id.strip()
+                           for provider_id in selected_providers)):
+                return {"code": 1, "msg": f"识别配置 {profile_name} 的 providers 必须为 all_enabled 或名称列表"}
+            if isinstance(selected_providers, list) and "local_rules" not in selected_providers:
+                return {"code": 1, "msg": f"识别配置 {profile_name} 必须保留 local_rules 基础解析器"}
+            for field in ("network_allowed", "tmdb_allowed"):
+                if field in profile and not isinstance(profile[field], bool):
+                    return {"code": 1, "msg": f"识别配置 {profile_name}.{field} 必须为布尔值"}
+            if profile_name == "parse_only" and profile.get("tmdb_allowed", False):
+                return {"code": 1, "msg": "parse_only profile 不允许查询 TMDB"}
+            if profile_name == "parse_only" \
+                    and profile.get("conflict_policy", "unresolved") != "unresolved":
+                return {"code": 1, "msg": "parse_only profile 的冲突策略必须为 unresolved"}
+        ai_provider = ((recognition.get("providers") or {}).get("anitopy_ml") or {})
+        ai_enabled = bool(ai_provider.get("enabled", False))
+        ai_endpoint = (ai_provider.get("endpoint")
+                       or (ai_provider.get("options") or {}).get("endpoint")
+                       or (cfg.get("laboratory") or {}).get("ai_inference_url"))
+        if ai_enabled and not str(ai_endpoint or "").strip():
+            return {"code": 1, "msg": "启用AI推理前请输入接口地址"}
         decision = recognition.get("decision") or {}
         selected_strategy = decision.get("strategy", "legacy")
         if selected_strategy not in ("legacy", "title_evidence"):
@@ -1348,6 +1245,23 @@ class WebAction:
                 return {"code": 1, "msg": "识别总超时必须介于 0.1 和 300 秒之间"}
         except (TypeError, ValueError):
             return {"code": 1, "msg": "识别总超时必须为数字"}
+        try:
+            inflight_limit = int(execution.get("max_inflight_provider_requests", 4))
+            if not 1 <= inflight_limit <= 128:
+                return {"code": 1, "msg": "识别并发上限必须介于 1 和 128 之间"}
+        except (TypeError, ValueError):
+            return {"code": 1, "msg": "识别并发上限必须为整数"}
+        parse_cache = ((recognition.get("cache") or {}).get("parse") or {})
+        try:
+            cache_limits = [int(parse_cache.get(key, default)) for key, default in (
+                ("ttl_seconds", 86400), ("max_entries", 4096),
+                ("max_bytes", 67108864), ("max_entry_bytes", 1048576))]
+            if any(value < 1 for value in cache_limits):
+                return {"code": 1, "msg": "解析缓存 TTL 和容量必须大于 0"}
+            if cache_limits[3] > cache_limits[2]:
+                return {"code": 1, "msg": "单条解析缓存上限不能大于缓存总容量"}
+        except (TypeError, ValueError):
+            return {"code": 1, "msg": "解析缓存 TTL 和容量必须为整数"}
         weights = decision.get("weights") or {}
         try:
             weight_values = [float(weights.get(key, 0) or 0) for key in (
@@ -1387,6 +1301,11 @@ class WebAction:
             except Exception as error:
                 log.error(f"【Config】保存配置失败：{error}")
                 return {"code": 1, "msg": "保存配置失败，旧配置保持不变"}
+            if any(key in data for key in (
+                    "pt.search_rss_interval",
+                    "recognition.records.cleanup.enabled",
+                    "recognition.records.cleanup.retention_days")):
+                restart_scheduler()
 
         return {"code": 0}
 
@@ -1506,7 +1425,7 @@ class WebAction:
         if not str(tmdbid).isdigit():
             tmdbid = None
         if name:
-            name = MetaInfo(title=name).get_name()
+            name = MetaInfo(title=name, include_ai=False, record=False).get_name()
         if mtype:
             if mtype in MovieTypes:
                 self.dbhelper.delete_rss_movie(
@@ -1527,7 +1446,6 @@ class WebAction:
         season = data.get("season")
         fuzzy_match = data.get("fuzzy_match")
         mediaid = data.get("mediaid")
-        rss_sites = data.get("rss_sites")
         search_sites = data.get("search_sites")
         over_edition = data.get("over_edition")
         filter_restype = data.get("filter_restype")
@@ -1554,7 +1472,6 @@ class WebAction:
                                                                      season=sea,
                                                                      fuzzy_match=fuzzy_match,
                                                                      mediaid=mediaid,
-                                                                     rss_sites=rss_sites,
                                                                      search_sites=search_sites,
                                                                      over_edition=over_edition,
                                                                      filter_restype=filter_restype,
@@ -1574,7 +1491,6 @@ class WebAction:
                                                                  season=season,
                                                                  fuzzy_match=fuzzy_match,
                                                                  mediaid=mediaid,
-                                                                 rss_sites=rss_sites,
                                                                  search_sites=search_sites,
                                                                  over_edition=over_edition,
                                                                  filter_restype=filter_restype,
@@ -1612,7 +1528,7 @@ class WebAction:
             'filter_team', 'filter_rule', 'download_setting', 'save_path', 'total_ep', 'current_ep'
         }
         result = {field: cls._rss_import_text(values.get(field)) for field in text_fields}
-        for field in ('rss_sites', 'search_sites'):
+        for field in ('search_sites',):
             value = values.get(field, [])
             if isinstance(value, str):
                 value = re.split(r'[,，;；\n|]+', value)
@@ -1635,7 +1551,6 @@ class WebAction:
     @classmethod
     def _rss_import_options(cls):
         """读取当前配置，作为模板下拉项及导入合法值的唯一来源。"""
-        rss_sites = sorted(set(filter(None, Sites().get_site_names(rss=True))))
         search_sites = sorted(set(filter(None, Indexer().get_indexer_names())))
         filter_rules = {
             str(item['id']): item['name']
@@ -1646,7 +1561,6 @@ class WebAction:
             for key, value in Downloader().get_download_setting().items()
         }
         return {
-            'rss_sites': rss_sites,
             'search_sites': search_sites,
             'filter_rules': filter_rules,
             'download_settings': download_settings
@@ -1657,7 +1571,7 @@ class WebAction:
         """校验 Excel 选择项，同时将“ID | 名称”转换为后端需要的 ID。"""
         values = deepcopy(values)
         options = cls._rss_import_options()
-        for field, label in (('rss_sites', 'RSS站点'), ('search_sites', '搜索站点')):
+        for field, label in (('search_sites', '索引器'),):
             allowed = set(options[field])
             invalid = [site for site in values.get(field, []) if site not in allowed]
             if invalid:
@@ -1675,8 +1589,8 @@ class WebAction:
         if season and (not season.isdigit() or not 1 <= int(season) <= 50):
             return None, '季号必须为 01 到 50'
         for field, option_key, empty_labels, label in (
-            ('filter_rule', 'filter_rules', ('站点/默认规则',), '过滤规则'),
-            ('download_setting', 'download_settings', ('站点设置',), '下载设置')
+            ('filter_rule', 'filter_rules', ('默认规则',), '过滤规则'),
+            ('download_setting', 'download_settings', ('默认',), '下载设置')
         ):
             value = values.get(field, '')
             if not value or value in empty_labels:
@@ -1757,7 +1671,7 @@ class WebAction:
             '名称': 'name', '标题': 'name', 'name': 'name', 'title': 'name',
             '年份': 'year', 'year': 'year', '自定义搜索词': 'keyword', '关键词': 'keyword', 'keyword': 'keyword',
             '季号': 'season', '季': 'season', 'season': 'season', '模糊匹配': 'fuzzy_match', 'fuzzy_match': 'fuzzy_match',
-            'rss站点': 'rss_sites', 'rss_sites': 'rss_sites', '搜索站点': 'search_sites', 'search_sites': 'search_sites',
+            '搜索站点': 'search_sites', 'search_sites': 'search_sites', '索引器': 'search_sites', 'indexers': 'search_sites',
             '洗版': 'over_edition', 'over_edition': 'over_edition', '资源类型': 'filter_restype', 'filter_restype': 'filter_restype',
             '分辨率': 'filter_pix', 'filter_pix': 'filter_pix', '制作组/字幕组': 'filter_team', '制作组': 'filter_team', 'filter_team': 'filter_team',
             '过滤规则': 'filter_rule', '过滤规则id': 'filter_rule', 'filter_rule': 'filter_rule',
@@ -1769,7 +1683,7 @@ class WebAction:
         search_site_columns = {}
         for column, header in headers.items():
             header_text = cls._rss_import_text(header)
-            if header_text.startswith('搜索站点：'):
+            if header_text.startswith(('索引器：', '搜索站点：')):
                 site_name = header_text.split('：', 1)[1].strip()
                 if site_name:
                     search_site_columns[column] = site_name
@@ -1992,8 +1906,8 @@ class WebAction:
             worksheets.append(('填写说明', cls._rss_import_sheet_xml([
                 ['填写说明'],
                 ['标题为必填项；空白的筛选类字段表示使用默认/全部。'],
-                ['RSS站点可通过下拉选择；选择多个 RSS 站点时请以英文逗号分隔，留空表示全部站点。'],
-                ['搜索站点支持多选：在“搜索站点：站点名”列中将需要的站点填写为“是”，可同时选择多个。'],
+                ['索引器支持多选；留空表示使用全部索引器。'],
+                ['索引器支持多选：在“索引器：名称”列中将需要的索引器填写为“是”，可同时选择多个。'],
                 ['模糊匹配、洗版请从“是/否”下拉项中选择。'],
                 ['过滤规则、下载设置请从下拉项中选择，系统会自动转换为对应配置。']
             ])))
@@ -2031,7 +1945,7 @@ class WebAction:
         for label, field in cls._rss_import_columns:
             if field == 'search_sites' and options['search_sites']:
                 columns.extend([
-                    ('搜索站点：%s' % site_name, '__search_site__:%s' % site_name)
+                    ('索引器：%s' % site_name, '__search_site__:%s' % site_name)
                     for site_name in options['search_sites']
                 ])
             else:
@@ -2041,14 +1955,13 @@ class WebAction:
         option_lists = {
             'yes_no': ['是', '否'],
             'seasons': ['%02d' % number for number in range(1, 51)],
-            'rss_sites': options['rss_sites'],
             'search_sites': options['search_sites'],
             'resource_types': ['BLURAY', 'REMUX', 'DOLBY', 'WEB', 'HDTV', 'UHD', 'HDR', '3D'],
             'resolutions': ['8k', '4k', '1080p', '720p'],
-            'filter_rules': ['站点/默认规则'] + [
+            'filter_rules': ['默认规则'] + [
                 '%s | %s' % (rule_id, name) for rule_id, name in options['filter_rules'].items()
             ],
-            'download_settings': ['站点设置'] + [
+            'download_settings': ['默认'] + [
                 '%s | %s' % (setting_id, name) for setting_id, name in options['download_settings'].items()
             ]
         }
@@ -2056,7 +1969,7 @@ class WebAction:
         validations = {
             field_columns[field]: list_name
             for field, list_name in {
-                'season': 'seasons', 'fuzzy_match': 'yes_no', 'rss_sites': 'rss_sites',
+                'season': 'seasons', 'fuzzy_match': 'yes_no',
                 'over_edition': 'yes_no', 'filter_restype': 'resource_types',
                 'filter_pix': 'resolutions', 'filter_rule': 'filter_rules', 'download_setting': 'download_settings'
             }.items()
@@ -2084,7 +1997,7 @@ class WebAction:
         for row in errors:
             values = row['values']
             data.append([
-                ','.join(values.get(field, [])) if field in ('rss_sites', 'search_sites') else values.get(field, '')
+                ','.join(values.get(field, [])) if field == 'search_sites' else values.get(field, '')
                 for _, field in columns
             ] + [row.get('reason', '')])
         return cls._make_rss_import_xlsx(data)
@@ -2550,201 +2463,6 @@ class WebAction:
         self.dbhelper.truncate_rss_episodes()
         return {"code": 0}
 
-    def __add_brushtask(self, data):
-        """
-        新增刷流任务
-        """
-        # 输入值
-        brushtask_id = data.get("brushtask_id")
-        brushtask_name = data.get("brushtask_name")
-        brushtask_site = data.get("brushtask_site")
-        brushtask_interval = data.get("brushtask_interval")
-        brushtask_downloader = data.get("brushtask_downloader")
-        brushtask_totalsize = data.get("brushtask_totalsize")
-        brushtask_state = data.get("brushtask_state")
-        brushtask_transfer = 'Y' if data.get("brushtask_transfer") else 'N'
-        brushtask_sendmessage = 'Y' if data.get(
-            "brushtask_sendmessage") else 'N'
-        brushtask_forceupload = 'Y' if data.get(
-            "brushtask_forceupload") else 'N'
-        brushtask_free = data.get("brushtask_free")
-        brushtask_hr = data.get("brushtask_hr")
-        brushtask_torrent_size = data.get("brushtask_torrent_size")
-        brushtask_include = data.get("brushtask_include")
-        brushtask_exclude = data.get("brushtask_exclude")
-        brushtask_dlcount = data.get("brushtask_dlcount")
-        brushtask_peercount = data.get("brushtask_peercount")
-        brushtask_seedtime = data.get("brushtask_seedtime")
-        brushtask_seedratio = data.get("brushtask_seedratio")
-        brushtask_seedsize = data.get("brushtask_seedsize")
-        brushtask_dltime = data.get("brushtask_dltime")
-        brushtask_avg_upspeed = data.get("brushtask_avg_upspeed")
-        brushtask_iatime = data.get("brushtask_iatime")
-        brushtask_pubdate = data.get("brushtask_pubdate")
-        brushtask_upspeed = data.get("brushtask_upspeed")
-        brushtask_downspeed = data.get("brushtask_downspeed")
-        # 选种规则
-        rss_rule = {
-            "free": brushtask_free,
-            "hr": brushtask_hr,
-            "size": brushtask_torrent_size,
-            "include": brushtask_include,
-            "exclude": brushtask_exclude,
-            "dlcount": brushtask_dlcount,
-            "peercount": brushtask_peercount,
-            "pubdate": brushtask_pubdate,
-            "upspeed": brushtask_upspeed,
-            "downspeed": brushtask_downspeed
-        }
-        # 删除规则
-        remove_rule = {
-            "time": brushtask_seedtime,
-            "ratio": brushtask_seedratio,
-            "uploadsize": brushtask_seedsize,
-            "dltime": brushtask_dltime,
-            "avg_upspeed": brushtask_avg_upspeed,
-            "iatime": brushtask_iatime
-        }
-        # 添加记录
-        item = {
-            "name": brushtask_name,
-            "site": brushtask_site,
-            "free": brushtask_free,
-            "interval": brushtask_interval,
-            "downloader": brushtask_downloader,
-            "seed_size": brushtask_totalsize,
-            "transfer": brushtask_transfer,
-            "state": brushtask_state,
-            "rss_rule": rss_rule,
-            "remove_rule": remove_rule,
-            "sendmessage": brushtask_sendmessage,
-            "forceupload": brushtask_forceupload
-        }
-        self.dbhelper.insert_brushtask(brushtask_id, item)
-
-        # 重新初始化任务
-        BrushTask().init_config()
-        return {"code": 0}
-
-    def __del_brushtask(self, data):
-        """
-        删除刷流任务
-        """
-        brush_id = data.get("id")
-        if brush_id:
-            self.dbhelper.delete_brushtask(brush_id)
-            # 重新初始化任务
-            BrushTask().init_config()
-            return {"code": 0}
-        return {"code": 1}
-
-    def __brushtask_detail(self, data):
-        """
-        查询刷流任务详情
-        """
-        brush_id = data.get("id")
-        brushtask = self.dbhelper.get_brushtasks(brush_id)
-        if not brushtask:
-            return {"code": 1, "task": {}}
-        site_info = Sites().get_sites(siteid=brushtask.SITE)
-        task = {
-            "id": brushtask.ID,
-            "name": brushtask.NAME,
-            "site": brushtask.SITE,
-            "interval": brushtask.INTEVAL,
-            "state": brushtask.STATE,
-            "downloader": brushtask.DOWNLOADER,
-            "transfer": brushtask.TRANSFER,
-            "free": brushtask.FREELEECH,
-            "rss_rule": eval(brushtask.RSS_RULE),
-            "remove_rule": eval(brushtask.REMOVE_RULE),
-            "seed_size": brushtask.SEED_SIZE,
-            "download_count": brushtask.DOWNLOAD_COUNT,
-            "remove_count": brushtask.REMOVE_COUNT,
-            "download_size": StringUtils.str_filesize(brushtask.DOWNLOAD_SIZE),
-            "upload_size": StringUtils.str_filesize(brushtask.UPLOAD_SIZE),
-            "lst_mod_date": brushtask.LST_MOD_DATE,
-            "site_url": StringUtils.get_base_url(site_info.get("signurl") or site_info.get("rssurl")),
-            "sendmessage": brushtask.SENDMESSAGE,
-            "forceupload": brushtask.FORCEUPLOAD
-        }
-        return {"code": 0, "task": task}
-
-    @staticmethod
-    def __get_brushtask_info(data):
-        """
-        查询刷流任务列表（供Vue前端使用）
-        """
-        return {"code": 0, "data": BrushTask().get_brushtask_info()}
-
-    def __add_downloader(self, data):
-        """
-        添加自定义下载器
-        """
-        test = data.get("test")
-        dl_id = data.get("id")
-        dl_name = data.get("name")
-        dl_type = data.get("type")
-        if test:
-            # 测试
-            if dl_type == "qbittorrent":
-                downloader = Qbittorrent(
-                    config={
-                        "qbhost": data.get("host"),
-                        "qbport": data.get("port"),
-                        "qbusername": data.get("username"),
-                        "qbpassword": data.get("password")
-                    })
-            else:
-                downloader = Transmission(
-                    config={
-                        "trhost": data.get("host"),
-                        "trport": data.get("port"),
-                        "trusername": data.get("username"),
-                        "trpassword": data.get("password")
-                    })
-            if downloader.get_status():
-                return {"code": 0}
-            else:
-                return {"code": 1}
-        else:
-            # 保存
-            self.dbhelper.update_user_downloader(
-                did=dl_id,
-                name=dl_name,
-                dtype=dl_type,
-                user_config={
-                    "host": data.get("host"),
-                    "port": data.get("port"),
-                    "username": data.get("username"),
-                    "password": data.get("password"),
-                    "save_dir": data.get("save_dir")
-                },
-                note=None)
-            BrushTask().init_config()
-            return {"code": 0}
-
-    def __delete_downloader(self, data):
-        """
-        删除自定义下载器
-        """
-        dl_id = data.get("id")
-        if dl_id:
-            self.dbhelper.delete_user_downloader(dl_id)
-            BrushTask().init_config()
-        return {"code": 0}
-
-    def __get_downloader(self, data):
-        """
-        查询自定义下载器
-        """
-        dl_id = data.get("id")
-        if dl_id:
-            info = self.dbhelper.get_user_downloaders(dl_id)
-            if info:
-                return {"code": 0, "info": info.as_dict()}
-        return {"code": 1}
-
     def __name_test(self, data):
         """
         名称识别测试
@@ -2840,64 +2558,6 @@ class WebAction:
             return {"res": True, "time": "%s 毫秒" % seconds}
         else:
             return {"res": False, "time": "%s 毫秒" % seconds}
-
-    @staticmethod
-    def __get_site_activity(data):
-        """
-        查询site活动[上传，下载，魔力值]
-        :param data: {"name":site_name}
-        :return:
-        """
-        if not data or "name" not in data:
-            return {"code": 1, "msg": "查询参数错误"}
-
-        resp = {"code": 0}
-
-        resp.update(
-            {"dataset": Sites().get_pt_site_activity_history(data["name"])})
-        return resp
-
-    @staticmethod
-    def __get_site_history(data):
-        """
-        查询site 历史[上传，下载]
-        :param data: {"days":累计时间}
-        :return:
-        """
-        if not data or "days" not in data or not isinstance(data["days"], int):
-            return {"code": 1, "msg": "查询参数错误"}
-
-        resp = {"code": 0}
-        _, _, site, upload, download = Sites(
-        ).get_pt_site_statistics_history(data["days"] + 1)
-
-        # 调整为dataset组织数据
-        dataset = [["site", "upload", "download"]]
-        dataset.extend([[site, upload, download]
-                       for site, upload, download in zip(site, upload, download)])
-        resp.update({"dataset": dataset})
-        return resp
-
-    @staticmethod
-    def __get_site_seeding_info(data):
-        """
-        查询site 做种分布信息 大小，做种数
-        :param data: {"name":site_name}
-        :return:
-        """
-        if not data or "name" not in data:
-            return {"code": 1, "msg": "查询参数错误"}
-
-        resp = {"code": 0}
-
-        seeding_info = Sites().get_pt_site_seeding_info(
-            data["name"]).get("seeding_info", [])
-        # 调整为dataset组织数据
-        dataset = [["seeders", "size"]]
-        dataset.extend(seeding_info)
-
-        resp.update({"dataset": dataset})
-        return resp
 
     def __add_filtergroup(self, data):
         """
@@ -3238,21 +2898,6 @@ class WebAction:
         return {"code": 0}
 
     @staticmethod
-    def __check_site_attr(data):
-        """
-        检查站点标识
-        """
-        site_attr = Sites().get_grapsite_conf(data.get("url"))
-        site_free = site_2xfree = site_hr = False
-        if site_attr.get("FREE"):
-            site_free = True
-        if site_attr.get("2XFREE"):
-            site_2xfree = True
-        if site_attr.get("HR"):
-            site_hr = True
-        return {"code": 0, "site_free": site_free, "site_2xfree": site_2xfree, "site_hr": site_hr}
-
-    @staticmethod
     def __refresh_process(data):
         """
         刷新进度条
@@ -3315,7 +2960,7 @@ class WebAction:
         tmdbid = data.get("tmdbid")
         title = data.get("title")
         if title:
-            title_season = MetaInfo(title=title).begin_season
+            title_season = MetaInfo(title=title, include_ai=False, record=False).begin_season
         else:
             title_season = None
         if not str(tmdbid).isdigit():
@@ -3439,21 +3084,6 @@ class WebAction:
     def __run_userrss(data):
         RssChecker().check_task_rss(data.get("id"))
         return {"code": 0}
-
-    @staticmethod
-    def __run_brushtask(data):
-        BrushTask().check_task_rss(data.get("id"))
-        return {"code": 0}
-
-    @staticmethod
-    def __list_site_resources(data):
-        resources = Indexer().list_builtin_resources(index_id=data.get("id"),
-                                                     page=data.get("page"),
-                                                     keyword=data.get("keyword"))
-        if not resources:
-            return {"code": 1, "msg": "获取站点资源出现错误，无法连接到站点！"}
-        else:
-            return {"code": 0, "data": resources}
 
     @staticmethod
     def __list_rss_articles(data):
@@ -4184,11 +3814,6 @@ class WebAction:
                 "releasegroup": item.OTHERINFO,
                 "video_encode": video_encode
             }
-            # 促销
-            free_item = {
-                "value": f"{item.UPLOAD_VOLUME_FACTOR} {item.DOWNLOAD_VOLUME_FACTOR}",
-                "name": MetaBase.get_free_string(item.UPLOAD_VOLUME_FACTOR, item.DOWNLOAD_VOLUME_FACTOR)
-            }
             # 季
             filter_season = SE_key.split()[0] if SE_key and SE_key not in [
                 "MOV", "TV"] else None
@@ -4237,8 +3862,6 @@ class WebAction:
                     }
                 # 过滤条件
                 torrent_filter = dict(result_item.get("filter"))
-                if free_item not in torrent_filter.get("free"):
-                    torrent_filter["free"].append(free_item)
                 if item.SITE not in torrent_filter.get("site"):
                     torrent_filter["site"].append(item.SITE)
                 if video_encode \
@@ -4283,7 +3906,6 @@ class WebAction:
                     },
                     "filter": {
                         "site": [item.SITE],
-                        "free": [free_item],
                         "video": [video_encode] if video_encode else [],
                         "season": [filter_season] if filter_season else []
                     }
@@ -4714,15 +4336,6 @@ class WebAction:
         return {"code": 0}
 
     @staticmethod
-    def __test_site(data):
-        """
-        测试站点连通性
-        """
-        flag, msg, times = Sites().test_connection(data.get("id"))
-        code = 0 if flag else -1
-        return {"code": code, "msg": msg, "time": times}
-
-    @staticmethod
     def __get_sub_path(data):
         """
         查询下级子目录
@@ -4980,9 +4593,6 @@ class WebAction:
         获取下载目录
         """
         sid = data.get("sid")
-        site = data.get("site")
-        if not sid and site:
-            sid = Sites().get_site_download_setting(site_name=site)
         dirs = Downloader().get_download_dirs(setting=sid)
         return {"code": 0, "paths": dirs}
 
@@ -5019,42 +4629,6 @@ class WebAction:
                 ExceptionUtils.exception_traceback(e)
                 return {"code": 1}
         return {"code": 0, "data": hardlinks}
-
-    @staticmethod
-    def __update_sites_cookie_ua(data):
-        """
-        更新所有站点的Cookie和UA
-        """
-        siteid = data.get("siteid")
-        username = data.get("username")
-        password = data.get("password")
-        twostepcode = data.get("two_step_code")
-        ocrflag = data.get("ocrflag")
-        # 保存设置
-        SystemConfig().set_system_config(key="CookieUserInfo",
-                                         value={
-                                             "username": username,
-                                             "password": password,
-                                             "two_step_code": twostepcode
-                                         })
-        retcode, messages = SiteCookie().update_sites_cookie_ua(siteid=siteid,
-                                                                username=username,
-                                                                password=password,
-                                                                twostepcode=twostepcode,
-                                                                ocrflag=ocrflag)
-        if retcode == 0:
-            Sites().init_config()
-        return {"code": retcode, "messages": messages}
-
-    @staticmethod
-    def __set_site_captcha_code(data):
-        """
-        设置站点验证码
-        """
-        code = data.get("code")
-        value = data.get("value")
-        SiteCookie().set_code(code=code, value=value)
-        return {"code": 0}
 
     @staticmethod
     def __update_torrent_remove_task(data):
@@ -5112,14 +4686,6 @@ class WebAction:
         TorrentRemover().auto_remove_torrents(taskids=tid)
         return {"code": 0}
 
-    @staticmethod
-    def __get_site_favicon(data):
-        """
-        获取站点图标
-        """
-        sitename = data.get("name")
-        return {"code": 0, "icon": Sites().get_site_favicon(site_name=sitename)}
-
     def get_douban_history(self, data=None):
         """
         查询豆瓣同步历史
@@ -5133,16 +4699,6 @@ class WebAction:
         """
         self.dbhelper.delete_douban_history(data.get("id"))
         return {"code": 0}
-
-    def __list_brushtask_torrents(self, data):
-        """
-        获取刷流任务的种子明细
-        """
-        results = self.dbhelper.get_brushtask_torrents(brush_id=data.get("id"),
-                                                       active=False)
-        if not results:
-            return {"code": 1, "msg": "未下载种子或未获取到种子明细"}
-        return {"code": 0, "data": [item.as_dict() for item in results]}
 
     @staticmethod
     def __set_system_config(data):
@@ -5221,6 +4777,24 @@ class WebAction:
             } for provider_id, provider in sorted(providers.items())],
             "diagnostics": registry.diagnostics(),
         }
+
+    @staticmethod
+    def __get_recognition_parse_cache_info(data=None):
+        """返回解析缓存用量；调用方受 /do 登录校验保护。"""
+        from app.media.recognition.cache import info
+
+        return {"code": 0, "cache": info("parse")}
+
+    @staticmethod
+    def __clear_recognition_parse_cache(data=None):
+        """只清除 anitopy-ml 解析缓存，不影响 TMDB 缓存与识别记录。"""
+        from app.media.recognition import cache
+
+        before = cache.info("parse")
+        cache.clear("parse")
+        after = cache.info("parse")
+        return {"code": 0, "cleared_entries": before.get("entries", 0),
+                "cache": after}
 
     @staticmethod
     def __decode_recognition_json(value):
@@ -5508,27 +5082,6 @@ class WebAction:
         return {"code": 0, "value": SystemConfig().get_system_config(key=key) or {}}
 
     @staticmethod
-    def get_site_user_statistics(data):
-        """
-        获取站点用户统计信息
-        """
-        sites = data.get("sites")
-        encoding = data.get("encoding") or "RAW"
-        sort_by = data.get("sort_by")
-        sort_on = data.get("sort_on")
-        site_hash = data.get("site_hash")
-        statistics = Sites().get_site_user_statistics(sites=sites, encoding=encoding)
-        if sort_by and sort_on in ["asc", "desc"]:
-            if sort_on == "asc":
-                statistics.sort(key=lambda x: x[sort_by])
-            else:
-                statistics.sort(key=lambda x: x[sort_by], reverse=True)
-        if site_hash == "Y":
-            for item in statistics:
-                item["site_hash"] = StringUtils.md5_hash(item.get("site"))
-        return {"code": 0, "data": statistics}
-
-    @staticmethod
     def send_custom_message(data):
         """
         发送自定义消息
@@ -5545,48 +5098,6 @@ class WebAction:
             "value": value,
             "name": name.value
         } for value, name in ModuleConf.RMT_MODES.items()]
-
-    def __cookiecloud_sync(self, data):
-        """
-        CookieCloud数据同步
-        """
-        server = data.get("server")
-        key = data.get("key")
-        password = data.get("password")
-        # 保存设置
-        SystemConfig().set_system_config(key="CookieCloud",
-                                         value={
-                                             "server": server,
-                                             "key": key,
-                                             "password": password
-                                         })
-        # 同步数据
-        contents, retmsg = CookieCloudHelper(server=server,
-                                             key=key,
-                                             password=password).download_data()
-        if not contents:
-            return {"code": 1, "msg": retmsg}
-        success_count = 0
-        for domain, content_list in contents.items():
-            if domain.startswith('.'):
-                domain = domain[1:]
-            cookie_str = ""
-            for content in content_list:
-                cookie_str += content.get("name") + \
-                    "=" + content.get("value") + ";"
-            if not cookie_str:
-                continue
-            site_info = Sites().get_sites(siteurl=domain)
-            if not site_info:
-                continue
-            self.dbhelper.update_site_cookie_ua(tid=site_info.get("id"),
-                                                cookie=cookie_str)
-            success_count += 1
-        if success_count:
-            # 重载站点信息
-            Sites().init_config()
-            return {"code": 0, "msg": f"成功更新 {success_count} 个站点的Cookie数据"}
-        return {"code": 0, "msg": "同步完成，但未更新任何站点的Cookie！"}
 
     @staticmethod
     def media_detail(data):

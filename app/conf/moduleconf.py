@@ -5,7 +5,7 @@ from app.utils.types import *
 class ModuleConf(object):
     # 菜单对应关系，配置WeChat应用中配置的菜单ID与执行命令的对应关系，需要手工修改
     # 菜单序号在https://work.weixin.qq.com/wework_admin/frame#apps 应用自定义菜单中维护，然后看日志输出的菜单序号是啥（按顺利能猜到的）....
-    # 命令对应关系：/ptt 下载文件转移；/ptr 删种；/pts 站点签到；/rst 目录同步；/rst 豆瓣想看；/utf 重新识别；
+    # 命令对应关系：/ptt 下载文件转移；/ptr 删种；/rst 目录同步；/rst 豆瓣想看；/utf 重新识别；
     # /ssa 订阅搜索；/tbl 清理转移缓存；/trh 清理RSS缓存；/rss RSS下载；/udt 系统更新
     WECHAT_MENU = {
         '_0_0': '/ptt',
@@ -15,7 +15,6 @@ class ModuleConf(object):
         '_1_0': '/rst',
         '_1_1': '/db',
         '_1_2': '/utf',
-        '_2_0': '/pts',
         '_2_1': '/udt',
         '_2_2': '/tbl',
         '_2_3': '/trh'
@@ -45,8 +44,7 @@ class ModuleConf(object):
     # 索引器
     INDEXER_DICT = {
         "prowlarr": IndexerType.PROWLARR,
-        "jackett": IndexerType.JACKETT,
-        "builtin": IndexerType.BUILTIN
+        "jackett": IndexerType.JACKETT
     }
 
     # 媒体服务器
@@ -143,7 +141,7 @@ class ModuleConf(object):
                         "id": "wechat_token",
                         "required": False,
                         "title": "Token",
-                        "tooltip": "需要交互功能时才需要填写，在微信企业应用管理后台-接收消息设置页面生成，填入完成后重启本应用，然后再在微信页面输入地址确定",
+                        "tooltip": "需要交互功能时才需要填写，在微信企业应用管理后台-接收消息设置页面生成，填入后保存配置，再通过进程或容器管理工具重启本应用，然后在微信页面输入地址确定",
                         "type": "text",
                         "placeholder": "API接收消息Token"
                     },
@@ -151,7 +149,7 @@ class ModuleConf(object):
                         "id": "wechat_encodingAESKey",
                         "required": False,
                         "title": "EncodingAESKey",
-                        "tooltip": "需要交互功能时才需要填写，在微信企业应用管理后台-接收消息设置页面生成，填入完成后重启本应用，然后再在微信页面输入地址确定",
+                        "tooltip": "需要交互功能时才需要填写，在微信企业应用管理后台-接收消息设置页面生成，填入后保存配置，再通过进程或容器管理工具重启本应用，然后在微信页面输入地址确定",
                         "type": "text",
                         "placeholder": "API接收消息EncodingAESKey"
                     }
@@ -406,22 +404,6 @@ class ModuleConf(object):
             "rss_finished": {
                 "name": "订阅完成",
                 "fuc_name": "rss_finished"
-            },
-            "site_signin": {
-                "name": "站点签到",
-                "fuc_name": "site_signin"
-            },
-            "site_message": {
-                "name": "站点消息",
-                "fuc_name": "site_message"
-            },
-            "brushtask_added": {
-                "name": "刷流下种",
-                "fuc_name": "brushtask_added"
-            },
-            "brushtask_remove": {
-                "name": "刷流删种",
-                "fuc_name": "brushtask_remove"
             },
             "mediaserver_message": {
                 "name": "媒体服务",

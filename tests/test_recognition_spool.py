@@ -189,14 +189,19 @@ DbHelper.release_session()
             live_config = {
                 "recognition": {
                     "decision": {"strategy": "weighted", "weights": {"title": 0.8}},
-                    "providers": {"ai": {"enabled": True, "api_key": "private"}},
                     "service_url": "https://private.example/api",
+                    "providers": {
+                        "ai": {"enabled": True, "api_key": "private"},
+                        "anitopy_ml": {"enabled": True, "endpoint": "https://old.local/model",
+                                       "model_revision": "r1"},
+                    },
                 },
                 "laboratory": {"ai_inference": True,
                                "ai_inference_url": "https://private.example/model"},
             }
             config = SimpleNamespace(get_config_path=lambda: directory,
-                                     get_config=lambda: live_config)
+                                     get_config=lambda section=None: live_config if section is None
+                                     else live_config.get(section, {}))
             db = Mock()
             db.insert_recognition_record.side_effect = lambda payload: payload["request_id"]
             with patch("config.Config", return_value=config), \
@@ -205,8 +210,17 @@ DbHelper.release_session()
                     first_version = recorder.context["recognition_config_version"]
                     self.assertEqual("weighted", recognition_config("recognition")["decision"]["strategy"])
                     live_config["recognition"]["decision"]["weights"]["title"] = 0.1
+                    live_config["recognition"]["providers"]["anitopy_ml"].update(
+                        enabled=False, endpoint="https://new.local/model", model_revision="r2")
                     self.assertEqual(0.8, recognition_config("recognition")["decision"]["weights"]["title"])
+                    pinned_provider = recognition_config("recognition")["providers"]["anitopy_ml"]
+                    self.assertTrue(pinned_provider["enabled"])
+                    self.assertEqual("https://old.local/model", pinned_provider["endpoint"])
+                    self.assertEqual("r1", pinned_provider["model_revision"])
                     recorder.set_overall("success")
+                self.assertFalse(recognition_config("recognition")["providers"]["anitopy_ml"]["enabled"])
+                self.assertEqual("https://new.local/model",
+                                 recognition_config("recognition")["providers"]["anitopy_ml"]["endpoint"])
 
             saved = db.insert_recognition_record.call_args.args[0]
             snapshot = saved["context"]["recognition_config_snapshot"]

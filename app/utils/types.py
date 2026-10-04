@@ -53,7 +53,6 @@ class MatchMode(Enum):
 class OsType(Enum):
     WINDOWS = "Windows"
     LINUX = "Linux"
-    SYNOLOGY = "Synology"
     MACOS = "MacOS"
     DOCKER = "Docker"
 
@@ -61,7 +60,6 @@ class OsType(Enum):
 class IndexerType(Enum):
     JACKETT = "Jackett"
     PROWLARR = "Prowlarr"
-    BUILTIN = "Indexer"
 
 
 class MediaServerType(Enum):
@@ -78,21 +76,6 @@ class BrushDeleteType(Enum):
     DLTIME = "下载耗时"
     AVGUPSPEED = "平均上传速度"
     IATIME = "未活动时间"
-
-
-# 站点框架
-class SiteSchema(Enum):
-    DiscuzX = "Discuz!"
-    Gazelle = "Gazelle"
-    Ipt = "IPTorrents"
-    NexusPhp = "NexusPhp"
-    NexusProject = "NexusProject"
-    NexusRabbit = "NexusRabbit"
-    SmallHorse = "Small Horse"
-    Unit3d = "Unit3d"
-    TorrentLeech = "TorrentLeech"
-    FileList = "FileList"
-    TNode = "TNode"
 
 
 MovieTypes = ['MOV', '电影']

@@ -1,3 +1,4 @@
+import copy
 from functools import lru_cache
 import cn2an
 
@@ -91,7 +92,9 @@ class WebUtils:
                                          append_to_response="all")
             if not info:
                 return None
-            media_info = MetaInfo(title=info.get("title") if mtype == MediaType.MOVIE else info.get("name"))
+            media_info = MetaInfo(
+                title=info.get("title") if mtype == MediaType.MOVIE else info.get("name"),
+                include_ai=False, record=False)
             media_info.set_tmdb_info(info)
 
         WebMediaInfoCache.set(cache_key, media_info)
@@ -134,7 +137,7 @@ class WebUtils:
                                                page=page)
             medias = []
             for tmdbinfo in tmdbinfos:
-                tmp_info = MetaInfo(title=keyword)
+                tmp_info = copy.copy(meta_info)
                 tmp_info.set_tmdb_info(tmdbinfo)
                 if meta_info.type != MediaType.MOVIE and tmp_info.type == MediaType.MOVIE:
                     continue
