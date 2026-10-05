@@ -29,6 +29,9 @@ def profile_settings(stage, recognition=None):
 
 
 def profile_allows_provider(stage, provider_id, recognition=None):
+    # parse_only 必须始终运行本地基础解析器，即使旧配置白名单没有列出它。
+    if stage == "parse_only" and provider_id == "local_rules":
+        return True
     selected = profile_settings(stage, recognition).get("providers", "all_enabled")
     if selected == "all_enabled":
         return True

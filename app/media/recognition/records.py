@@ -506,15 +506,43 @@ def annotate_business_short_circuit(meta_info, action_type, reason, details=None
 
 def record_business_short_circuit(original_name, source, action_type, reason,
                                   details=None, business_status="skipped"):
-    """记录发生在名称解析前、因此没有解析器结果的业务过滤。"""
+    """记录业务短路，同时保留本地基础解析和其他识别器的跳过原因。"""
+    from app.media.meta.metainfo import MetaInfo, _meta_snapshot
+    from app.media.recognition import registry
+
+    original_name = str(original_name or "")
     details = json_safe(details or {})
+    local_meta = None
+    local_error = None
+    try:
+        local_meta = MetaInfo(title=original_name, include_ai=False, record=False)
+    except Exception as error:
+        local_error = str(error)
+
     with recognition_scope(original_name, source=source, stage="parse_only") as recorder:
+        processed_title = getattr(local_meta, "_recognition_processed_title", original_name)
+        processed_subtitle = getattr(local_meta, "_recognition_processed_subtitle", None)
+        used_info = getattr(local_meta, "_recognition_used_info", {}) or {}
+        if processed_title != original_name or processed_subtitle:
+            recorder.action(
+                "preprocess", input={"title": original_name},
+                output={"title": processed_title, "subtitle": processed_subtitle,
+                        "rules": used_info})
+        local_status = ("error" if local_error else
+                        "success" if local_meta and local_meta.get_name() else "no_result")
         recorder.add_provider_result(
-            "anitopy_ml", "skipped", input={"title": original_name}, error=reason)
+            "local_rules", local_status, input={"title": processed_title},
+            normalized_result=_meta_snapshot(local_meta), error=local_error)
+        provider_ids = set(registry.discover()) | {"anitopy_ml"}
+        for provider_id in sorted(provider_ids - {"local_rules"}):
+            recorder.add_provider_result(
+                provider_id, "skipped", input={"title": processed_title}, error=reason)
         recorder.action(action_type, status=business_status, provider_id="anitopy_ml",
                         output=details, reason=reason)
         recorder.set_overall(status="skipped", reason=reason,
-                             parsed_result=None, selected_provider=None)
+                             parsed_result=_meta_snapshot(local_meta),
+                             selected_provider="local_rules" if local_meta and
+                             local_meta.get_name() else None)
         recorder.overall_result["business_result"] = {
             "status": business_status, "reason": reason, "details": details,
         }

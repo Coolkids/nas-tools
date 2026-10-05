@@ -10,6 +10,7 @@ from app.helper.db_helper import DbHelper
 from app.indexer.client._base import _IIndexClient
 from app.media.media import Media
 from app.rsschecker import RssChecker as RssCheckerSingleton
+from app.media.recognition.records import record_business_short_circuit
 from app.utils.types import MediaType
 
 
@@ -70,6 +71,42 @@ class _Indexer(_IIndexClient):
 
 
 class BusinessShortCircuitTest(TestCase):
+    def test_short_circuit_keeps_local_parse_and_records_ai_skip_reason(self):
+        runtime = {
+            "recognition": {
+                "profiles": {"parse_only": {"providers": "all_enabled"}},
+                "providers": {"anitopy_ml": {
+                    "enabled": True, "endpoint": "http://ai.local",
+                }},
+            },
+            "laboratory": {"ai_inference": True, "ai_inference_url": "http://ai.local"},
+        }
+        config = SimpleNamespace(
+            get_config=lambda section=None: runtime if section is None else runtime.get(section, {}),
+            get_config_path=lambda: "/tmp/nas-tools-recognition-short-circuit-test",
+        )
+        db = Mock()
+        db.insert_recognition_record.side_effect = lambda record: record["request_id"]
+
+        with patch("config.Config", return_value=config), \
+                patch("app.media.recognition.records._write_spool", return_value=None), \
+                patch("app.helper.db_helper.DbHelper", return_value=db), \
+                patch("app.media.meta.metainfo.recognition_service.run_provider") as run_ai:
+            record_business_short_circuit(
+                "Example Show S01E02 2024 1080p", "indexer", "prefilter_rejected",
+                "indexer_seeders_zero")
+
+        run_ai.assert_not_called()
+        saved = db.insert_recognition_record.call_args.args[0]
+        local_result = next(item for item in saved["provider_results"]
+                            if item["provider_id"] == "local_rules")
+        ai_result = next(item for item in saved["provider_results"]
+                         if item["provider_id"] == "anitopy_ml")
+        self.assertEqual("success", local_result["status"])
+        self.assertEqual("Example Show", local_result["normalized_result"]["name"])
+        self.assertEqual(("skipped", "indexer_seeders_zero"),
+                         (ai_result["status"], ai_result["error"]))
+
     def test_custom_rss_resolve_reuses_local_parse_and_skips_ai_on_media_cache_hit(self):
         rss_checker_type = RssCheckerSingleton.__closure__[0].cell_contents
         for cache_hit in (True, False):
@@ -220,18 +257,19 @@ class BusinessShortCircuitTest(TestCase):
         indexer = Mock(id="indexer-id", public=True, name="Example Index")
         item = {"title": "Example.Show.S01E01", "description": "", "seeders": 4,
                 "peers": 5, "uploadvolumefactor": 1, "downloadvolumefactor": 1}
-        record_skip = Mock()
+        local_parse = _MediaInfo()
+        record_deferred = Mock()
 
-        with patch("app.indexer.client._base.MetaInfo", return_value=_MediaInfo()), \
-                patch("app.indexer.client._base.record_business_short_circuit", record_skip):
+        with patch("app.indexer.client._base.MetaInfo", return_value=local_parse), \
+                patch("app.indexer.client._base.record_deferred_parse_result", record_deferred):
             results = client.filter_search_results(
                 [item], 1, indexer, {}, _MediaInfo(tmdb_id=7), datetime.now())
 
         self.assertEqual([], results)
-        record_skip.assert_called_once_with(
-            "Example.Show.S01E01", "indexer", "indexer_resolution_failed",
+        record_deferred.assert_called_once_with(
+            local_parse, "Example.Show.S01E01", "indexer", "indexer_resolution_failed",
             "indexer_media_info_unavailable", {"indexer": "public_indexer"},
-            business_status="error")
+            business_status="error", overall_status="failed")
 
     def test_indexer_missing_title_is_recorded_without_attempting_ai(self):
         client = _Indexer()

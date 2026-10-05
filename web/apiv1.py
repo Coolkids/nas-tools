@@ -202,15 +202,11 @@ class ServiceRuleTest(ClientResource):
 
 @service.route('/network/test')
 class ServiceNetworkTest(ClientResource):
-    parser = reqparse.RequestParser()
-    parser.add_argument('url', type=str, help='URL地址', location='form', required=True)
-
-    @service.doc(parser=parser)
     def post(self):
         """
-        网络连接性测试
+        检测后端内置目标的网络连接性，不接受自定义 URL
         """
-        return WebAction().api_action(cmd='net_test', data=self.parser.parse_args().get("url"))
+        return WebAction().api_action(cmd='net_test')
 
 
 @service.route('/run')

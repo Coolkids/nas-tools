@@ -162,6 +162,8 @@ class Media:
         results = normalized_results
         recorder = current_recorder()
         original_title = (recorder.original_name if recorder else None) or query
+        parsed_season = (recorder.context.get("active_parser_season")
+                         if recorder is not None else None)
         pending = []
         examined = []
         seen_entities = set()
@@ -176,9 +178,11 @@ class Media:
                 continue
             candidate["media_type"] = media_type
             evidence = self.__tmdb_title_evidence(
-                original_title, candidate, include_aliases=False)
+                original_title, candidate, include_aliases=False,
+                parsed_season=parsed_season)
             if evidence.get("level") != "strong":
-                evidence = self.__tmdb_title_evidence(original_title, candidate)
+                evidence = self.__tmdb_title_evidence(
+                    original_title, candidate, parsed_season=parsed_season)
             matched = evidence.get("level") == "strong"
             entity = (str(getattr(media_type, "value", media_type)), str(candidate.get("id")))
             examined.append({"id": candidate.get("id"), "media_type": media_type,
@@ -576,7 +580,8 @@ class Media:
                 candidates.extend(alternative_names)
         for name in candidates:
             name = name.strip() if isinstance(name, str) else name
-            if name and name not in names:
+            if name and not any(str(name).casefold() == str(existing).casefold()
+                                 for existing in names):
                 names.append(name)
         return names
 
@@ -588,10 +593,11 @@ class Media:
         """
         if not meta_info:
             return None
+        self.__set_active_parser_season(meta_info)
         primary_name = meta_info.get_name()
         search_type = self.__tmdb_search_type(meta_info.type)
         for search_name in self.__get_search_names(meta_info):
-            if search_name == primary_name:
+            if str(search_name).casefold() == str(primary_name or "").casefold():
                 continue
             recorder = current_recorder()
             if recorder is not None:
@@ -668,6 +674,7 @@ class Media:
         语言在分词时丢失。
         """
         search_names = self.__get_search_names(meta_info, primary_name)
+        self.__set_active_parser_season(meta_info)
         mtype = self.__tmdb_search_type(mtype or getattr(meta_info, "type", None))
         if self._search_tmdbweb:
             for search_name in search_names:
@@ -854,11 +861,25 @@ class Media:
         from app.media.recognition.adapters import meta_from_standard_result
         return meta_from_standard_result(title, parsed, subtitle, used_info)
 
+    @staticmethod
+    def __set_active_parser_season(meta_info):
+        """Expose AniTopy's parsed season to the nested TMDB name matcher."""
+        recorder = current_recorder()
+        if recorder is None:
+            return
+        season = getattr(meta_info, "begin_season", None) if meta_info else None
+        try:
+            season = int(season) if season is not None else None
+        except (TypeError, ValueError):
+            season = None
+        recorder.context["active_parser_season"] = season if season and season > 0 else None
+
     def __search_meta_tmdb(self, meta_info, strict=None, cache=True,
                            chinese=True, append_to_response=None):
         """按一套解析结果查询 TMDB，并维护同现有识别一致的缓存。"""
         if not meta_info or not meta_info.get_name():
             return None
+        self.__set_active_parser_season(meta_info)
         tmdb_type = self.__tmdb_search_type(meta_info.type)
         base_key = self.__make_cache_key(meta_info)
         laboratory = recognition_config("laboratory") or {}
@@ -949,7 +970,7 @@ class Media:
         return str(left.get("id")) == str(right.get("id")) and left_type == right_type
 
     def __tmdb_title_evidence(self, original_title, tmdb_info, release_groups=None,
-                              include_aliases=True):
+                              include_aliases=True, parsed_season=None):
         """Cache title evidence only; the winning TMDB entity is always resolved per request."""
         cfg = recognition_config("recognition") or {}
         decision_cfg = cfg.get("decision") or {}
@@ -959,6 +980,7 @@ class Media:
             "tmdb_info": tmdb_info,
             "release_groups": release_groups,
             "include_aliases": include_aliases,
+            "parsed_season": parsed_season,
             "title_evidence": title_cfg,
             "config_version": recognition_cache.config_version(),
         })
@@ -970,14 +992,15 @@ class Media:
                                 provider_id=recorder.context.get("active_provider_id"))
             return cached
         result = self.__tmdb_title_evidence_uncached(
-            original_title, tmdb_info, release_groups, include_aliases=include_aliases)
+            original_title, tmdb_info, release_groups, include_aliases=include_aliases,
+            parsed_season=parsed_season)
         if result.get("level") != "unavailable":
             recognition_cache.put("decision", key, result,
                                   negative=result.get("level") in ("none", "weak"))
         return result
 
     def __tmdb_title_evidence_uncached(self, original_title, tmdb_info, release_groups=None,
-                                       include_aliases=True):
+                                       include_aliases=True, parsed_season=None):
         """Find whether a complete TMDB title occurs in the raw media title."""
         if not original_title or not tmdb_info:
             return {"level": "unavailable", "matched_name": None, "names": []}
@@ -1030,8 +1053,8 @@ class Media:
                     transformed = unicodedata.normalize("NFKC", transformed)
                 if "simplified_chinese" in normalization:
                     transformed = zhconv.convert(transformed, "zh-cn")
-                if "casefold" in normalization:
-                    transformed = transformed.casefold()
+                # 英文大小写不应影响 TMDB 名称证据匹配，始终执行大小写折叠。
+                transformed = transformed.casefold()
                 for character in transformed:
                     separator = (character == "_" or
                                  not re.match(r"[\w\u3400-\u9fff]", character,
@@ -1135,15 +1158,22 @@ class Media:
                 continue
             after = normalized_title[match.end():].lstrip()
             sequel_check = title_cfg.get("check_sequel_prefix", True)
-            sequel_prefix = bool(sequel_check and
-                                 re.match(r"\d{1,2}\b", after) and
-                                 not normalized_name[-1:].isdigit())
+            sequel_number = re.match(r"\d{1,2}\b", after)
+            try:
+                parser_season = int(parsed_season) if parsed_season is not None else None
+            except (TypeError, ValueError):
+                parser_season = None
+            sequel_prefix = bool(
+                sequel_check and sequel_number and parser_season and parser_season > 0
+                and int(sequel_number.group()) == parser_season
+                and not normalized_name[-1:].isdigit())
             raw_start, raw_end, raw_match = raw_match_span(match.start(), match.end())
             item = {"name": name, "normalized_name": normalized_name,
                     "match": match.group(0), "match_text": raw_match,
                     "match_start": raw_start, "match_end": raw_end,
                     "level": "strong" if strong and not sequel_prefix else "weak",
-                    "sequel_prefix": sequel_prefix}
+                    "sequel_prefix": sequel_prefix,
+                    "parser_season": parser_season}
             (strong_matches if item["level"] == "strong" else weak_matches).append(item)
         if strong_matches:
             return {"level": "strong", "matched_names": strong_matches, "weak_matches": weak_matches,
@@ -1406,7 +1436,8 @@ class Media:
                 recorder.context["active_provider_id"] = provider_id
             evidence = self.__tmdb_title_evidence(
                 (recorder.original_name if recorder is not None else None) or title,
-                tmdb_info, release_groups=getattr(candidate_meta, "resource_team", None))
+                tmdb_info, release_groups=getattr(candidate_meta, "resource_team", None),
+                parsed_season=getattr(candidate_meta, "begin_season", None))
             candidate_evidence.append(((provider_id, candidate_meta, tmdb_info), evidence))
             weights = (((recognition_config("recognition") or {}).get("decision") or {}).get("weights") or {})
             provider_settings = (recognition_settings.get("providers") or {}).get(provider_id) or {}
@@ -1755,6 +1786,7 @@ class Media:
             return None
         if mtype:
             meta_info.type = mtype
+        self.__set_active_parser_season(meta_info)
         tmdb_type = self.__tmdb_search_type(meta_info.type)
         media_key = self.__make_cache_key(meta_info)
         if not cache or not self.meta.get_meta_data_by_key(media_key):
@@ -1831,7 +1863,8 @@ class Media:
         shadow_enabled = (decision_cfg.get("shadow") or {}).get("enabled", False)
         if file_media_info:
             evidence = self.__tmdb_title_evidence(
-                title, file_media_info, release_groups=getattr(meta_info, "resource_team", None))
+                title, file_media_info, release_groups=getattr(meta_info, "resource_team", None),
+                parsed_season=getattr(meta_info, "begin_season", None))
             if recorder is not None:
                 recorder.action("title_match", status=evidence["level"],
                                 input={"original_name": title}, output=evidence,
@@ -1966,6 +1999,7 @@ class Media:
         recorder = current_recorder()
         if recorder is not None:
             recorder.context["active_provider_id"] = "local_rules"
+        self.__set_active_parser_season(meta_info)
 
         media_key = self.__make_cache_key(meta_info)
         if not cache or not self.meta.get_meta_data_by_key(media_key):
@@ -2035,7 +2069,8 @@ class Media:
         shadow_enabled = (strategy_cfg.get("shadow") or {}).get("enabled", False)
         if file_media_info:
             evidence = self.__tmdb_title_evidence(
-                name or title, file_media_info, release_groups=getattr(meta_info, "resource_team", None))
+                name or title, file_media_info, release_groups=getattr(meta_info, "resource_team", None),
+                parsed_season=getattr(meta_info, "begin_season", None))
             if recorder is not None:
                 recorder.action("title_match", status=evidence["level"],
                                 input={"original_name": name or title}, output=evidence,
@@ -2246,6 +2281,7 @@ class Media:
                     # 区配缓存及TMDB
                     media_key = self.__make_cache_key(meta_info)
                     recorder = current_recorder()
+                    self.__set_active_parser_season(meta_info)
                     cached_info = self.meta.get_meta_data_by_key(media_key)
                     # Recorded recognition/transfer requests must arbitrate
                     # against current parser and TMDB evidence. In particular,
@@ -2298,7 +2334,8 @@ class Media:
                     if file_media_info:
                         evidence = self.__tmdb_title_evidence(
                             file_name, file_media_info,
-                            release_groups=getattr(meta_info, "resource_team", None))
+                            release_groups=getattr(meta_info, "resource_team", None),
+                            parsed_season=getattr(meta_info, "begin_season", None))
                         if recorder is not None:
                             recorder.action("title_match", status=evidence["level"],
                                             input={"original_name": file_name}, output=evidence,
@@ -2401,6 +2438,7 @@ class Media:
         year = meta_info.year
         mtype = meta_info.type
         season = meta_info.begin_season
+        self.__set_active_parser_season(meta_info)
         if not name:
             return None
 

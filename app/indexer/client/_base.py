@@ -364,10 +364,11 @@ class _IIndexClient(metaclass=ABCMeta):
                         if not media_info:
                             log.warn(f"【{self.index_type}】{torrent_name} 识别媒体信息出错！")
                             index_error += 1
-                            record_business_short_circuit(
-                                torrent_name, "indexer", "indexer_resolution_failed",
+                            record_deferred_parse_result(
+                                meta_info, torrent_name, "indexer", "indexer_resolution_failed",
                                 "indexer_media_info_unavailable",
-                                {"indexer": self.index_type}, business_status="error")
+                                {"indexer": self.index_type}, business_status="error",
+                                overall_status="failed")
                             continue
                         elif not media_info.tmdb_info:
                             log.info(

@@ -9,7 +9,8 @@ from unittest.mock import Mock, patch
 from web.action import WebAction
 from config import Config
 from app.media.recognition.settings import (
-    migrate_legacy_ai_provider, migrate_legacy_parse_ttl, provider_enabled,
+    migrate_legacy_ai_provider, migrate_legacy_parse_ttl, profile_allows_provider,
+    provider_enabled,
 )
 from ruamel.yaml import YAML
 
@@ -310,3 +311,48 @@ class RecognitionConfigTest(TestCase):
                          saved["recognition"]["profiles"]["parse_only"]["providers"])
         self.assertEqual(["local_rules"],
                          saved["recognition"]["profiles"]["resolve"]["providers"])
+
+    def test_parse_only_always_allows_the_local_base_parser(self):
+        recognition = {"profiles": {
+            "parse_only": {"providers": ["anitopy_ml"]},
+            "resolve": {"providers": ["anitopy_ml"]},
+        }}
+
+        self.assertTrue(profile_allows_provider("parse_only", "local_rules", recognition))
+        self.assertFalse(profile_allows_provider("resolve", "local_rules", recognition))
+
+    def test_all_enabled_parse_only_profile_is_preserved_by_settings_update(self):
+        live_config = config_snapshot()
+        saved = {}
+        config = SimpleNamespace(
+            get_config=lambda: live_config,
+            save_config=lambda value: saved.update(value))
+        action = object.__new__(WebAction)
+
+        with patch("web.action.Config", return_value=config):
+            response = action._WebAction__update_config({
+                "recognition.profiles.parse_only.providers": "all_enabled",
+            })
+
+        self.assertEqual(0, response["code"])
+        self.assertEqual("all_enabled",
+                         saved["recognition"]["profiles"]["parse_only"]["providers"])
+
+    def test_singleton_all_enabled_provider_arrays_are_normalized(self):
+        live_config = config_snapshot()
+        saved = {}
+        config = SimpleNamespace(
+            get_config=lambda: live_config,
+            save_config=lambda value: saved.update(value))
+        action = object.__new__(WebAction)
+
+        with patch("web.action.Config", return_value=config):
+            response = action._WebAction__update_config({
+                "recognition.profiles.parse_only.providers": ["all_enabled"],
+                "recognition.profiles.resolve.providers": ["all_enabled"],
+            })
+
+        self.assertEqual(0, response["code"])
+        profiles = saved["recognition"]["profiles"]
+        self.assertEqual("all_enabled", profiles["parse_only"]["providers"])
+        self.assertEqual("all_enabled", profiles["resolve"]["providers"])

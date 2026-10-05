@@ -36,6 +36,7 @@ from app.media import Category, Media, Bangumi, DouBan
 from app.media.meta import MetaInfo, MetaBase
 from app.mediaserver import MediaServer
 from app.message import Message, MessageCenter
+from app.network import NetworkTest
 from app.rsschecker import RssChecker
 from app.scheduler import Scheduler, restart_scheduler
 from app.subscribe import Subscribe
@@ -1148,11 +1149,19 @@ class WebAction:
             "recognition.profiles.resolve.network_allowed",
             "recognition.profiles.resolve.tmdb_allowed",
         }
+        profile_provider_keys = {
+            "recognition.profiles.parse_only.providers",
+            "recognition.profiles.resolve.providers",
+        }
         cfgs = dict(data).items()
         # Candidate config is detached from the live Config singleton.
         for key, value in cfgs:
             if key == "test":
                 continue
+            # 兼容设置页把特殊选项序列化为单元素数组的情况。
+            # all_enabled 是特殊值，不是一个具体的解析器 ID。
+            if key in profile_provider_keys and value == ["all_enabled"]:
+                value = "all_enabled"
             if key == "recognition.providers.anitopy_ml.enabled":
                 value = StringUtils.to_bool(value, False)
             elif key in boolean_fields:
@@ -2534,30 +2543,10 @@ class WebAction:
         }
 
     @staticmethod
-    def __net_test(data):
-        target = data
-        if target == "image.tmdb.org":
-            target = target + "/t/p/w500/wwemzKWzjKYJFfCeiB57q3r4Bcm.png"
-        if target == "qyapi.weixin.qq.com":
-            target = target + "/cgi-bin/message/send"
-        target = "https://" + target
-        start_time = datetime.datetime.now()
-        if target.find("themoviedb") != -1 \
-                or target.find("telegram") != -1 \
-                or target.find("fanart") != -1 \
-                or target.find("tmdb") != -1:
-            res = RequestUtils(proxies=Config().get_proxies(),
-                               timeout=5).get_res(target)
-        else:
-            res = RequestUtils(timeout=5).get_res(target)
-        seconds = int((datetime.datetime.now() -
-                      start_time).microseconds / 1000)
-        if not res:
-            return {"res": False, "time": "%s 毫秒" % seconds}
-        elif res.ok:
-            return {"res": True, "time": "%s 毫秒" % seconds}
-        else:
-            return {"res": False, "time": "%s 毫秒" % seconds}
+    def __net_test(data=None):
+        if data is not None and data != {}:
+            return {"code": -1, "msg": "网络检测不接受自定义目标"}
+        return NetworkTest().run()
 
     def __add_filtergroup(self, data):
         """

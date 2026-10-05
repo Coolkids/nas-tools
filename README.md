@@ -24,6 +24,7 @@ Docker：https://hub.docker.com/r/coolkid903/nas-tools
 * 监控下载软件，下载完成后自动识别真实名称，硬链接到媒体库并重命名。
 * 对目录进行监控，文件变化时自动识别媒体信息硬链接到媒体库并重命名。
 * 解决保种与媒体库整理冲突的问题，专为中文环境优化，支持国产剧集和动漫，重命名准确率高，改名后Emby/Jellyfin/Plex完美刮削海报墙。
+* 可调用 [anitopy-ml](https://github.com/Coolkids/anitopy-ml) AI推理服务解析影视发布标题，提取作品名、季集数、发布组和音视频规格等结构化信息。
 
 ### 3、站点养护
 * 全面的站点数据统计，实时监测你的站点流量情况。
@@ -79,6 +80,27 @@ nohup uv run python run.py &
 
 
 * 启动程序并配置：Docker默认使用3000端口启动，默认用户密码：admin/password（docker需要参考教程提前映射好端口、下载目录、媒体库目录）。登录管理界面后，在设置中根据每个配置项的提示在WEB页面修改好配置（基础设置中有标红星的是必须要配置的，如TMDB APIKEY等），每一个配置项后都有小问号，点击会有详细的配置说明，推荐阅读。需要重启生效的配置，请通过运行进程或容器管理工具重启。
+
+### AI 推理与 anitopy-ml
+
+[anitopy-ml](https://github.com/Coolkids/anitopy-ml) 是一个本地运行的多语言媒体标题解析项目，使用 XLM-R 模型从中日英混合的文件名中抽取作品名、别名、季数、集数、发布组、片源、编码和字幕等字段。NAS-Tools 通过 HTTP 调用它的解析接口，将结果与本地规则解析共同用于媒体名称识别；后续作品信息匹配仍由 TMDB 等媒体信息源完成。
+
+anitopy-ml 需要单独部署，模型权重不包含在 NAS-Tools 中。可按 [anitopy-ml Docker 部署说明](https://github.com/Coolkids/anitopy-ml/blob/main/docs/Docker%E5%AE%B9%E5%99%A8%E9%83%A8%E7%BD%B2.md)启动推理服务，并确认 NAS-Tools 所在主机或容器能够访问该服务。
+
+在 `config/config.yaml` 中配置 `recognition.providers.anitopy_ml`：
+
+```yaml
+recognition:
+  providers:
+    anitopy_ml:
+      enabled: true
+      endpoint: "http://anitopy-ml:8000"
+      model_revision: "v11"
+```
+
+`enabled` 用于启用或关闭 anitopy-ml 解析器；`endpoint` 填服务的基础地址，NAS-Tools 会在请求时调用其 `/v1/parse` 接口；更换模型版本时更新 `model_revision`，避免继续使用旧模型对应的解析缓存。也可以在 WEB 设置中调整 AI 推理开关和接口地址，设置页面会同步新旧配置字段。直接编辑 YAML 时以上 `recognition.providers.anitopy_ml` 配置为准。
+
+如果 NAS-Tools 与 anitopy-ml 分别运行在 Docker 容器中，`endpoint` 应填写两者所在 Docker 网络可访问的服务名和端口（例如 `http://anitopy-ml:8000`）；容器内的 `localhost` 指向 NAS-Tools 自身。服务部署在另一台机器时，填写 NAS-Tools 可以访问的主机地址和映射端口。关闭解析器或服务暂时不可用时，本地规则解析仍可继续工作。
 
 ### 3、设置媒体库服务器
 支持 Emby、Jellyfin、Plex，设置媒体服务器后可以对本地资源进行判重避免重复下载，同时能标识本地已存在的资源：

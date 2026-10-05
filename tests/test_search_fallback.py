@@ -28,6 +28,19 @@ class SearchFallbackTest(TestCase):
             Media._Media__get_search_names(meta_info)
         )
 
+    def test_search_names_deduplicate_english_case_variants(self):
+        meta_info = SimpleNamespace(
+            get_name=lambda: "The Matrix",
+            cn_name="THE MATRIX",
+            en_name="the matrix",
+            alternative_names=["THE MATRIX", "The Matrix Extended"],
+        )
+
+        self.assertEqual(
+            ["The Matrix", "The Matrix Extended"],
+            Media._Media__get_search_names(meta_info),
+        )
+
     def test_number_prefix_is_kept_for_both_title_aliases(self):
         meta_info = MetaInfo("3体 3 Body Problem 2024 S01E01")
 

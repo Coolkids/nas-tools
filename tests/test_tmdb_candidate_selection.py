@@ -30,7 +30,7 @@ class TmdbCandidateSelectionTest(TestCase):
         self.media._tmdb_clients = []
         self.media._rmt_match_mode = MatchMode.NORMAL
 
-    def _resolve(self, title, results=None, error=None, aliases=None):
+    def _resolve(self, title, results=None, error=None, aliases=None, parsed_season=None):
         self.media.search = _Search(results, error)
         config = {"recognition": {"decision": {"title_evidence": {
             "name_sources": ["primary", "original", "alternative", "translation"],
@@ -51,6 +51,7 @@ class TmdbCandidateSelectionTest(TestCase):
                 patch.object(self.media, "_Media__search_tmdb_allnames",
                              return_value=(None, aliases or [])) as alias_lookup:
             with recognition_scope(title, source="candidate-test") as recorder:
+                recorder.context["active_parser_season"] = parsed_season
                 result = self.media._Media__search_tmdb(
                     "Parsed Name", MediaType.TV)
         return result, recorder, alias_lookup
@@ -83,6 +84,32 @@ class TmdbCandidateSelectionTest(TestCase):
         self.assertEqual(1, selection["output"]["candidate_count"])
         self.assertEqual(1, selection["output"]["pending_count"])
         self.assertEqual("success", recorder.tmdb_results[-1]["status"])
+
+    def test_episode_suffix_does_not_block_anime_tmdb_candidate_without_parsed_season(self):
+        result, recorder, _ = self._resolve(
+            "[Nekomoe kissaten&LoliHouse] Medalist - 14 "
+            "[WebRip 1080p HEVC-10bit AAC ASSx2].mkv",
+            results=[{"id": 1, "name": "Medalist"}],
+            parsed_season=None)
+
+        self.assertEqual(1, result["id"])
+        selection = next(action for action in recorder.actions
+                         if action["action_type"] == "tmdb_candidate_selection")
+        self.assertEqual(1, selection["output"]["pending_count"])
+        self.assertEqual("success", recorder.tmdb_results[-1]["status"])
+
+    def test_explicit_anitopy_season_can_mark_a_matching_numeric_suffix_as_sequel(self):
+        result, recorder, _ = self._resolve(
+            "Example Story 2 2024 1080p.mkv",
+            results=[{"id": 1, "name": "Example Story"}],
+            parsed_season=2)
+
+        self.assertEqual({}, result)
+        selection = next(action for action in recorder.actions
+                         if action["action_type"] == "tmdb_candidate_selection")
+        self.assertEqual(0, selection["output"]["pending_count"])
+        self.assertTrue(selection["output"]["examined"][0]["evidence"]["weak_matches"][0]["sequel_prefix"])
+        self.assertEqual("no_tmdb_match", recorder.tmdb_results[-1]["status"])
 
     def test_tmdb_as_obj_aliases_are_read_from_detail_response(self):
         detail = AsObj(

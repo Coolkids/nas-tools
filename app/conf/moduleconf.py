@@ -480,18 +480,6 @@ class ModuleConf(object):
         }
     }
 
-    # 网络测试对象
-    NETTEST_TARGETS = [
-        "www.themoviedb.org",
-        "api.themoviedb.org",
-        "api.tmdb.org",
-        "image.tmdb.org",
-        "webservice.fanart.tv",
-        "api.telegram.org",
-        "qyapi.weixin.qq.com",
-        "www.opensubtitles.org"
-    ]
-
     # 下载器
     DOWNLOADER_CONF = {
         "qbittorrent": {

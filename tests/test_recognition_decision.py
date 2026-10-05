@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 
 from app.media.recognition.decision import candidate_features, select_title_evidence
 from app.media.media import Media
+from app.media.meta.metaanime import MetaAnime
 from app.utils.types import MediaType
 
 
@@ -133,11 +134,31 @@ class TmdbTitleEvidenceTest(TestCase):
             "Titanic.1997.1080p", {"title": "It"})
         self.assertEqual("none", result["level"])
 
-    def test_sequel_number_makes_the_original_title_a_weak_prefix(self):
+    def test_number_after_title_is_not_assumed_to_be_a_sequel(self):
         result = self.media._Media__tmdb_title_evidence(
             "Example Story 2 2024 1080p", {"title": "Example Story"})
+        self.assertEqual("strong", result["level"])
+        self.assertFalse(result["matched_names"][0]["sequel_prefix"])
+
+    def test_anitopy_season_confirms_a_matching_sequel_number(self):
+        result = self.media._Media__tmdb_title_evidence(
+            "Example Story 2 2024 1080p", {"title": "Example Story"},
+            parsed_season=2)
         self.assertEqual("weak", result["level"])
         self.assertTrue(result["weak_matches"][0]["sequel_prefix"])
+        self.assertEqual(2, result["weak_matches"][0]["parser_season"])
+
+    def test_episode_number_after_anime_title_is_not_mistaken_for_a_sequel(self):
+        title = ("[Nekomoe kissaten&LoliHouse] Medalist - 14 "
+                 "[WebRip 1080p HEVC-10bit AAC ASSx2].mkv")
+        parsed = MetaAnime(title)
+        self.assertEqual(14, parsed.begin_episode)
+        self.assertIsNone(parsed.begin_season)
+
+        result = self.media._Media__tmdb_title_evidence(
+            title, {"name": "Medalist"}, parsed_season=parsed.begin_season)
+        self.assertEqual("strong", result["level"])
+        self.assertFalse(result["matched_names"][0]["sequel_prefix"])
 
     def test_short_numeric_and_technical_titles_are_weak_evidence(self):
         for title, tmdb_name in (
@@ -186,24 +207,27 @@ class TmdbTitleEvidenceTest(TestCase):
             "黑客帝國 1999", {"title": "黑客帝国"})
         self.assertEqual("strong", result["level"])
 
-    def test_normalization_options_control_casefold_and_underscore_separators(self):
+    def test_casefold_is_always_applied_and_underscore_normalization_is_configurable(self):
         info = {"title": "The Matrix"}
         normal_options = {
             "normalization": ["nfkc", "casefold", "simplified_chinese", "separators", "whitespace"]
         }
-        exact_case_options = {"normalization": ["nfkc", "separators", "whitespace"]}
+        casefold_disabled_options = {"normalization": ["nfkc", "separators", "whitespace"]}
         with patch("app.media.media.recognition_config", return_value={
                 "decision": {"title_evidence": normal_options}}):
             normalized = self.media._Media__tmdb_title_evidence("the_Matrix_1999", info)
         with patch("app.media.media.recognition_config", return_value={
-                "decision": {"title_evidence": exact_case_options}}):
-            case_sensitive = self.media._Media__tmdb_title_evidence("the Matrix", info)
+                "decision": {"title_evidence": casefold_disabled_options}}):
+            mixed_case = self.media._Media__tmdb_title_evidence("the Matrix", info)
 
         self.assertEqual("strong", normalized["level"])
         self.assertEqual("the_Matrix", normalized["matched_names"][0]["match_text"])
         self.assertEqual((0, 10), (normalized["matched_names"][0]["match_start"],
                                   normalized["matched_names"][0]["match_end"]))
-        self.assertEqual("none", case_sensitive["level"])
+        self.assertEqual("strong", mixed_case["level"])
+        self.assertEqual("the Matrix", mixed_case["matched_names"][0]["match_text"])
+        self.assertEqual((0, 10), (mixed_case["matched_names"][0]["match_start"],
+                                  mixed_case["matched_names"][0]["match_end"]))
 
     def test_traditional_chinese_evidence_points_back_to_raw_title_range(self):
         result = self.media._Media__tmdb_title_evidence(
