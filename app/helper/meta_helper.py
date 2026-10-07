@@ -1,11 +1,13 @@
 import os
 import pickle
 import random
+import tempfile
 import time
 from enum import Enum
 from threading import RLock
 
 from app.utils import ExceptionUtils
+from app.utils.cache_memory import estimate_memory
 from app.utils.commons import singleton
 from config import Config
 
@@ -46,6 +48,14 @@ class MetaHelper(object):
         """
         with lock:
             self._meta_data = {}
+            self.save_meta_data(force=True)
+
+    def cache_info(self, include_memory=False):
+        with lock:
+            result = {"entries": len(self._meta_data)}
+            if include_memory:
+                result["memory_bytes"] = estimate_memory(self._meta_data) if self._meta_data else 0
+            return result
 
     def get_meta_data_path(self):
         """
@@ -164,16 +174,21 @@ class MetaHelper(object):
         """
         保存缓存数据到文件
         """
-        meta_data = self.__load_meta_data(self._meta_path)
-        new_meta_data = {k: v for k, v in self._meta_data.items() if str(v.get("id")) != '0'}
-
-        if not force \
-                and not self._random_sample(new_meta_data) \
-                and meta_data.keys() == new_meta_data.keys():
-            return
-
-        with open(self._meta_path, 'wb') as f:
-            pickle.dump(new_meta_data, f, pickle.HIGHEST_PROTOCOL)
+        with lock:
+            meta_data = self.__load_meta_data(self._meta_path)
+            new_meta_data = {k: v for k, v in self._meta_data.items() if str(v.get("id")) != '0'}
+            if not force and not self._random_sample(new_meta_data) and meta_data == new_meta_data:
+                return
+            fd, temporary = tempfile.mkstemp(dir=os.path.dirname(self._meta_path), suffix=".tmp")
+            try:
+                with os.fdopen(fd, 'wb') as f:
+                    pickle.dump(new_meta_data, f, pickle.HIGHEST_PROTOCOL)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temporary, self._meta_path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
 
     def _random_sample(self, new_meta_data):
         """

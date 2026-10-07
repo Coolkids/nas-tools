@@ -1,13 +1,13 @@
 import base64
 import datetime
-from functools import lru_cache
+from app.utils.persistent_cache import persistent_memoize
 
 from app.media import Media
 from app.utils import RequestUtils, ExceptionUtils
 from config import Config
 
 
-@lru_cache(maxsize=2)
+@persistent_memoize('wallpaper', maxsize=2)
 def get_login_wallpaper(today=datetime.datetime.strftime(datetime.datetime.now(), '%Y%m%d')):
     """
     获取Base64编码的壁纸图片

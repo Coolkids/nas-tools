@@ -1,5 +1,5 @@
 import copy
-from functools import lru_cache
+from app.utils.persistent_cache import persistent_memoize
 import cn2an
 
 from app.media import Media, Bangumi, DouBan
@@ -150,7 +150,7 @@ class WebUtils:
         return medias
 
     @staticmethod
-    @lru_cache(maxsize=1024)
+    @persistent_memoize('web_request', maxsize=1024)
     def request_cache(url):
         """
         带缓存的请求

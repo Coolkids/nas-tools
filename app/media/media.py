@@ -164,6 +164,8 @@ class Media:
         original_title = (recorder.original_name if recorder else None) or query
         parsed_season = (recorder.context.get("active_parser_season")
                          if recorder is not None else None)
+        parsed_episode = (recorder.context.get("active_parser_episode")
+                          if recorder is not None else None)
         pending = []
         examined = []
         seen_entities = set()
@@ -190,8 +192,72 @@ class Media:
             if matched and candidate.get("id") and entity not in seen_entities:
                 seen_entities.add(entity)
                 pending.append(candidate)
-                if len(pending) > 1:
-                    break
+
+        genre_priority_filter = None
+        decision_config = recognition_config("recognition") or {}
+        decision_settings = decision_config.get("decision") or {}
+        title_evidence_config = decision_settings.get("title_evidence") or {}
+        try:
+            preferred_genre_id = int(title_evidence_config.get("preferred_genre_id", 16) or 0)
+        except (TypeError, ValueError):
+            preferred_genre_id = 16
+        if len(pending) > 1 and preferred_genre_id > 0:
+            before_filter = list(pending)
+            preferred_candidates = []
+            genre_results = []
+            for candidate in before_filter:
+                evidence = self.__tmdb_candidate_genre_evidence(
+                    candidate, preferred_genre_id)
+                genre_results.append({
+                    "id": candidate.get("id"),
+                    "media_type": candidate.get("media_type"),
+                    **evidence,
+                })
+                if evidence.get("status") == "match":
+                    preferred_candidates.append(candidate)
+            if preferred_candidates:
+                pending = preferred_candidates
+            genre_priority_filter = {
+                "preferred_genre_id": preferred_genre_id,
+                "before_ids": [item.get("id") for item in before_filter],
+                "candidates": genre_results,
+                "after_ids": [item.get("id") for item in pending],
+                "applied": bool(preferred_candidates),
+            }
+
+        season_episode_filter = None
+        if len(pending) > 1 and (parsed_season or parsed_episode):
+            before_filter = list(pending)
+            filter_results = []
+            compatible = []
+            unknown = []
+            for candidate in before_filter:
+                evidence = self.__tmdb_season_episode_evidence(
+                    candidate, parsed_season=parsed_season,
+                    parsed_episode=parsed_episode)
+                filter_results.append({
+                    "id": candidate.get("id"),
+                    "media_type": candidate.get("media_type"),
+                    **evidence,
+                })
+                if evidence.get("status") == "match":
+                    compatible.append(candidate)
+                elif evidence.get("status") == "unknown":
+                    unknown.append(candidate)
+
+            # TMDB 数据缺失时不据此淘汰候选；如果所有候选的详情都明确
+            # 不符合季集，也保留原候选，让现有歧义处理拒绝擅自选择。
+            filtered = compatible + unknown
+            if filtered:
+                pending = filtered
+            season_episode_filter = {
+                "season": parsed_season,
+                "episode": parsed_episode,
+                "before_ids": [item.get("id") for item in before_filter],
+                "candidates": filter_results,
+                "after_ids": [item.get("id") for item in pending],
+                "all_candidates_incompatible": not filtered,
+            }
 
         if len(pending) == 1:
             status, reason, selected = "success", None, pending[0]
@@ -214,10 +280,139 @@ class Media:
                 output={"candidate_count": len(results), "examined": examined,
                         "pending_count": len(pending),
                         "pending_ids": [item.get("id") for item in pending],
+                        "genre_priority_filter": genre_priority_filter,
+                        "season_episode_filter": season_episode_filter,
                         "selected_id": selected.get("id") if selected else None,
                         "results": results},
                 reason=reason)
         return selected
+
+    def __tmdb_candidate_genre_evidence(self, candidate, preferred_genre_id):
+        """读取 TMDB 搜索或详情中的类型 ID，判断候选是否符合类型偏好。"""
+        genre_ids = self.__tmdb_object_value(candidate, "genre_ids")
+        if genre_ids is None:
+            tmdb_id = candidate.get("id")
+            media_type = candidate.get("media_type")
+            if not tmdb_id or media_type not in (MediaType.MOVIE, MediaType.TV):
+                return {"status": "unknown", "reason": "genre_data_unavailable"}
+            try:
+                details = self.get_tmdb_info(mtype=media_type, tmdbid=tmdb_id,
+                                             chinese=False)
+            except Exception as err:
+                return {"status": "unknown", "reason": "tmdb_genre_lookup_error",
+                        "error": str(err)}
+            if not details:
+                return {"status": "unknown", "reason": "genre_data_unavailable"}
+            genre_ids = self.__tmdb_object_value(details, "genre_ids")
+            if genre_ids is None:
+                genres = self.__tmdb_object_value(details, "genres")
+                if genres is None:
+                    return {"status": "unknown", "reason": "genre_data_unavailable"}
+                genre_ids = [self.__tmdb_object_value(genre, "id") for genre in genres]
+
+        if not isinstance(genre_ids, (list, tuple, set)):
+            genre_ids = [genre_ids]
+        normalized_ids = []
+        for genre_id in genre_ids:
+            try:
+                normalized_ids.append(int(genre_id))
+            except (TypeError, ValueError):
+                continue
+        return {
+            "status": "match" if preferred_genre_id in normalized_ids else "mismatch",
+            "reason": "preferred_genre_found" if preferred_genre_id in normalized_ids
+                      else "preferred_genre_not_found",
+            "genre_ids": normalized_ids,
+        }
+
+    @staticmethod
+    def __tmdb_object_value(value, key, default=None):
+        """从字典或 TMDB 客户端的 AsObj 中读取字段。"""
+        if isinstance(value, dict):
+            return value.get(key, default)
+        getter = getattr(value, "get", None)
+        if callable(getter):
+            try:
+                return getter(key, default)
+            except (TypeError, AttributeError):
+                pass
+        return getattr(value, key, default)
+
+    def __tmdb_season_episode_evidence(self, candidate, parsed_season=None,
+                                       parsed_episode=None):
+        """根据 TMDB 已知季集信息校验解析出的季号和集号。"""
+        media_type = candidate.get("media_type")
+        if media_type not in (MediaType.TV, MediaType.ANIME, "tv", "anime"):
+            return {"status": "unknown", "reason": "not_tv_candidate"}
+
+        tmdb_id = candidate.get("id")
+        if not tmdb_id:
+            return {"status": "unknown", "reason": "missing_tmdb_id"}
+
+        try:
+            details = self.get_tmdb_info(mtype=MediaType.TV, tmdbid=tmdb_id,
+                                         chinese=False)
+        except Exception as err:
+            return {"status": "unknown", "reason": "tmdb_detail_error",
+                    "error": str(err)}
+        if not details:
+            return {"status": "unknown", "reason": "tmdb_detail_unavailable"}
+
+        if parsed_season:
+            seasons = self.__tmdb_object_value(details, "seasons")
+            if not isinstance(seasons, (list, tuple)) or not seasons:
+                return {"status": "unknown", "reason": "season_data_unavailable"}
+
+            matching_season = None
+            for season in seasons:
+                season_number = self.__tmdb_object_value(season, "season_number")
+                try:
+                    season_number = int(season_number)
+                except (TypeError, ValueError):
+                    continue
+                if season_number == int(parsed_season):
+                    matching_season = season
+                    break
+            if matching_season is None:
+                return {"status": "mismatch", "reason": "season_not_found",
+                        "parsed_season": parsed_season,
+                        "available_seasons": [
+                            self.__tmdb_object_value(season, "season_number")
+                            for season in seasons
+                        ]}
+
+            if not parsed_episode:
+                return {"status": "match", "reason": "season_found"}
+
+            episode_count = self.__tmdb_object_value(matching_season, "episode_count")
+            try:
+                episode_count = int(episode_count)
+            except (TypeError, ValueError):
+                episode_count = None
+            if episode_count and int(parsed_episode) > episode_count:
+                return {"status": "mismatch", "reason": "episode_exceeds_season_count",
+                        "parsed_season": parsed_season,
+                        "parsed_episode": parsed_episode,
+                        "episode_count": episode_count}
+            if episode_count:
+                return {"status": "match", "reason": "season_episode_within_count",
+                        "episode_count": episode_count}
+            return {"status": "unknown", "reason": "season_episode_count_unavailable"}
+
+        if parsed_episode:
+            episode_count = self.__tmdb_object_value(details, "number_of_episodes")
+            try:
+                episode_count = int(episode_count)
+            except (TypeError, ValueError):
+                episode_count = None
+            if episode_count and int(parsed_episode) > episode_count:
+                return {"status": "mismatch", "reason": "episode_exceeds_series_count",
+                        "parsed_episode": parsed_episode,
+                        "episode_count": episode_count}
+            if episode_count:
+                return {"status": "match", "reason": "episode_within_series_count",
+                        "episode_count": episode_count}
+        return {"status": "unknown", "reason": "episode_data_unavailable"}
 
     @staticmethod
     def __recognition_tmdb_failure_reason(recorder):
@@ -863,16 +1058,22 @@ class Media:
 
     @staticmethod
     def __set_active_parser_season(meta_info):
-        """Expose AniTopy's parsed season to the nested TMDB name matcher."""
+        """将 AniTopy 解析出的季号和集号放入当前识别上下文。"""
         recorder = current_recorder()
         if recorder is None:
             return
         season = getattr(meta_info, "begin_season", None) if meta_info else None
+        episode = getattr(meta_info, "begin_episode", None) if meta_info else None
         try:
             season = int(season) if season is not None else None
         except (TypeError, ValueError):
             season = None
+        try:
+            episode = int(episode) if episode is not None else None
+        except (TypeError, ValueError):
+            episode = None
         recorder.context["active_parser_season"] = season if season and season > 0 else None
+        recorder.context["active_parser_episode"] = episode if episode and episode > 0 else None
 
     def __search_meta_tmdb(self, meta_info, strict=None, cache=True,
                            chinese=True, append_to_response=None):

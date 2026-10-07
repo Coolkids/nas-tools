@@ -7,6 +7,75 @@ from web.action import WebAction
 
 
 class RecognitionApiContractTest(unittest.TestCase):
+    def _name_test(self, reason=None, parsed=True, tmdb_result=None, error=None,
+                   tmdb_allowed=True):
+        from app.media.media import Media
+        from app.media.recognition.records import current_recorder
+
+        media = object.__new__(Media)
+        media.tmdb = object()
+        media_info = SimpleNamespace(tmdb_info=tmdb_result, recognition_source="original") if parsed else None
+        helper = Mock()
+        helper.insert_recognition_record.return_value = "saved"
+
+        def resolve(**_kwargs):
+            if error:
+                raise error
+            if reason:
+                current_recorder().context["decision_reason"] = reason
+            return media_info
+
+        with patch("web.action.Media", return_value=media), \
+                patch.object(media, "_get_media_info_impl", side_effect=resolve), \
+                patch.object(media, "_Media__meta_snapshot", return_value={"name": "Example"}), \
+                patch("app.media.media.profile_tmdb_allowed", return_value=tmdb_allowed), \
+                patch.object(WebAction, "mediainfo_dict", return_value={
+                    "name": "Example", "title": "Example" if tmdb_result else "",
+                    "tmdbid": tmdb_result.get("id") if tmdb_result else None,
+                }), \
+                patch("app.media.recognition.records.replay_recognition_spool"), \
+                patch("app.media.recognition.records._write_spool", return_value=None), \
+                patch("app.helper.db_helper.DbHelper", return_value=helper):
+            response = object.__new__(WebAction)._WebAction__name_test({"name": "Example.S01E01"})
+
+        # 测试接口和核心识别共用一个请求，不能产生两条识别记录。
+        helper.insert_recognition_record.assert_called_once()
+        record = helper.insert_recognition_record.call_args.args[0]
+        self.assertEqual("web", record["source"])
+        self.assertEqual("resolve", record["stage"])
+        return response, record
+
+    def test_name_test_returns_failure_reason_with_or_without_partial_parse(self):
+        for reason in ("ambiguous_tmdb", "tmdb_no_results", "tmdb_network_error",
+                       "insufficient_title_evidence", "recognition_deadline_exceeded"):
+            for parsed in (True, False):
+                with self.subTest(reason=reason, parsed=parsed):
+                    response, record = self._name_test(reason=reason, parsed=parsed)
+                    self.assertEqual(0, response["code"])
+                    self.assertEqual("failed", response["data"]["recognition_status"])
+                    self.assertEqual(reason, response["data"]["recognition_reason"])
+                    self.assertEqual(reason, record["overall_result"]["reason"])
+                    self.assertEqual(parsed, "title" in response["data"])
+
+    def test_name_test_preserves_success_and_skipped_outcomes(self):
+        success, _ = self._name_test(tmdb_result={"id": 42, "name": "Example"})
+        self.assertEqual("success", success["data"]["recognition_status"])
+        self.assertIsNone(success["data"]["recognition_reason"])
+        self.assertEqual(42, success["data"]["tmdbid"])
+
+        skipped, _ = self._name_test(tmdb_allowed=False)
+        self.assertEqual("skipped", skipped["data"]["recognition_status"])
+        self.assertEqual("tmdb_disallowed_by_profile", skipped["data"]["recognition_reason"])
+
+    def test_name_test_reports_missing_name_and_parser_exception(self):
+        failed, _ = self._name_test(parsed=False)
+        self.assertEqual("no_name_parsed", failed["data"]["recognition_reason"])
+
+        error, record = self._name_test(error=ValueError("解析响应格式无效"))
+        self.assertEqual("failed", error["data"]["recognition_status"])
+        self.assertEqual("解析响应格式无效", error["data"]["recognition_reason"])
+        self.assertEqual("解析响应格式无效", record["overall_result"]["reason"])
+
     def test_list_validates_pagination_and_date_before_query(self):
         helper = Mock()
         helper.get_recognition_records.return_value = (0, [])

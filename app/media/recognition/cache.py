@@ -7,7 +7,8 @@ import time
 from collections import OrderedDict
 from threading import RLock
 
-from cacheout import Cache
+from app.utils.persistent_cache import PersistentCache, STORE
+from app.utils.cache_memory import cache_memory_info, estimate_memory
 
 from app.media.recognition.records import current_recorder, recognition_config
 
@@ -21,20 +22,27 @@ _DEFAULTS = {
     "decision": {"ttl_seconds": 3600},
 }
 _CACHES = {
-    "tmdb": Cache(maxsize=2048, ttl=3600, default=CACHE_MISS),
-    "decision": Cache(maxsize=2048, ttl=3600, default=CACHE_MISS),
+    "tmdb": PersistentCache("recognition_tmdb", maxsize=2048, ttl=3600, default=CACHE_MISS),
+    "decision": PersistentCache("recognition_decision", maxsize=2048, ttl=3600, default=CACHE_MISS),
 }
 
 
 class _ParseCache:
     """解析缓存的 LRU、字节预算和代次保护。"""
 
-    def __init__(self):
+    def __init__(self, store=None):
         self._lock = RLock()
         self._entries = OrderedDict()
         self._bytes = 0
         self._generation = 0
         self._signature = None
+        self._store = store
+
+    def _remove(self, key):
+        item = self._entries.pop(key)
+        self._bytes -= item[2]
+        if self._store is not None:
+            self._store.delete("recognition_parse", key)
 
     @staticmethod
     def _integer(settings, name, default, minimum=1):
@@ -74,14 +82,31 @@ class _ParseCache:
         effective = self._effective_settings(settings)
         signature = tuple(sorted(effective.items()))
         if signature != self._signature:
-            self._clear_locked()
+            first_load = self._signature is None
+            if not first_load:
+                self._clear_locked()
             self._generation += 1
             self._signature = signature
+            if first_load and self._store is not None:
+                for key, payload, expires in self._store.load("recognition_parse"):
+                    stored_signature, value, size = payload
+                    if (stored_signature != signature or not effective["enabled"] or
+                            expires is None or expires <= time.time() or
+                            size > effective["max_entry_bytes"]):
+                        self._store.delete("recognition_parse", key)
+                        continue
+                    self._entries[key] = (time.monotonic() + expires - time.time(), value, size)
+                    self._bytes += size
+                while self._entries and (len(self._entries) > effective["max_entries"] or
+                                         self._bytes > effective["max_bytes"]):
+                    self._remove(next(iter(self._entries)))
         return effective
 
     def _clear_locked(self):
         self._entries.clear()
         self._bytes = 0
+        if self._store is not None:
+            self._store.clear("recognition_parse")
 
     @staticmethod
     def _size(value):
@@ -110,8 +135,7 @@ class _ParseCache:
                 return CACHE_MISS
             expires, value, size = entry
             if expires <= time.monotonic():
-                self._entries.pop(key, None)
-                self._bytes -= size
+                self._remove(key)
                 return CACHE_MISS
             self._entries.move_to_end(key)
             return copy.deepcopy(value)
@@ -125,18 +149,20 @@ class _ParseCache:
             size = self._size(value)
             if size is None or size > effective["max_entry_bytes"]:
                 return False
-            previous = self._entries.pop(key, None)
-            if previous is not None:
-                self._bytes -= previous[2]
+            if key in self._entries:
+                self._remove(key)
             # LRU 淘汰直到新值同时满足条数和总字节预算。
             while self._entries and (
                     len(self._entries) >= effective["max_entries"] or
                     self._bytes + size > effective["max_bytes"]):
-                _, old = self._entries.popitem(last=False)
-                self._bytes -= old[2]
+                self._remove(next(iter(self._entries)))
             self._entries[key] = (
                 time.monotonic() + effective["ttl_seconds"], copy.deepcopy(value), size)
             self._bytes += size
+            if self._store is not None:
+                self._store.put("recognition_parse", key,
+                                (self._signature, copy.deepcopy(value), size),
+                                time.time() + effective["ttl_seconds"])
             return True
 
     def clear(self, settings=None):
@@ -146,18 +172,21 @@ class _ParseCache:
             self._clear_locked()
             self._generation += 1
 
-    def info(self, settings):
+    def info(self, settings, include_memory=False):
         with self._lock:
             effective = self._sync(settings)
             now = time.monotonic()
             expired = [key for key, item in self._entries.items() if item[0] <= now]
             for key in expired:
-                self._bytes -= self._entries.pop(key)[2]
-            return {"entries": len(self._entries), "bytes": self._bytes,
-                    "generation": self._generation, **effective}
+                self._remove(key)
+            result = {"entries": len(self._entries), "bytes": self._bytes,
+                      "generation": self._generation, **effective}
+            if include_memory:
+                result["memory_bytes"] = estimate_memory(self._entries) if self._entries else 0
+            return result
 
 
-_PARSE_CACHE = _ParseCache()
+_PARSE_CACHE = _ParseCache(store=STORE)
 
 
 def cache_key(namespace, payload):
@@ -228,13 +257,16 @@ def clear(namespace=None):
             cache.clear()
 
 
-def info(namespace="parse"):
+def info(namespace="parse", include_memory=False):
     """返回缓存占用概要，便于受保护的运维入口展示与检查。"""
     if namespace == "parse":
-        return _PARSE_CACHE.info(_cache_settings())
+        return _PARSE_CACHE.info(_cache_settings(), include_memory=include_memory)
     cache = _CACHES.get(namespace)
     if cache is None:
         return None
+    if include_memory:
+        return {**cache_memory_info(cache), "max_entries": cache.maxsize}
+    cache.delete_expired()
     return {"entries": len(cache), "max_entries": cache.maxsize}
 
 

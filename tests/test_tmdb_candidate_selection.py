@@ -30,8 +30,14 @@ class TmdbCandidateSelectionTest(TestCase):
         self.media._tmdb_clients = []
         self.media._rmt_match_mode = MatchMode.NORMAL
 
-    def _resolve(self, title, results=None, error=None, aliases=None, parsed_season=None):
+    def _resolve(self, title, results=None, error=None, aliases=None, parsed_season=None,
+                 parsed_episode=None, tmdb_details=None):
         self.media.search = _Search(results, error)
+        tmdb_details = tmdb_details or {}
+
+        def get_tmdb_details(mtype=None, tmdbid=None, **_kwargs):
+            return tmdb_details.get(tmdbid) or tmdb_details.get(str(tmdbid))
+
         config = {"recognition": {"decision": {"title_evidence": {
             "name_sources": ["primary", "original", "alternative", "translation"],
             "normalization": ["nfkc", "casefold", "simplified_chinese",
@@ -48,10 +54,15 @@ class TmdbCandidateSelectionTest(TestCase):
                 patch("app.helper.db_helper.DbHelper"), \
                 patch.object(recognition_cache, "get", return_value=recognition_cache.CACHE_MISS), \
                 patch.object(recognition_cache, "put", return_value=None), \
+                patch.object(self.media, "get_tmdb_info", side_effect=get_tmdb_details), \
                 patch.object(self.media, "_Media__search_tmdb_allnames",
                              return_value=(None, aliases or [])) as alias_lookup:
             with recognition_scope(title, source="candidate-test") as recorder:
-                recorder.context["active_parser_season"] = parsed_season
+                parsed_meta = type("ParsedMeta", (), {
+                    "begin_season": parsed_season,
+                    "begin_episode": parsed_episode,
+                })()
+                self.media._Media__set_active_parser_season(parsed_meta)
                 result = self.media._Media__search_tmdb(
                     "Parsed Name", MediaType.TV)
         return result, recorder, alias_lookup
@@ -175,6 +186,67 @@ class TmdbCandidateSelectionTest(TestCase):
         selection = next(action for action in recorder.actions
                          if action["action_type"] == "tmdb_candidate_selection")
         self.assertEqual(2, selection["output"]["pending_count"])
+
+    def test_episode_number_filters_candidates_by_total_tmdb_episode_count(self):
+        result, recorder, _ = self._resolve(
+            "Kusuriya no Hitorigoto 薬屋少女の呢喃 44 WebRip.mkv",
+            results=[
+                {"id": 220542, "name": "药屋少女的呢喃"},
+                {"id": 333686, "name": "薬屋のひとりごと"},
+            ],
+            aliases=["Kusuriya no Hitorigoto"],
+            parsed_episode=44,
+            tmdb_details={
+                220542: AsObj(number_of_episodes=60, seasons=[]),
+                333686: AsObj(number_of_episodes=1, seasons=[]),
+            })
+
+        self.assertEqual(220542, result["id"])
+        selection = next(action for action in recorder.actions
+                         if action["action_type"] == "tmdb_candidate_selection")
+        self.assertEqual([220542], selection["output"]["pending_ids"])
+        filter_result = selection["output"]["season_episode_filter"]
+        self.assertEqual(44, filter_result["episode"])
+        self.assertEqual([220542, 333686], filter_result["before_ids"])
+        self.assertEqual([220542], filter_result["after_ids"])
+        self.assertEqual("mismatch", filter_result["candidates"][1]["status"])
+
+    def test_season_and_episode_filter_uses_the_matching_season_count(self):
+        result, recorder, _ = self._resolve(
+            "Example Show S02E08 1080p.mkv",
+            results=[
+                {"id": 1, "name": "Example Show"},
+                {"id": 2, "name": "Example Show"},
+            ],
+            parsed_season=2,
+            parsed_episode=8,
+            tmdb_details={
+                1: AsObj(seasons=[AsObj(season_number=2, episode_count=12)]),
+                2: AsObj(seasons=[AsObj(season_number=1, episode_count=24)]),
+            })
+
+        self.assertEqual(1, result["id"])
+        selection = next(action for action in recorder.actions
+                         if action["action_type"] == "tmdb_candidate_selection")
+        self.assertEqual([1], selection["output"]["pending_ids"])
+        self.assertEqual("season_not_found",
+                         selection["output"]["season_episode_filter"]["candidates"][1]["reason"])
+
+    def test_unavailable_tmdb_episode_data_keeps_name_matched_candidates(self):
+        result, recorder, _ = self._resolve(
+            "Example Show 44 1080p.mkv",
+            results=[
+                {"id": 1, "name": "Example Show"},
+                {"id": 2, "name": "Example Show"},
+            ],
+            parsed_episode=44)
+
+        self.assertFalse(result)
+        selection = next(action for action in recorder.actions
+                         if action["action_type"] == "tmdb_candidate_selection")
+        self.assertEqual([1, 2], selection["output"]["pending_ids"])
+        self.assertEqual("unknown",
+                         selection["output"]["season_episode_filter"]["candidates"][0]["status"])
 
     def test_empty_results_and_network_error_have_distinct_reasons(self):
         empty_result, empty_recorder, _ = self._resolve("Example Show", results=[])

@@ -3,6 +3,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from collections import deque
 from html import escape
 from logging.handlers import RotatingFileHandler
@@ -11,8 +12,10 @@ from config import Config
 
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 lock = threading.Lock()
-LOG_QUEUE = deque(maxlen=200)
+LOG_QUEUE = deque(maxlen=2000)
 LOG_INDEX = 0
+LOG_SEQUENCE = 0
+LOG_STREAM_ID = uuid.uuid4().hex
 
 
 class Logger:
@@ -73,7 +76,7 @@ class Logger:
 
 
 def __append_log_queue(level, text):
-    global LOG_INDEX, LOG_QUEUE
+    global LOG_INDEX, LOG_QUEUE, LOG_SEQUENCE
     with lock:
         if type(text) is str:
             text = escape(text)
@@ -86,7 +89,9 @@ def __append_log_queue(level, text):
             text = json.dumps(text)
             source = "Object"
 
+        LOG_SEQUENCE += 1
         LOG_QUEUE.append({
+            "id": LOG_SEQUENCE,
             "time": time.strftime('%H:%M:%S', time.localtime(time.time())),
             "level": level,
             "source": source,

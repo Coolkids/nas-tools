@@ -1,5 +1,5 @@
 from datetime import datetime
-from functools import lru_cache
+from app.utils.persistent_cache import persistent_memoize
 
 import requests
 
@@ -24,7 +24,7 @@ class Bangumi(object):
         pass
 
     @classmethod
-    @lru_cache(maxsize=1024)
+    @persistent_memoize('bangumi', maxsize=1024)
     def __invoke(cls, url, **kwargs):
         req_url = cls._base_url + url
         params = {}

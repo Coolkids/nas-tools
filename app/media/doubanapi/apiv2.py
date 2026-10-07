@@ -3,7 +3,7 @@ import base64
 import hashlib
 import hmac
 from datetime import datetime
-from functools import lru_cache
+from app.utils.persistent_cache import persistent_memoize
 from random import choice
 from urllib import parse
 
@@ -155,7 +155,7 @@ class DoubanApi(object):
                                 ).decode()
 
     @classmethod
-    @lru_cache(maxsize=1024)
+    @persistent_memoize('douban_api', maxsize=1024)
     def __invoke(cls, url, **kwargs):
         req_url = cls._base_url + url
 

@@ -1,4 +1,4 @@
-from functools import lru_cache
+from app.utils.persistent_cache import persistent_memoize
 
 from app.utils import RequestUtils, ExceptionUtils
 from app.utils.types import MediaType
@@ -61,7 +61,7 @@ class Fanart:
             ExceptionUtils.exception_traceback(e2)
 
     @classmethod
-    @lru_cache(maxsize=2048)
+    @persistent_memoize('fanart', maxsize=2048)
     def __request_fanart(cls, media_type, queryid):
         if media_type == MediaType.MOVIE:
             image_url = FANART_MOVIE_API_URL % queryid

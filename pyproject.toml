@@ -1,6 +1,6 @@
 [project]
 name = "nas-tools"
-version = "3.1.8"
+version = "3.1.9"
 description = "NAS media library resource aggregation and automation tool"
 requires-python = ">=3.14"
 dependencies = [
@@ -44,7 +44,7 @@ dependencies = [
     "ruamel.yaml==0.19.1",
     "selenium==4.50.0",
     "slack_sdk==3.45.0",
-    "tenacity==9.1.4",
+    "tenacity==9.2.1",
     "typing_extensions==4.16.0",
     "undetected_chromedriver==3.5.5",
     "urllib3==2.8.0",

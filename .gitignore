@@ -17,6 +17,8 @@ out/
 gen/
 .DS_Store
 config/tmdb.dat
+/config/system.sqlite3*
+/config/cache/system.sqlite3*
 
 ### Vue3 新前端 (web2) ###
 web2/node_modules

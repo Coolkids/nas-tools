@@ -213,8 +213,11 @@ class WebAction:
             "get_system_config": self.__get_system_config,
             "get_ai_recognition_records": self.__get_ai_recognition_records,
             "get_recognition_providers": self.__get_recognition_providers,
+            "get_tmdb_genres": self.__get_tmdb_genres,
             "get_recognition_parse_cache_info": self.__get_recognition_parse_cache_info,
             "clear_recognition_parse_cache": self.__clear_recognition_parse_cache,
+            "get_system_cache_info": self.__get_system_cache_info,
+            "clear_system_cache": self.__clear_system_cache,
             "get_recognition_records": self.__get_recognition_records,
             "get_recognition_record_detail": self.__get_recognition_record_detail,
             "version": self.__version
@@ -1005,6 +1008,25 @@ class WebAction:
         """
         查询实时日志
         """
+        data = data or {}
+        if "after_id" in data:
+            try:
+                after_id = max(0, int(data.get("after_id") or 0))
+            except (TypeError, ValueError):
+                return {"code": 1, "msg": "日志序号无效"}
+            with log.lock:
+                queue_logs = list(log.LOG_QUEUE)
+                last_id = log.LOG_SEQUENCE
+                stream_id = log.LOG_STREAM_ID
+            reset = bool(data.get("stream_id") and data["stream_id"] != stream_id)
+            if reset or after_id > last_id:
+                after_id = 0
+                reset = True
+            source = data.get("source")
+            return {"loglist": [message for message in queue_logs
+                                if message["id"] > after_id and
+                                (not source or message.get("source") == source)],
+                    "last_id": last_id, "stream_id": stream_id, "reset": reset}
         log_list = []
         refresh_new = data.get('refresh_new')
         source = data.get('source')
@@ -1070,6 +1092,15 @@ class WebAction:
                         return {"code": 1, "msg": "名称长度阈值必须大于 0"}
                 except (TypeError, ValueError):
                     return {"code": 1, "msg": "名称长度阈值必须为整数"}
+        preferred_genre_key = "recognition.decision.title_evidence.preferred_genre_id"
+        if preferred_genre_key in data:
+            try:
+                preferred_genre_id = float(data[preferred_genre_key])
+                if not isfinite(preferred_genre_id) or preferred_genre_id < 0 \
+                        or not preferred_genre_id.is_integer():
+                    return {"code": 1, "msg": "TMDB 优先类型 ID 必须是非负整数"}
+            except (TypeError, ValueError):
+                return {"code": 1, "msg": "TMDB 优先类型 ID 必须是非负整数"}
         fuzzy_key = "recognition.decision.title_evidence.fuzzy_min_score"
         if fuzzy_key in data:
             try:
@@ -1126,6 +1157,7 @@ class WebAction:
             "recognition.providers.anitopy_ml.reliability": float,
             "recognition.decision.title_evidence.min_cjk_chars_for_strong": int,
             "recognition.decision.title_evidence.min_latin_chars_for_strong": int,
+            "recognition.decision.title_evidence.preferred_genre_id": int,
             "recognition.decision.title_evidence.fuzzy_min_score": float,
             "recognition.decision.weights.title_match": float,
             "recognition.decision.weights.year_match": float,
@@ -2476,13 +2508,28 @@ class WebAction:
         """
         名称识别测试
         """
+        from app.media.recognition.records import recognition_scope
+
         name = data.get("name")
         if not name:
-            return {"code": -1}
-        media_info = Media().get_media_info(title=name)
-        if not media_info:
-            return {"code": 0, "data": {"name": "无法识别"}}
-        return {"code": 0, "data": self.mediainfo_dict(media_info)}
+            return {"code": -1, "msg": "请输入资源名称"}
+        # 复用内层识别记录，直接返回本次决策原因，避免查询历史记录或重复识别。
+        try:
+            with recognition_scope(name, source="web", stage="resolve",
+                                   context={"action": "name_test"}) as recorder:
+                media_info = Media().get_media_info(title=name)
+        except Exception as error:
+            return {"code": 0, "data": {
+                "name": "无法识别",
+                "recognition_status": "failed",
+                "recognition_reason": str(error) or "recognition_not_completed",
+            }}
+        result = self.mediainfo_dict(media_info) if media_info else {"name": "无法识别"}
+        result.update({
+            "recognition_status": recorder.overall_result.get("status"),
+            "recognition_reason": recorder.overall_result.get("reason"),
+        })
+        return {"code": 0, "data": result}
 
     @staticmethod
     def mediainfo_dict(media_info):
@@ -2880,7 +2927,6 @@ class WebAction:
         """
         try:
             MetaHelper().clear_meta_data()
-            os.remove(MetaHelper().get_meta_data_path())
         except Exception as e:
             ExceptionUtils.exception_traceback(e)
             return {"code": 0, "msg": str(e)}
@@ -4766,6 +4812,47 @@ class WebAction:
             } for provider_id, provider in sorted(providers.items())],
             "diagnostics": registry.diagnostics(),
         }
+
+    @staticmethod
+    def __get_system_cache_info(data=None):
+        from app.utils.system_cache import cache_info
+
+        return {"code": 0, "caches": cache_info()}
+
+    @staticmethod
+    def __clear_system_cache(data=None):
+        from app.utils.system_cache import clear_cache
+
+        name = (data or {}).get("name")
+        try:
+            count = clear_cache(name)
+            return {"code": 0, "cleared_entries": count}
+        except ValueError as error:
+            return {"code": 1, "msg": str(error)}
+        except Exception as error:
+            ExceptionUtils.exception_traceback(error)
+            return {"code": 1, "msg": "清理缓存失败"}
+
+    @staticmethod
+    def __get_tmdb_genres(data=None):
+        """读取电影和电视剧的 TMDB 类型，供识别偏好配置选择。"""
+        media = Media()
+        genres = {}
+        for media_type in (MediaType.MOVIE, MediaType.TV):
+            for genre in media.get_tmdb_genres(media_type) or []:
+                getter = getattr(genre, "get", None)
+                genre_id = getter("id") if callable(getter) else getattr(genre, "id", None)
+                name = getter("name") if callable(getter) else getattr(genre, "name", None)
+                try:
+                    genre_id = int(genre_id)
+                except (TypeError, ValueError):
+                    continue
+                if genre_id > 0 and name:
+                    genres.setdefault(genre_id, str(name))
+        return {"code": 0, "genres": [
+            {"id": genre_id, "name": name}
+            for genre_id, name in sorted(genres.items(), key=lambda item: (item[1], item[0]))
+        ]}
 
     @staticmethod
     def __get_recognition_parse_cache_info(data=None):

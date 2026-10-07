@@ -13,6 +13,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from .as_obj import AsObj
 from .exceptions import TMDbException
 from app.utils import ExceptionUtils
+from app.utils.persistent_cache import PersistentCache
 
 
 def _recognition_remaining_seconds():
@@ -41,7 +42,7 @@ class TMDb(object):
     TMDB_PROXIES = "TMDB_PROXIES"
     TMDB_DOMAIN = "TMDB_DOMAIN"
     REQUEST_CACHE_MAXSIZE = 20000
-    _parsed_cache = {}
+    _parsed_cache = PersistentCache("tmdb_request", maxsize=REQUEST_CACHE_MAXSIZE, ttl=86400)
     _parsed_cache_lock = threading.Lock()
     _cache_session = requests.Session()
     _cache_hits = 0
@@ -133,9 +134,11 @@ class TMDb(object):
 
     @api_key.setter
     def api_key(self, api_key):
+        previous = self._api_key
         self._api_key = str(api_key) if api_key else None
         self._api_keys = [key.strip() for key in str(api_key).split(";") if key.strip()] if api_key else []
-        self.cache_clear()
+        if previous is not None and previous != self._api_key:
+            self.cache_clear()
 
     @property
     def language(self):
