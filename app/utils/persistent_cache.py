@@ -1,169 +1,122 @@
-"""本地缓存持久化；保留绝对过期时间，不延长重启后的 TTL。"""
+"""业务缓存接口适配，数据存储由 CacheLib 后端负责。"""
 
 import hashlib
-import logging
-import os
 import pickle
-import sqlite3
-import tempfile
 import time
-from collections import namedtuple
+from collections import OrderedDict, namedtuple
 from functools import wraps
 from threading import RLock
 
-from cacheout import LRUCache
+from app.utils.cache_backend import CacheStore, STORE
+
+CacheInfo = namedtuple("CacheInfo", "hits misses maxsize currsize")
+StatsInfo = namedtuple("StatsInfo", "hit_count miss_count")
 
 
-class CacheStore:
-    def __init__(self, path=None):
-        self.path = path
-        self._connection = None
-        self._lock = RLock()
+class _Stats:
+    def __init__(self):
+        self.reset()
 
-    def _connect(self):
-        if self._connection is None:
-            if self.path is None:
-                from config import Config
-                self.path = os.path.join(Config().get_config_path(), "system.sqlite3")
-                self._migrate_legacy_cache()
-            os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
-            self._connection = sqlite3.connect(self.path, timeout=10, check_same_thread=False)
-            self._connection.execute("PRAGMA journal_mode=WAL")
-            self._connection.execute(
-                "CREATE TABLE IF NOT EXISTS cache_entries ("
-                "namespace TEXT, key_hash TEXT, payload BLOB, expires REAL, "
-                "PRIMARY KEY (namespace, key_hash))")
-            self._connection.commit()
-        return self._connection
+    def reset(self):
+        self.hits = self.misses = 0
 
-    def _migrate_legacy_cache(self):
-        legacy_path = os.path.join(os.path.dirname(self.path), "cache", "system.sqlite3")
-        if os.path.exists(self.path) or not os.path.isfile(legacy_path):
-            return
-        fd, temporary = tempfile.mkstemp(dir=os.path.dirname(self.path), suffix=".sqlite3.tmp")
-        os.close(fd)
-        try:
-            source = sqlite3.connect(legacy_path, timeout=10)
-            try:
-                destination = sqlite3.connect(temporary, timeout=10)
-                try:
-                    # backup 会同时读取已提交的 WAL 数据；不能只复制主数据库文件。
-                    source.backup(destination)
-                finally:
-                    destination.close()
-            finally:
-                source.close()
-            os.replace(temporary, self.path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
-
-    @staticmethod
-    def _key(key):
-        return hashlib.sha256(pickle.dumps(key, protocol=4)).hexdigest()
-
-    def load(self, namespace):
-        with self._lock:
-            connection = self._connect()
-            with connection:
-                connection.execute("DELETE FROM cache_entries WHERE namespace=? "
-                                   "AND expires IS NOT NULL AND expires<=?", (namespace, time.time()))
-            rows = connection.execute("SELECT key_hash, payload, expires FROM cache_entries "
-                                      "WHERE namespace=? ORDER BY rowid", (namespace,)).fetchall()
-            entries = []
-            for key_hash, payload, expires in rows:
-                try:
-                    key, value = pickle.loads(payload)
-                    entries.append((key, value, expires))
-                except Exception:
-                    logging.getLogger(__name__).warning("忽略损坏的缓存条目：%s", namespace)
-                    with connection:
-                        connection.execute("DELETE FROM cache_entries WHERE namespace=? AND key_hash=?",
-                                           (namespace, key_hash))
-            return entries
-
-    def put(self, namespace, key, value, expires=None):
-        payload = pickle.dumps((key, value), protocol=pickle.HIGHEST_PROTOCOL)
-        with self._lock, self._connect() as connection:
-            connection.execute("INSERT OR REPLACE INTO cache_entries VALUES (?, ?, ?, ?)",
-                               (namespace, self._key(key), payload, expires))
-
-    def delete(self, namespace, key):
-        with self._lock, self._connect() as connection:
-            connection.execute("DELETE FROM cache_entries WHERE namespace=? AND key_hash=?",
-                               (namespace, self._key(key)))
-
-    def clear(self, namespace):
-        with self._lock, self._connect() as connection:
-            connection.execute("DELETE FROM cache_entries WHERE namespace=?", (namespace,))
+    def info(self):
+        return StatsInfo(self.hits, self.misses)
 
 
-STORE = CacheStore()
+class PersistentCache:
+    """兼容旧接口；值由 CacheLib 保存，远程模式仅保留本机 LRU 键索引。"""
 
-
-class PersistentCache(LRUCache):
-    def __init__(self, name, store=None, **kwargs):
-        self.name = name
+    def __init__(self, name, store=None, maxsize=1024, ttl=0, timer=time.time,
+                 default=None, enable_stats=False):
+        self.name, self.maxsize, self.ttl = name, maxsize, ttl
         self.store = store if store is not None else STORE
-        self._loaded = False
-        super().__init__(**kwargs)
+        self.timer, self.default = timer, default
+        self.stats = _Stats()
+        self._lock = RLock()
+        self._order = OrderedDict()
+        self._revision = None
 
-    def _load(self):
-        if self._loaded:
-            return
-        entries = self.store.load(self.name)
-        self._loaded = True
-        for key, value, expires in entries:
-            if expires is not None and expires <= time.time():
-                continue
-            self._cache[key] = value
-            if expires is not None:
-                self._expire_times[key] = self.timer() + max(0, expires - time.time())
-        while self.maxsize and len(self._cache) > self.maxsize:
-            self._delete(next(iter(self._cache)))
+    def _sync(self):
+        revision = self.store.revision
+        if revision != self._revision:
+            self._order = OrderedDict((key, expires) for key, _, expires in self.store.load(self.name))
+            self._revision = self.store.revision
+            while self.maxsize and len(self._order) > self.maxsize:
+                self.delete(next(iter(self._order)))
 
-    def _get(self, key, default=None):
-        self._load()
-        return super()._get(key, default)
-
-    def _set(self, key, value, ttl=None):
-        self._load()
-        super()._set(key, value, ttl)
-        expires = self._expire_times.get(key)
-        if expires is not None:
-            expires = time.time() + expires - self.timer()
-        try:
-            self.store.put(self.name, key, value, expires)
-        except (pickle.PickleError, TypeError, AttributeError):
-            # 部分临时对象不可序列化，仍保留内存缓存。
-            logging.getLogger(__name__).warning("缓存条目无法持久化：%s", self.name)
-
-    def _delete(self, key, cause=None):
-        self._load()
-        count = super()._delete(key, cause)
-        if count:
-            self.store.delete(self.name, key)
-        return count
-
-    def _clear(self):
-        self.store.clear(self.name)
-        self._loaded = True
-        super()._clear()
-
-    def __len__(self):
+    def get(self, key, default=None):
         with self._lock:
-            self._load()
-            return super().__len__()
+            self._sync()
+            record = self.store.get(self.name, key)
+            if record is None:
+                self._order.pop(key, None)
+                self.stats.misses += 1
+                return self.default if default is None else default
+            self.stats.hits += 1
+            self._order[key] = record[2]
+            self._order.move_to_end(key)
+            return record[1]
+
+    def set(self, key, value, ttl=None):
+        with self._lock:
+            self._sync()
+            effective_ttl = self.ttl if ttl is None else ttl
+            expires = time.time() + effective_ttl if effective_ttl else None
+            for old, expiration in list(self._order.items()):
+                if expiration is not None and expiration <= time.time():
+                    self.delete(old)
+            if key not in self._order:
+                while self.maxsize and len(self._order) >= self.maxsize:
+                    self.delete(next(iter(self._order)))
+            self.store.put(self.name, key, value, expires)
+            self._order[key] = expires
+            self._order.move_to_end(key)
+
+    def set_many(self, mapping, ttl=None):
+        for key, value in mapping.items():
+            self.set(key, value, ttl)
+
+    def delete(self, key):
+        with self._lock:
+            self._order.pop(key, None)
+            return int(bool(self.store.delete(self.name, key)))
+
+    def clear(self):
+        with self._lock:
+            self.store.clear(self.name)
+            self._order.clear()
+            self._revision = self.store.revision
 
     def copy(self):
         with self._lock:
-            self._load()
-            self._delete_expired()
-            return super().copy()
+            self._sync()
+            records = {key: (value, expires) for key, value, expires in self.store.load(self.name)}
+            for key in list(self._order):
+                if key not in records:
+                    self._order.pop(key)
+            for key, (_, expires) in records.items():
+                self._order.setdefault(key, expires)
+            return {key: records[key][0] for key in self._order if key in records}
 
-    def _delete_expired(self):
-        self._load()
-        return super()._delete_expired()
+    def expire_times(self):
+        return {key: expires for key, _, expires in self.store.load(self.name) if expires is not None}
+
+    def delete_expired(self):
+        before = len(self._order)
+        self.copy()
+        return max(0, before - len(self._order))
+
+    def memory_info(self):
+        with self._lock:
+            self._sync()
+            return self.store.memory_info(self.name)
+
+    def __len__(self):
+        return len(self.copy())
+
+    def __iter__(self):
+        return iter(self.copy())
 
     def __getitem__(self, key):
         missing = object()
@@ -183,11 +136,9 @@ class PersistentCache(LRUCache):
 
 
 FUNCTION_CACHES = {}
-CacheInfo = namedtuple("CacheInfo", "hits misses maxsize currsize")
 
 
 def persistent_memoize(name, maxsize=1024, ttl=86400):
-    """替代 lru_cache，兼容已有 cache_clear/cache_info 调用。"""
     cache = PersistentCache(name, maxsize=maxsize, ttl=ttl, enable_stats=True)
     FUNCTION_CACHES[name] = cache
 
@@ -196,11 +147,9 @@ def persistent_memoize(name, maxsize=1024, ttl=86400):
 
         @wraps(function)
         def wrapped(*args, **kwargs):
-            # cls 的对象地址不会跨重启稳定；使用函数限定名标识方法。
             values = args[1:] if args and isinstance(args[0], type) else args
             key = hashlib.sha256(pickle.dumps(
-                (function.__module__, function.__qualname__, values, sorted(kwargs.items())),
-                protocol=4)).hexdigest()
+                (function.__module__, function.__qualname__, values, sorted(kwargs.items())), protocol=4)).hexdigest()
             value = cache.get(key, missing)
             if value is missing:
                 value = function(*args, **kwargs)
@@ -212,15 +161,8 @@ def persistent_memoize(name, maxsize=1024, ttl=86400):
             cache.clear()
             cache.stats.reset()
 
-        def info():
-            with cache._lock:
-                cache.delete_expired()
-                stats = cache.stats.info()
-                return CacheInfo(stats.hit_count, stats.miss_count, cache.maxsize, len(cache))
-
         wrapped.cache_clear = clear
-        wrapped.cache_info = info
+        wrapped.cache_info = lambda: CacheInfo(cache.stats.hits, cache.stats.misses, cache.maxsize, len(cache))
         wrapped.cache = cache
         return wrapped
-
     return decorate

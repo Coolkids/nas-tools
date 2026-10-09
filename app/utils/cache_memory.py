@@ -42,6 +42,8 @@ def estimate_memory(*values):
 
 
 def cache_memory_info(cache):
+    if hasattr(cache, "memory_info"):
+        return cache.memory_info()
     with cache._lock:
         cache.delete_expired()
         return {"entries": len(cache),

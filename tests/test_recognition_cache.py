@@ -81,9 +81,11 @@ class RecognitionCacheTest(TestCase):
                               "max_entry_bytes": 10}}
         self.assertFalse(store.put("large", {"text": "too large"}, settings))
         self.assertIs(cache.CACHE_MISS, store.get("large", settings))
-        with patch("app.media.recognition.cache.time.monotonic", side_effect=[10, 10, 12]):
+        now = [10]
+        with patch("app.media.recognition.cache.time.time", side_effect=lambda: now[0]):
             self.assertTrue(store.put("short", {"x": 1}, settings))
             self.assertEqual({"x": 1}, store.get("short", settings))
+            now[0] = 12
             self.assertIs(cache.CACHE_MISS, store.get("short", settings))
 
     def test_clear_and_configuration_change_invalidate_old_writer_generation(self):

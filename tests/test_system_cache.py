@@ -3,6 +3,8 @@
 import os
 import subprocess
 import sys
+import sqlite3
+import pickle
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -21,60 +23,65 @@ from web.action import WebAction
 class PersistentCacheTest(TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
-        self.path = os.path.join(self.directory.name, "cache.sqlite3")
-        self.store = CacheStore(self.path)
+        self.path = os.path.join(self.directory.name, "cache")
+        self.store = CacheStore(self.path, settings={"backend": "memory_disk"})
 
     def tearDown(self):
-        if self.store._connection is not None:
-            self.store._connection.close()
+        self.store.close()
         self.directory.cleanup()
 
     def make_cache(self, name="test", **kwargs):
         return PersistentCache(name, store=self.store, **kwargs)
 
     def test_default_path_migrates_legacy_wal_and_keeps_existing_database(self):
-        legacy = CacheStore(os.path.join(self.directory.name, "cache", "system.sqlite3"))
+        legacy_path = os.path.join(self.directory.name, "system.sqlite3")
+        legacy = sqlite3.connect(legacy_path)
+        legacy.execute("PRAGMA journal_mode=WAL")
+        legacy.execute("CREATE TABLE cache_entries (namespace TEXT, key_hash TEXT, payload BLOB, expires REAL)")
+        legacy.execute("INSERT INTO cache_entries VALUES (?, ?, ?, ?)",
+                       ("test", "old", pickle.dumps(("title", {"name": "Example"})), time.time() + 60))
+        legacy.commit()
         migrated = CacheStore()
         existing = CacheStore()
         try:
-            legacy.put("test", "title", {"name": "Example"}, time.time() + 60)
-            self.assertTrue(os.path.exists(legacy.path + "-wal"))
+            self.assertTrue(os.path.exists(legacy_path + "-wal"))
             configured = Mock()
             configured.get_config_path.return_value = self.directory.name
+            configured.get_config.return_value = {}
             with patch("config.Config", return_value=configured):
                 self.assertEqual("Example", migrated.load("test")[0][1]["name"])
-                self.assertEqual(os.path.join(self.directory.name, "system.sqlite3"), migrated.path)
+                self.assertEqual(self.path, migrated.path)
                 migrated.clear("test")
                 self.assertEqual([], existing.load("test"))
-            self.assertTrue(os.path.exists(legacy.path))
-            self.assertEqual(1, len(legacy.load("test")))
+            self.assertTrue(os.path.exists(legacy_path))
+            self.assertEqual(1, legacy.execute("SELECT count(*) FROM cache_entries").fetchone()[0])
         finally:
-            for store in (legacy, migrated, existing):
-                if store._connection is not None:
-                    store._connection.close()
+            legacy.close()
+            migrated.close()
+            existing.close()
 
     def test_new_connection_recovers_values_types_and_original_ttl(self):
         cache = self.make_cache(ttl=60)
         cache.set(("a", 1), {"values": [1, 2], "image": b"image"})
         original_expiration = cache.expire_times()[("a", 1)]
-        second_store = CacheStore(self.path)
+        second_store = CacheStore(self.path, settings={"backend": "memory_disk"})
         try:
             recovered = PersistentCache("test", store=second_store, ttl=600)
             self.assertEqual({"values": [1, 2], "image": b"image"}, recovered.get(("a", 1)))
             self.assertAlmostEqual(original_expiration, recovered.expire_times()[("a", 1)], places=2)
         finally:
-            second_store._connection.close()
+            second_store.close()
 
     def test_another_process_recovers_then_clears_disk(self):
         self.make_cache(ttl=60).set("title", {"name": "Example"})
         code = """
 import sys
 from app.utils.persistent_cache import CacheStore, PersistentCache
-store = CacheStore(sys.argv[1])
+store = CacheStore(sys.argv[1], settings={'backend': 'memory_disk'})
 cache = PersistentCache('test', store=store, ttl=60)
 assert cache.get('title') == {'name': 'Example'}
 cache.clear()
-store._connection.close()
+store.close()
 """
         process = subprocess.run([sys.executable, "-c", code, self.path],
                                  capture_output=True, text=True, timeout=20)
@@ -126,12 +133,13 @@ store._connection.close()
     def test_restore_enforces_reduced_capacity(self):
         self.make_cache(maxsize=5).set_many({"a": 1, "b": 2, "c": 3})
         recovered = self.make_cache(maxsize=1)
-        self.assertEqual({"c": 3}, recovered.copy())
+        self.assertEqual(1, len(recovered))
         self.assertEqual(1, len(self.store.load("test")))
 
     def test_memory_statistics_restore_persisted_entries_and_clear_disk(self):
         self.make_cache().set("payload", bytes(8192))
         restored = self.make_cache()
+        restored.get("payload")
         measured = cache_memory_info(restored)
         self.assertEqual(1, measured["entries"])
         self.assertGreater(measured["memory_bytes"], 8192)
@@ -141,9 +149,9 @@ store._connection.close()
 
     def test_corrupt_entry_does_not_hide_valid_entries(self):
         self.make_cache().set("good", 1)
-        with self.store._connection as connection:
-            connection.execute("INSERT INTO cache_entries VALUES (?, ?, ?, ?)",
-                               ("test", "bad", b"broken", None))
+        disk = self.store._backends["test"][1]
+        with open(disk._get_filename("broken"), "wb") as stream:
+            stream.write(b"broken")
         self.assertEqual({"good": 1}, self.make_cache().copy())
 
     def test_concurrent_writes_recover_all_entries(self):

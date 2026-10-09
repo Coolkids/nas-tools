@@ -4,11 +4,10 @@ import copy
 import hashlib
 import json
 import time
-from collections import OrderedDict
 from threading import RLock
 
-from app.utils.persistent_cache import PersistentCache, STORE
-from app.utils.cache_memory import cache_memory_info, estimate_memory
+from app.utils.persistent_cache import CacheStore, PersistentCache, STORE
+from app.utils.cache_memory import cache_memory_info
 
 from app.media.recognition.records import current_recorder, recognition_config
 
@@ -32,17 +31,14 @@ class _ParseCache:
 
     def __init__(self, store=None):
         self._lock = RLock()
-        self._entries = OrderedDict()
-        self._bytes = 0
         self._generation = 0
         self._signature = None
-        self._store = store
+        self._cache = PersistentCache("recognition_parse", maxsize=0,
+                                      store=store if store is not None else CacheStore(settings={"backend": "memory"}))
+        self._store_revision = None
 
     def _remove(self, key):
-        item = self._entries.pop(key)
-        self._bytes -= item[2]
-        if self._store is not None:
-            self._store.delete("recognition_parse", key)
+        self._cache.delete(key)
 
     @staticmethod
     def _integer(settings, name, default, minimum=1):
@@ -81,32 +77,35 @@ class _ParseCache:
     def _sync(self, settings):
         effective = self._effective_settings(settings)
         signature = tuple(sorted(effective.items()))
+        revision = self._cache.store.revision
+        backend_changed = revision != self._store_revision
+        first_load = self._signature is None
+        if backend_changed:
+            self._store_revision = revision
+            self._generation += 1
         if signature != self._signature:
-            first_load = self._signature is None
             if not first_load:
                 self._clear_locked()
             self._generation += 1
             self._signature = signature
-            if first_load and self._store is not None:
-                for key, payload, expires in self._store.load("recognition_parse"):
-                    stored_signature, value, size = payload
-                    if (stored_signature != signature or not effective["enabled"] or
-                            expires is None or expires <= time.time() or
-                            size > effective["max_entry_bytes"]):
-                        self._store.delete("recognition_parse", key)
-                        continue
-                    self._entries[key] = (time.monotonic() + expires - time.time(), value, size)
-                    self._bytes += size
-                while self._entries and (len(self._entries) > effective["max_entries"] or
-                                         self._bytes > effective["max_bytes"]):
-                    self._remove(next(iter(self._entries)))
+        if first_load or backend_changed:
+            for key, payload in self._cache.copy().items():
+                if not effective["enabled"] or not self._valid_payload(payload, effective):
+                    self._remove(key)
+            entries = self._cache.copy()
+            while entries and (len(entries) > effective["max_entries"] or
+                               sum(item[2] for item in entries.values()) > effective["max_bytes"]):
+                key = next(iter(entries))
+                self._remove(key)
+                entries.pop(key)
         return effective
 
+    def _valid_payload(self, payload, effective):
+        return (isinstance(payload, tuple) and len(payload) == 3 and payload[0] == self._signature
+                and isinstance(payload[2], int) and 0 <= payload[2] <= effective["max_entry_bytes"])
+
     def _clear_locked(self):
-        self._entries.clear()
-        self._bytes = 0
-        if self._store is not None:
-            self._store.clear("recognition_parse")
+        self._cache.clear()
 
     @staticmethod
     def _size(value):
@@ -130,14 +129,13 @@ class _ParseCache:
             effective = self._sync(settings)
             if not effective["enabled"]:
                 return CACHE_MISS
-            entry = self._entries.get(key)
+            entry = self._cache.get(key)
             if entry is None:
                 return CACHE_MISS
-            expires, value, size = entry
-            if expires <= time.monotonic():
+            if not self._valid_payload(entry, effective):
                 self._remove(key)
                 return CACHE_MISS
-            self._entries.move_to_end(key)
+            signature, value, size = entry
             return copy.deepcopy(value)
 
     def put(self, key, value, settings, generation=None):
@@ -149,20 +147,18 @@ class _ParseCache:
             size = self._size(value)
             if size is None or size > effective["max_entry_bytes"]:
                 return False
-            if key in self._entries:
+            entries = self._cache.copy()
+            if key in entries:
                 self._remove(key)
+                entries.pop(key)
             # LRU 淘汰直到新值同时满足条数和总字节预算。
-            while self._entries and (
-                    len(self._entries) >= effective["max_entries"] or
-                    self._bytes + size > effective["max_bytes"]):
-                self._remove(next(iter(self._entries)))
-            self._entries[key] = (
-                time.monotonic() + effective["ttl_seconds"], copy.deepcopy(value), size)
-            self._bytes += size
-            if self._store is not None:
-                self._store.put("recognition_parse", key,
-                                (self._signature, copy.deepcopy(value), size),
-                                time.time() + effective["ttl_seconds"])
+            total_bytes = sum(item[2] for item in entries.values())
+            while entries and (len(entries) >= effective["max_entries"] or
+                               total_bytes + size > effective["max_bytes"]):
+                oldest = next(iter(entries))
+                total_bytes -= entries.pop(oldest)[2]
+                self._remove(oldest)
+            self._cache.set(key, (self._signature, copy.deepcopy(value), size), ttl=effective["ttl_seconds"])
             return True
 
     def clear(self, settings=None):
@@ -175,14 +171,11 @@ class _ParseCache:
     def info(self, settings, include_memory=False):
         with self._lock:
             effective = self._sync(settings)
-            now = time.monotonic()
-            expired = [key for key, item in self._entries.items() if item[0] <= now]
-            for key in expired:
-                self._remove(key)
-            result = {"entries": len(self._entries), "bytes": self._bytes,
+            entries = self._cache.copy()
+            result = {"entries": len(entries), "bytes": sum(item[2] for item in entries.values()),
                       "generation": self._generation, **effective}
             if include_memory:
-                result["memory_bytes"] = estimate_memory(self._entries) if self._entries else 0
+                result.update(self._cache.memory_info())
             return result
 
 

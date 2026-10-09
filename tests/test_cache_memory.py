@@ -73,11 +73,14 @@ class CacheMemoryTest(TestCase):
 
     def test_metadata_cache_memory_uses_object_data(self):
         from app.helper.meta_helper import MetaHelper
+        from app.utils.persistent_cache import CacheStore, PersistentCache
 
         helper = MetaHelper()
-        with patch.object(helper, "_meta_data", {"key": {"title": "Example", "image": bytes(8192)}}):
+        instance = PersistentCache("metadata", store=CacheStore(settings={"backend": "memory"}))
+        with patch.object(helper, "_cache", instance):
+            helper.update_meta_data({"key": {"title": "Example", "image": bytes(8192)}})
             self.assertGreater(helper.cache_info(include_memory=True)["memory_bytes"], 8192)
-        with patch.object(helper, "_meta_data", {}):
+            helper.clear_meta_data()
             self.assertEqual(0, helper.cache_info(include_memory=True)["memory_bytes"])
 
     def test_management_api_provides_memory_for_each_cache_category(self):

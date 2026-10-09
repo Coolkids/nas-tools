@@ -1080,6 +1080,16 @@ class WebAction:
         """
         cfg = deepcopy(Config().get_config())
         data = data or {}
+        if any(key.startswith("cache.") for key in data):
+            from app.utils.cache_backend import DEFAULT_SETTINGS, validate_settings
+
+            candidate = {**DEFAULT_SETTINGS, **(cfg.get("cache") or {})}
+            candidate.update({key.removeprefix("cache."): value for key, value in data.items()
+                              if key.startswith("cache.")})
+            try:
+                validate_settings(candidate)
+            except ValueError as error:
+                return {"code": 1, "msg": str(error)}
         strategy = data.get("recognition.decision.strategy")
         if strategy and strategy not in ("legacy", "title_evidence"):
             return {"code": 1, "msg": "媒体识别策略无效"}
@@ -1148,6 +1158,8 @@ class WebAction:
                     return {"code": 1, "msg": "识别权重必须为数字"}
         config_test = StringUtils.to_bool(data.get("test"), False)
         numeric_fields = {
+            "cache.port": int, "cache.db": int,
+            "cache.connect_timeout": float, "cache.retry_interval": float,
             "pt.search_rss_interval": int,
             "recognition.records.cleanup.retention_days": int,
             "recognition.execution.total_timeout_seconds": float,
@@ -4815,9 +4827,9 @@ class WebAction:
 
     @staticmethod
     def __get_system_cache_info(data=None):
-        from app.utils.system_cache import cache_info
+        from app.utils.system_cache import backend_status, cache_info
 
-        return {"code": 0, "caches": cache_info()}
+        return {"code": 0, "caches": cache_info(), "backend": backend_status()}
 
     @staticmethod
     def __clear_system_cache(data=None):

@@ -1,24 +1,23 @@
 # -*- coding: utf-8 -*-
 import time
 
-from cacheout import CacheManager, Cache
-
-from app.utils.persistent_cache import PersistentCache
+from app.utils.persistent_cache import CacheStore, PersistentCache
 
 CACHES = {
     "tmdb_supply": {'maxsize': 2000, 'ttl': 86400}
 }
 
-cacheman = CacheManager()
+cacheman = {}
 for name, options in CACHES.items():
-    cacheman.register(name, PersistentCache(name, **options))
+    cacheman[name] = PersistentCache(name, **options)
 
 # T12: TMDB网站搜索结果缓存 86400s (1天)
 TmdbWebSearchCache = PersistentCache('TmdbWebSearchCache', maxsize=1024, ttl=86400, timer=time.time, default=None)
 
-TokenCache = Cache(maxsize=2048, ttl=4*3600, timer=time.time, default=None)
+_LOCAL_STORE = CacheStore(settings={"backend": "memory"})
+TokenCache = PersistentCache('TokenCache', store=_LOCAL_STORE, maxsize=2048, ttl=4*3600)
 
-ConfigLoadCache = Cache(maxsize=1, ttl=10, timer=time.time, default=None)
+ConfigLoadCache = PersistentCache('ConfigLoadCache', store=_LOCAL_STORE, maxsize=1, ttl=10)
 
 # T2: Torznab搜索结果缓存 300s
 TorznabCache = PersistentCache('TorznabCache', maxsize=2000, ttl=300, timer=time.time, default=None)

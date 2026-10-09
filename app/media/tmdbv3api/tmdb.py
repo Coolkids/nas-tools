@@ -204,8 +204,7 @@ class TMDb(object):
                 response.raise_for_status()
             payload = response.json()
             with cls._parsed_cache_lock:
-                if len(cls._parsed_cache) >= cls.REQUEST_CACHE_MAXSIZE:
-                    cls._parsed_cache.pop(next(iter(cls._parsed_cache)))
+                # 容量由统一缓存适配层控制，避免远程模式每次写入遍历所有键。
                 cls._parsed_cache[cache_key] = payload
             return payload
 

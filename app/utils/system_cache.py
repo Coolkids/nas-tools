@@ -2,7 +2,7 @@
 
 from app.utils import cache_manager
 from app.utils.cache_memory import cache_memory_info
-from app.utils.persistent_cache import FUNCTION_CACHES, PersistentCache
+from app.utils.persistent_cache import FUNCTION_CACHES, STORE
 
 
 LABELS = {
@@ -44,15 +44,18 @@ def cache_info():
     for name, instance in _caches().items():
         result.append({"name": name, "label": LABELS.get(name, name),
                        **cache_memory_info(instance), "max_entries": instance.maxsize,
-                       "ttl_seconds": instance.ttl,
-                       "persistent": isinstance(instance, PersistentCache)})
+                       "ttl_seconds": instance.ttl})
     for namespace, label in [("parse", "AI 解析"), ("tmdb", "识别 TMDB 查询"),
                              ("decision", "识别名称证据")]:
         result.append({"name": f"recognition_{namespace}", "label": label,
-                       **cache.info(namespace, include_memory=True), "persistent": True})
+                       **cache.info(namespace, include_memory=True)})
     result.append({"name": "tmdb_metadata", "label": "TMDB 媒体识别",
-                   **MetaHelper().cache_info(include_memory=True), "persistent": True})
+                   **MetaHelper().cache_info(include_memory=True)})
     return result
+
+
+def backend_status():
+    return STORE.status()
 
 
 def clear_cache(name):
