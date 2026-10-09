@@ -19,7 +19,7 @@ if is_windows_exe:
 from config import Config
 import log
 from web.main import App
-from app.utils import SystemUtils, ConfigLoadCache
+from app.utils import SystemUtils, ConfigLoadCache, Torrent
 from app.utils.commons import INSTANCES
 from app.db import init_db, update_db, init_data
 from app.helper import DisplayHelper, ChromeHelper
@@ -78,6 +78,8 @@ signal.signal(signal.SIGTERM, sigal_handler)
 def init_system():
     # 配置
     log.console('NAStool 当前版本号：%s' % APP_VERSION)
+    # 清理上次运行遗留在配置 temp 目录中的种子文件
+    Torrent().clean_temp_torrent_files()
     # 数据库初始化
     init_db()
     # 数据库更新

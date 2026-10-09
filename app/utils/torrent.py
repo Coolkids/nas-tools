@@ -41,8 +41,32 @@ class Torrent:
 
     def __init__(self):
         self._torrent_temp_path = Config().get_temp_path()
-        if not os.path.exists(self._torrent_temp_path):
-            os.makedirs(self._torrent_temp_path)
+        os.makedirs(self._torrent_temp_path, exist_ok=True)
+
+    def remove_torrent_file(self, file_path):
+        """删除配置 temp 目录下已用完的种子文件。"""
+        if not file_path:
+            return
+        temp_path = os.path.abspath(self._torrent_temp_path)
+        file_path = os.path.abspath(file_path)
+        if os.path.dirname(file_path) != temp_path:
+            return
+        try:
+            os.remove(file_path)
+        except FileNotFoundError:
+            pass
+        except OSError as err:
+            log.warn("【Torrent】删除临时种子文件失败：%s，%s" % (file_path, err))
+
+    def clean_temp_torrent_files(self):
+        """清理上次运行遗留在配置 temp 目录中的种子文件。"""
+        try:
+            with os.scandir(self._torrent_temp_path) as entries:
+                for item in entries:
+                    if item.is_file(follow_symlinks=False) and item.name.lower().endswith(".torrent"):
+                        self.remove_torrent_file(item.path)
+        except OSError as err:
+            log.warn("【Torrent】清理临时种子文件失败：%s" % err)
 
     def get_torrent_info(self, url, cookie=None, ua=None, referer=None, proxy=False):
         """
@@ -58,6 +82,7 @@ class Torrent:
             return None, None, "", [], "URL为空"
         if url.startswith("magnet:"):
             return None, url, "", [], f"{url} 为磁力链接"
+        file_path = None
         try:
             # 下载保存种子文件
             file_path, content, errmsg = self.save_torrent_file(url=url,
@@ -73,6 +98,7 @@ class Torrent:
             return file_path, content, files_folder, files, retmsg
 
         except Exception as err:
+            self.remove_torrent_file(file_path)
             return None, None, "", [], "下载种子文件出现异常：%s" % str(err)
 
     def save_torrent_file(self, url, cookie=None, ua=None, referer=None, proxy=False):

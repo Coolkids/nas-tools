@@ -133,10 +133,14 @@ class Downloader:
         title = media_info.org_string
         # 默认值
         dl_files_folder, dl_files, retmsg = "", [], ""
+        torrent = Torrent()
         # 有种子文件时解析种子信息
         if torrent_file:
             url = os.path.basename(torrent_file)
-            content, dl_files_folder, dl_files, retmsg = Torrent().read_torrent_content(torrent_file)
+            try:
+                content, dl_files_folder, dl_files, retmsg = torrent.read_torrent_content(torrent_file)
+            finally:
+                torrent.remove_torrent_file(torrent_file)
         # 没有种子文件解析链接
         else:
             url = media_info.enclosure
@@ -149,7 +153,8 @@ class Downloader:
                 if url.startswith("[") or url.startswith("#"):
                     return None, "已移除详情页规则下载，请在 RSS 中提供种子链接或磁力链接"
                 # RSS 提供的普通 HTTP 下载链接直接获取，不依赖私有站点 Cookie 配置。
-                _, content, dl_files_folder, dl_files, retmsg = Torrent().get_torrent_info(url=url)
+                temp_torrent_file, content, dl_files_folder, dl_files, retmsg = torrent.get_torrent_info(url=url)
+                torrent.remove_torrent_file(temp_torrent_file)
         # 解析完成
         if retmsg:
             log.warn("【Downloader】%s" % retmsg)
@@ -572,6 +577,7 @@ class Downloader:
                                     download_state = __download_with_fallback(
                                         download_item=item, torrent_file=torrent_path)
                                 else:
+                                    Torrent().remove_torrent_file(torrent_path)
                                     log.info(
                                         f"【Downloader】种子 {item.org_string} 未含集数信息，解析文件数为 {len(torrent_episodes)}")
                                     continue
@@ -651,6 +657,7 @@ class Downloader:
                                 page_url=item.page_url)
                             selected_episodes = set(torrent_episodes).intersection(set(need_episodes))
                             if not selected_episodes:
+                                Torrent().remove_torrent_file(torrent_path)
                                 log.info("【Downloader】%s 没有需要的集，跳过..." % item.org_string)
                                 continue
                             # 添加下载并暂停
@@ -1024,10 +1031,12 @@ class Downloader:
         :return: 集数列表、种子路径
         """
         # 保存种子文件
-        file_path, _, _, files, retmsg = Torrent().get_torrent_info(
+        torrent = Torrent()
+        file_path, _, _, files, retmsg = torrent.get_torrent_info(
             url=url
         )
         if not files:
+            torrent.remove_torrent_file(file_path)
             log.error("【Downloader】读取种子文件集数出错：%s" % retmsg)
             return [], None
         episodes = []
