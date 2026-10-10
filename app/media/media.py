@@ -34,7 +34,8 @@ from app.media.recognition import RecognitionRequest, registry
 from app.media.recognition import cache as recognition_cache
 from app.media.recognition.service import recognition_service
 from app.media.recognition.decision import (
-    candidate_features, select_title_evidence, weighted_score,
+    TITLE_SIMILARITY_MIN_MARGIN, TITLE_SIMILARITY_MIN_SCORE,
+    candidate_features, select_title_evidence, select_title_similarity, weighted_score,
 )
 from app.media.tmdbv3api import TMDb, Search, Movie, TV, Person, Find, TMDbException, Discover, Trending, Episode, Genre
 from app.utils import PathUtils, EpisodeFormat, RequestUtils, NumberUtils, StringUtils, TmdbWebSearchCache
@@ -139,7 +140,7 @@ class Media:
         return False
 
     def __select_tmdb_search_candidates(self, query, results, default_media_type=None):
-        """Select TMDB search results only when their names occur in the raw title."""
+        """根据原始标题中的名称证据和完整标题相似度选择 TMDB 候选。"""
         # The TMDB client wraps result rows in AsObj. Keep ordinary mappings
         # and convert the client's object rows before applying the common
         # candidate-selection logic; filtering to dict silently discarded
@@ -169,6 +170,8 @@ class Media:
         pending = []
         examined = []
         seen_entities = set()
+        evidence_by_entity = {}
+        aliases_checked = set()
         for result in results:
             candidate = dict(result)
             media_type = candidate.get("media_type") or default_media_type
@@ -185,13 +188,31 @@ class Media:
             if evidence.get("level") != "strong":
                 evidence = self.__tmdb_title_evidence(
                     original_title, candidate, parsed_season=parsed_season)
-            matched = evidence.get("level") == "strong"
+                aliases_loaded = True
+            else:
+                aliases_loaded = False
+            matched = evidence.get("level") in ("strong", "fuzzy")
             entity = (str(getattr(media_type, "value", media_type)), str(candidate.get("id")))
-            examined.append({"id": candidate.get("id"), "media_type": media_type,
-                             "matched": matched, "evidence": evidence})
+            entry = {"id": candidate.get("id"), "media_type": media_type,
+                     "matched": matched, "evidence": evidence}
+            examined.append(entry)
             if matched and candidate.get("id") and entity not in seen_entities:
                 seen_entities.add(entity)
                 pending.append(candidate)
+                evidence_by_entity[entity] = entry
+                if aliases_loaded:
+                    aliases_checked.add(entity)
+
+        # 主名称已命中也可能只是标题前缀；多候选时继续检查别名，
+        # 让完整别名参与相似度比较。满分候选无需再查询别名。
+        if len(pending) > 1:
+            for candidate in pending:
+                entity = (str(getattr(candidate["media_type"], "value", candidate["media_type"])),
+                          str(candidate.get("id")))
+                entry = evidence_by_entity[entity]
+                if entity not in aliases_checked and entry["evidence"].get("similarity_score", 0) < 1:
+                    entry["evidence"] = self.__tmdb_title_evidence(
+                        original_title, candidate, parsed_season=parsed_season)
 
         genre_priority_filter = None
         decision_config = recognition_config("recognition") or {}
@@ -259,6 +280,28 @@ class Media:
                 "all_candidates_incompatible": not filtered,
             }
 
+        title_similarity_filter = None
+        if len(pending) > 1:
+            before_filter = list(pending)
+            evidences = [evidence_by_entity[
+                (str(getattr(item["media_type"], "value", item["media_type"])), str(item.get("id")))
+            ]["evidence"] for item in before_filter]
+            winner = select_title_similarity(evidences)
+            if winner is not None:
+                pending = [before_filter[winner]]
+            title_similarity_filter = {
+                "minimum_score": TITLE_SIMILARITY_MIN_SCORE,
+                "minimum_margin": TITLE_SIMILARITY_MIN_MARGIN,
+                "before_ids": [item.get("id") for item in before_filter],
+                "candidates": [{"id": candidate.get("id"),
+                                "media_type": candidate.get("media_type"),
+                                "score": evidence.get("similarity_score"),
+                                "matches": evidence.get("similarity_matches", [])}
+                               for candidate, evidence in zip(before_filter, evidences)],
+                "after_ids": [item.get("id") for item in pending],
+                "applied": winner is not None,
+            }
+
         if len(pending) == 1:
             status, reason, selected = "success", None, pending[0]
         elif len(pending) > 1:
@@ -282,6 +325,7 @@ class Media:
                         "pending_ids": [item.get("id") for item in pending],
                         "genre_priority_filter": genre_priority_filter,
                         "season_episode_filter": season_episode_filter,
+                        "title_similarity_filter": title_similarity_filter,
                         "selected_id": selected.get("id") if selected else None,
                         "results": results},
                 reason=reason)
@@ -1177,6 +1221,7 @@ class Media:
         decision_cfg = cfg.get("decision") or {}
         title_cfg = decision_cfg.get("title_evidence") or {}
         key = recognition_cache.cache_key("decision", {
+            "title_evidence_version": 2,
             "original_title": original_title,
             "tmdb_info": tmdb_info,
             "release_groups": release_groups,
@@ -1200,9 +1245,33 @@ class Media:
                                   negative=result.get("level") in ("none", "weak"))
         return result
 
+    @staticmethod
+    def __tmdb_similarity_title_parts(original_title):
+        """提取完整标题片段，避免字幕组、双语别名和资源信息稀释相似度。"""
+        title = unicodedata.normalize("NFKC", original_title)
+        title = title.replace("【", "[").replace("】", "]")
+        title = re.sub(r"\[[^\]]*\]", " ", title)
+        title = re.sub(r"\.(?:mkv|mp4|avi|ts|m2ts|torrent)$", "", title,
+                       flags=re.IGNORECASE)
+        parts = []
+        # 同时保留整段，兼容片名本身包含 / 的情况。
+        for value in [*re.split(r"[/|]", title), title]:
+            metadata = re.search(
+                r"(?<![a-z0-9])(?:s\d{1,2}(?:e\d{1,4})?|ep?\d{1,4}|"
+                r"\d{3,4}[pi]|web[ ._-]*(?:dl|rip)|blu[ ._-]*ray|bd[ ._-]*rip|"
+                r"hdtv|hevc|avc|[hx]26[45]|aac|flac)(?![a-z0-9])",
+                value, flags=re.IGNORECASE)
+            if metadata:
+                value = value[:metadata.start()]
+            value = re.sub(r"\s+-\s*\d{1,4}(?:\s*-\s*\d{1,4})?\s*$", "", value)
+            value = value.strip(" ._-\t\r\n")
+            if value and value not in parts:
+                parts.append(value)
+        return parts
+
     def __tmdb_title_evidence_uncached(self, original_title, tmdb_info, release_groups=None,
                                        include_aliases=True, parsed_season=None):
-        """Find whether a complete TMDB title occurs in the raw media title."""
+        """计算名称包含证据和完整标题片段的字符串相似度。"""
         if not original_title or not tmdb_info:
             return {"level": "unavailable", "matched_name": None, "names": []}
 
@@ -1376,12 +1445,43 @@ class Media:
                     "sequel_prefix": sequel_prefix,
                     "parser_season": parser_season}
             (strong_matches if item["level"] == "strong" else weak_matches).append(item)
+
+        similarity_matches = []
+        title_parts = [(part, re.sub(r"[\W_]", "", normalize(part), flags=re.UNICODE))
+                       for part in self.__tmdb_similarity_title_parts(original_title)]
+        sequel_names = {item["name"] for item in weak_matches if item["sequel_prefix"]}
+        for name in names:
+            normalized_name = normalize(name)
+            compact_name = re.sub(r"[\W_]", "", normalized_name, flags=re.UNICODE)
+            min_chars = min_cjk if re.search(r"[\u3400-\u9fff]", normalized_name) else min_latin
+            if (len(compact_name) < min_chars or compact_name.isdigit()
+                    or compact_name in technical_title_tokens
+                    or compact_name in normalized_release_groups or name in sequel_names):
+                continue
+            if not title_parts:
+                continue
+            score, part = max(
+                (SequenceMatcher(None, compact_name, compact_part, autojunk=False).ratio(), part)
+                for part, compact_part in title_parts)
+            similarity_matches.append({"name": name, "normalized_name": normalized_name,
+                                       "match_text": part, "score": round(score, 4)})
+        similarity = {
+            "similarity_score": max((item["score"] for item in similarity_matches), default=0.0),
+            "similarity_matches": similarity_matches,
+        }
         if strong_matches:
             return {"level": "strong", "matched_names": strong_matches, "weak_matches": weak_matches,
-                    "names": names, "input": original_title}
+                    "names": names, "input": original_title, **similarity}
         if weak_matches:
             return {"level": "weak", "matched_names": [], "weak_matches": weak_matches,
-                    "names": names, "input": original_title}
+                    "names": names, "input": original_title, **similarity}
+        # 完整标题近似命中允许少量字词差异；滑动窗口模糊匹配仍由配置控制。
+        if select_title_similarity([similarity]) is not None:
+            return {"level": "fuzzy", "matched_names": [], "weak_matches": [],
+                    "fuzzy_matches": [{**item, "level": "fuzzy"} for item in similarity_matches
+                                      if item["score"] >= TITLE_SIMILARITY_MIN_SCORE],
+                    "fuzzy_score": similarity["similarity_score"],
+                    "names": names, "input": original_title, **similarity}
         fuzzy_cfg = title_cfg.get("allow_fuzzy_fallback", False)
         if fuzzy_cfg:
             try:
@@ -1414,9 +1514,9 @@ class Media:
                 best_match = max(fuzzy_matches, key=lambda item: item["score"])
                 return {"level": "fuzzy", "matched_names": [], "weak_matches": [],
                         "fuzzy_matches": fuzzy_matches, "fuzzy_score": best_match["score"],
-                        "names": names, "input": original_title}
+                        "names": names, "input": original_title, **similarity}
         return {"level": "none", "matched_names": [], "weak_matches": [],
-                "names": names, "input": original_title}
+                "names": names, "input": original_title, **similarity}
 
     def __get_media_info_with_providers(self, title, subtitle=None, mtype=None, strict=None,
                                         cache=True, chinese=True, append_to_response=None,

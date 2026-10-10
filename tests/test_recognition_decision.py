@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.media.recognition.decision import candidate_features, select_title_evidence
+from app.media.recognition import cache as recognition_cache
 from app.media.media import Media
 from app.media.meta.metaanime import MetaAnime
 from app.utils.types import MediaType
@@ -74,6 +75,56 @@ class RecognitionDecisionTest(TestCase):
         self.assertIsNone(result["selected"])
         self.assertEqual({("movie", "10"), ("movie", "20")}, set(result["entities"]))
 
+    def test_provider_candidates_prefer_the_more_complete_title(self):
+        media = object.__new__(Media)
+        title = ("[百冬练习组&LoliHouse] BanG Dream! YUME∞MITA / バンドリ！ ゆめ∞みた "
+                 "- 02 [WebRip 1080p HEVC-10bit AAC][简繁内封字幕]")
+        candidates = [
+            ("local_rules", {}, {"id": 1, "media_type": "tv", "name": "BanG Dream!"}),
+            ("model_b", {}, {"id": 2, "media_type": "tv", "name": "BanG Dream! YUME∞MITA"}),
+        ]
+        values = [(value, media._Media__tmdb_title_evidence(
+            title, value[2], include_aliases=False)) for value in candidates]
+        for ordered in (values, list(reversed(values)), values + [values[0]]):
+            with self.subTest(order=[item[0][0] for item in ordered]):
+                result = select_title_evidence(ordered)
+
+                self.assertEqual("success", result["status"])
+                self.assertEqual(2, result["selected"][2]["id"])
+
+    def test_similar_complete_title_can_beat_a_strong_substring_across_providers(self):
+        media = object.__new__(Media)
+        title = ("[Nix-Raws] 虽然我不是完美恶女～雏宫蝶鼠替换传～ / "
+                 "Futsutsuka na Akujo de wa Gozaimasu ga Suuguu Chouso S01E08 "
+                 "[CR WEB-DL 1080p AVC AAC][简繁内封]")
+        candidates = [
+            ("local_rules", {}, {"id": 1, "media_type": "tv", "name": "完美恶女"}),
+            ("model_b", {}, {"id": 2, "media_type": "tv",
+                             "name": "虽然我是不完美恶女 ～雏宫蝶鼠替换传～"}),
+        ]
+        values = [(value, media._Media__tmdb_title_evidence(
+            title, value[2], include_aliases=False)) for value in candidates]
+        self.assertEqual("strong", values[0][1]["level"])
+        self.assertEqual("fuzzy", values[1][1]["level"])
+
+        result = select_title_evidence(values)
+
+        self.assertEqual("success", result["status"])
+        self.assertEqual(2, result["selected"][2]["id"])
+
+    def test_similar_provider_titles_with_no_clear_margin_remain_ambiguous(self):
+        first = {"level": "strong", "similarity_score": 1.0}
+        for level in ("strong", "fuzzy"):
+            with self.subTest(level=level):
+                second = {"level": level, "similarity_score": 0.98}
+                result = select_title_evidence([
+                    (candidate("local_rules", 10), first),
+                    (candidate("model_b", 20), second),
+                ])
+
+                self.assertEqual("ambiguous_tmdb", result["reason"])
+                self.assertIsNone(result["selected"])
+
     def test_weighted_score_selects_provider_only_after_entity_deduplication(self):
         local = candidate("local_rules", 10)
         model = candidate("anitopy_ml", 10)
@@ -121,6 +172,11 @@ class RecognitionDecisionTest(TestCase):
 
 class TmdbTitleEvidenceTest(TestCase):
     def setUp(self):
+        # 这里测试证据计算和别名查询；避免持久缓存命中影响调用次数断言。
+        for name, value in (("get", recognition_cache.CACHE_MISS), ("put", None)):
+            cache_patch = patch.object(recognition_cache, name, return_value=value)
+            cache_patch.start()
+            self.addCleanup(cache_patch.stop)
         self.media = object.__new__(Media)
         self.media._Media__search_tmdb_allnames = Mock(return_value=({}, []))
 
@@ -169,6 +225,37 @@ class TmdbTitleEvidenceTest(TestCase):
                 result = self.media._Media__tmdb_title_evidence(
                     title, {"title": tmdb_name})
                 self.assertEqual("weak", result["level"])
+
+    def test_similarity_normalizes_fullwidth_case_and_traditional_chinese(self):
+        result = self.media._Media__tmdb_title_evidence(
+            "【Group】 雖然我不是完美惡女～雛宮蝶鼠替換傳～ / ALPHA S01E08 [1080p]",
+            {"name": "虽然我是不完美恶女 ～雏宫蝶鼠替换传～"})
+
+        self.assertEqual("fuzzy", result["level"])
+        self.assertGreater(result["similarity_score"], 0.9)
+        self.assertEqual("雖然我不是完美惡女~雛宮蝶鼠替換傳~",
+                         result["similarity_matches"][0]["match_text"])
+
+    def test_title_numbers_survive_similarity_comparison(self):
+        result = self.media._Media__tmdb_title_evidence(
+            "[Group] Blade Runner 2049 S01E01 [1080p]", {"name": "Blade Runner 2049"})
+        shorter = self.media._Media__tmdb_title_evidence(
+            "[Group] Blade Runner 2049 S01E01 [1080p]", {"name": "Blade Runner"})
+
+        self.assertEqual(1.0, result["similarity_score"])
+        self.assertLess(shorter["similarity_score"], result["similarity_score"])
+
+    def test_similarity_does_not_turn_short_numeric_or_group_names_into_fuzzy_matches(self):
+        for title, name, group in [
+                ("Up.2023.1080p", "Up", None),
+                ("1917.2019.WEB-DL", "1917", None),
+                ("Example.2024.[FLEET]", "FLEET", "FLEET")]:
+            with self.subTest(name=name):
+                result = self.media._Media__tmdb_title_evidence(title, {"title": name},
+                                                               release_groups=group)
+
+                self.assertEqual("weak", result["level"])
+                self.assertEqual(0.0, result["similarity_score"])
 
     def test_mixed_release_technical_token_contexts_are_weak(self):
         cases = (

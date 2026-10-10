@@ -1,5 +1,5 @@
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from app.media.media import Media
 from app.media.tmdbv3api.as_obj import AsObj
@@ -38,6 +38,9 @@ class TmdbCandidateSelectionTest(TestCase):
         def get_tmdb_details(mtype=None, tmdbid=None, **_kwargs):
             return tmdb_details.get(tmdbid) or tmdb_details.get(str(tmdbid))
 
+        def get_aliases(_mtype, tmdbid, **_kwargs):
+            return None, aliases.get(tmdbid, []) if isinstance(aliases, dict) else aliases or []
+
         config = {"recognition": {"decision": {"title_evidence": {
             "name_sources": ["primary", "original", "alternative", "translation"],
             "normalization": ["nfkc", "casefold", "simplified_chinese",
@@ -56,7 +59,7 @@ class TmdbCandidateSelectionTest(TestCase):
                 patch.object(recognition_cache, "put", return_value=None), \
                 patch.object(self.media, "get_tmdb_info", side_effect=get_tmdb_details), \
                 patch.object(self.media, "_Media__search_tmdb_allnames",
-                             return_value=(None, aliases or [])) as alias_lookup:
+                             side_effect=get_aliases) as alias_lookup:
             with recognition_scope(title, source="candidate-test") as recorder:
                 parsed_meta = type("ParsedMeta", (), {
                     "begin_season": parsed_season,
@@ -66,6 +69,92 @@ class TmdbCandidateSelectionTest(TestCase):
                 result = self.media._Media__search_tmdb(
                     "Parsed Name", MediaType.TV)
         return result, recorder, alias_lookup
+
+    def test_similar_chinese_title_beats_an_exact_short_substring(self):
+        title = ("[Nix-Raws] 虽然我不是完美恶女～雏宫蝶鼠替换传～ / "
+                 "Futsutsuka na Akujo de wa Gozaimasu ga Suuguu Chouso S01E08 "
+                 "[CR WEB-DL 1080p AVC AAC][简繁内封]")
+        candidates = [
+            {"id": 1, "name": "完美恶女"},
+            {"id": 2, "name": "虽然我是不完美恶女 ～雏宫蝶鼠替换传～"},
+            {"id": 3, "name": "Unrelated Show"},
+        ]
+        for results in (candidates, list(reversed(candidates))):
+            with self.subTest(order=[item["id"] for item in results]):
+                result, recorder, _ = self._resolve(title, results=results,
+                                                     parsed_season=1, parsed_episode=8)
+
+                self.assertEqual(2, result["id"])
+                selection = next(action for action in recorder.actions
+                                 if action["action_type"] == "tmdb_candidate_selection")
+                scores = {item["id"]: item["evidence"]["similarity_score"]
+                          for item in selection["output"]["examined"]}
+                self.assertGreater(scores[2], 0.9)
+                self.assertGreater(scores[2], scores[1])
+                self.assertTrue(selection["output"]["title_similarity_filter"]["applied"])
+
+    def test_similar_chinese_title_can_win_without_an_exact_name_match(self):
+        result, _, _ = self._resolve(
+            "[Nix-Raws] 虽然我不是完美恶女～雏宫蝶鼠替换传～ / "
+            "Futsutsuka na Akujo de wa Gozaimasu ga Suuguu Chouso S01E08 "
+            "[CR WEB-DL 1080p AVC AAC][简繁内封]",
+            results=[{"id": 2, "name": "虽然我是不完美恶女 ～雏宫蝶鼠替换传～"}])
+
+        self.assertEqual(2, result["id"])
+
+    def test_complete_bang_dream_title_beats_the_franchise_prefix(self):
+        title = ("[百冬练习组&LoliHouse] BanG Dream! YUME∞MITA / バンドリ！ ゆめ∞みた "
+                 "- 02 [WebRip 1080p HEVC-10bit AAC][简繁内封字幕]")
+        candidates = [
+            {"id": 1, "name": "BanG Dream!"},
+            {"id": 2, "name": "BanG Dream! YUME∞MITA"},
+        ]
+        for results in (candidates, list(reversed(candidates))):
+            with self.subTest(order=[item["id"] for item in results]):
+                result, recorder, _ = self._resolve(title, results=results)
+
+                self.assertEqual(2, result["id"])
+                selection = next(action for action in recorder.actions
+                                 if action["action_type"] == "tmdb_candidate_selection")
+                self.assertEqual([2], selection["output"]["pending_ids"])
+                scores = {item["id"]: item["evidence"]["similarity_score"]
+                          for item in selection["output"]["examined"]}
+                self.assertEqual(1.0, scores[2])
+                self.assertLess(scores[1], scores[2])
+
+    def test_alias_can_improve_similarity_even_when_primary_name_already_matches(self):
+        result, recorder, alias_lookup = self._resolve(
+            "[Group] Alpha Story Finale S01E02 [1080p]",
+            results=[{"id": 1, "name": "Alpha Story"},
+                     {"id": 2, "name": "Alpha"}],
+            aliases={2: ["Alpha Story Finale"]})
+
+        self.assertEqual(2, result["id"])
+        self.assertIn(call(MediaType.TV, 2, alias_sources={"alternative", "translation"}),
+                      alias_lookup.call_args_list)
+        selection = next(action for action in recorder.actions
+                         if action["action_type"] == "tmdb_candidate_selection")
+        evidence = selection["output"]["examined"][1]["evidence"]
+        self.assertEqual(1.0, evidence["similarity_score"])
+
+    def test_equal_and_nearly_equal_complete_title_matches_remain_ambiguous(self):
+        cases = [
+            ("[Group] Alpha Show / Beta Show - 02 [1080p]",
+             ["Alpha Show", "Beta Show"]),
+            ("[Group] Alpha Story Finale - 02 [1080p]",
+             ["Alpha Story Finale", "Alpha Story Final"]),
+        ]
+        for title, names in cases:
+            with self.subTest(title=title):
+                result, recorder, _ = self._resolve(
+                    title, results=[{"id": index + 1, "name": name}
+                                    for index, name in enumerate(names)])
+
+                self.assertFalse(result)
+                self.assertEqual("ambiguous_tmdb", recorder.context["decision_reason"])
+                selection = next(action for action in recorder.actions
+                                 if action["action_type"] == "tmdb_candidate_selection")
+                self.assertFalse(selection["output"]["title_similarity_filter"]["applied"])
 
     def test_unique_title_match_wins_from_multiple_search_results(self):
         result, recorder, _ = self._resolve(
@@ -179,8 +268,10 @@ class TmdbCandidateSelectionTest(TestCase):
             ], aliases=["Alpha Alias"])
 
         self.assertFalse(result)
-        alias_lookup.assert_called_once_with(MediaType.TV, 10,
-                                             alias_sources={"alternative", "translation"})
+        alias_lookup.assert_has_calls([
+            call(MediaType.TV, 10, alias_sources={"alternative", "translation"}),
+            call(MediaType.TV, 20, alias_sources={"alternative", "translation"}),
+        ])
         self.assertEqual("ambiguous_tmdb", recorder.context["decision_reason"])
         self.assertEqual("ambiguous_tmdb", recorder.tmdb_results[-1]["status"])
         selection = next(action for action in recorder.actions

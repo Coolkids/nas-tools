@@ -1,6 +1,33 @@
 """根据已计算的标题证据，确定性地选择媒体实体。"""
 
 
+TITLE_SIMILARITY_MIN_SCORE = 0.88
+TITLE_SIMILARITY_MIN_MARGIN = 0.05
+
+
+def select_title_similarity(evidences, minimum_score=TITLE_SIMILARITY_MIN_SCORE,
+                            minimum_margin=TITLE_SIMILARITY_MIN_MARGIN):
+    """仅在完整标题相似度足够高且明显领先时，返回获胜证据的下标。"""
+    scores = []
+    for evidence in evidences:
+        try:
+            score = float(evidence["similarity_score"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not 0 <= score <= 1:
+            return None
+        scores.append(score)
+    if not scores:
+        return None
+    ranked = sorted(range(len(scores)), key=lambda index: scores[index], reverse=True)
+    best = ranked[0]
+    if scores[best] < minimum_score:
+        return None
+    if len(ranked) > 1 and round(scores[best] - scores[ranked[1]], 4) < minimum_margin:
+        return None
+    return best
+
+
 def _optional_int(value):
     if value is None or value == "":
         return None
@@ -69,7 +96,7 @@ def _entity_key(tmdb_info):
 
 
 def select_title_evidence(candidates, agreement_bonus=0.0):
-    """选择唯一的强匹配实体；若不存在强匹配，则选择唯一的模糊匹配实体。
+    """先比较完整标题相似度，再选择唯一的强匹配或模糊匹配实体。
 
     ``candidates`` 包含 ``((provider_id, parsed, tmdb_info), evidence)`` 形式的配对。
     来自多个识别器的同一 TMDB 实体证据会先去重；识别器顺序和诊断分数都不会用于打破平局。
@@ -88,7 +115,27 @@ def select_title_evidence(candidates, agreement_bonus=0.0):
         target = strong if level == "strong" else fuzzy
         target.setdefault(key, []).append((candidate, evidence))
 
+    combined = {key: list(values) for key, values in strong.items()}
+    for key, values in fuzzy.items():
+        combined.setdefault(key, []).extend(values)
+    entity_keys = list(combined)
+    similarity_evidence = []
+    for values in combined.values():
+        try:
+            scores = [float(item["similarity_score"]) for _, item in values]
+            similarity_evidence.append({"similarity_score": max(scores)}
+                                       if all(0 <= score <= 1 for score in scores) else {})
+        except (KeyError, TypeError, ValueError):
+            similarity_evidence.append({})
+    winner = select_title_similarity(similarity_evidence) if len(combined) > 1 else None
     entities = strong or fuzzy
+    if winner is not None:
+        entities = {entity_keys[winner]: combined[entity_keys[winner]]}
+    elif all("similarity_score" in item for item in similarity_evidence) and any(
+            similarity_evidence[index]["similarity_score"] >= TITLE_SIMILARITY_MIN_SCORE
+            for index, key in enumerate(entity_keys) if key in fuzzy):
+        # 完整标题的近似匹配与包含匹配过于接近时，同样保留歧义。
+        entities = combined
     if len(entities) > 1:
         return {"status": "failed", "reason": "ambiguous_tmdb",
                 "entities": {key: _best_candidate(values)[0]
