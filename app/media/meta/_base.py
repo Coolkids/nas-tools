@@ -151,6 +151,16 @@ class MetaBase(object):
         self.subtitle = subtitle
         self.fileflag = fileflag
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # 分类处理器是运行时单例，不能随媒体数据一起 pickle。
+        state.pop("category_handler", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.category_handler = Category()
+
     def get_name(self):
         if self.cn_name and StringUtils.is_all_chinese(self.cn_name):
             return self.cn_name
