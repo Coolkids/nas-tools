@@ -67,6 +67,23 @@ def _safe_candidate(candidate):
     return result
 
 
+def _safe_error(error, *candidates):
+    """Keep driver errors useful without exposing configured cache passwords."""
+    value = str(error)
+    passwords = [candidate.get("password") for candidate in candidates
+                 if isinstance(candidate, dict) and candidate.get("password")]
+    try:
+        from config import Config
+        active = Config().get_config("cache") or {}
+        if isinstance(active, dict) and active.get("password"):
+            passwords.append(active["password"])
+    except Exception:
+        pass
+    for password in sorted({str(secret) for secret in passwords}, key=len, reverse=True):
+        value = value.replace(password, "***")
+    return value[:1500]
+
+
 def _fingerprint(candidate):
     encoded = json.dumps(candidate, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -476,10 +493,10 @@ def check_cache_storage(values):
                     "excluded": _EXCLUDED_CACHES}
         except Exception as error:
             STORAGE_JOBS.update(job["job_id"], status="FAILED", stage="CHECK_FAILED",
-                                error=str(error), message="目标检查失败")
+                                error=_safe_error(error, candidate), message="目标检查失败")
             raise
     except Exception as error:
-        return {"code": 1, "msg": str(error)}
+        return {"code": 1, "msg": _safe_error(error)}
 
 
 def start_cache_migration(values):
@@ -516,7 +533,7 @@ def start_cache_migration(values):
         thread.start()
         return {"code": 0, "job_id": check_id, "job": STORAGE_JOBS.get(check_id)}
     except Exception as error:
-        return {"code": 1, "msg": str(error)}
+        return {"code": 1, "msg": _safe_error(error, candidate if "candidate" in locals() else None)}
 
 
 def _run_migration(job_id, candidate):
@@ -684,14 +701,17 @@ def _run_migration(job_id, candidate):
                 except Exception as rollback_error:
                     STORAGE_JOBS.update(job_id, status="RECOVERY_REQUIRED",
                                         stage="RECOVERY_REQUIRED",
-                                        error=f"{error}; SQLite 回滚失败：{rollback_error}",
+                                        error=(f"{_safe_error(error, candidate)}；SQLite 回滚失败："
+                                               f"{_safe_error(rollback_error, candidate)}"),
                                         message="缓存目标回滚未完成，系统保持维护状态")
                 else:
-                    STORAGE_JOBS.update(job_id, status="FAILED", stage="FAILED", error=str(error),
+                    STORAGE_JOBS.update(job_id, status="FAILED", stage="FAILED",
+                                        error=_safe_error(error, candidate),
                                         message="配置保存失败；活动配置保持原值")
         current = STORAGE_JOBS.get(job_id)
         if current and current.get("status") not in TERMINAL_STATES | {"RESTART_PENDING", "RECOVERY_REQUIRED"}:
-            STORAGE_JOBS.update(job_id, status="FAILED", stage="FAILED", error=str(error),
+            STORAGE_JOBS.update(job_id, status="FAILED", stage="FAILED",
+                                error=_safe_error(error, candidate),
                                 message="缓存迁移失败；活动配置保持原值")
     finally:
         current = STORAGE_JOBS.get(job_id)
@@ -795,7 +815,7 @@ def verify_cache_startup():
                     _rollback_sqlite_target(job["job_id"], job.get("result") or {})
                 except Exception as error:
                     STORAGE_JOBS.update(job["job_id"], status="RECOVERY_REQUIRED",
-                                        stage="RECOVERY_REQUIRED", error=str(error),
+                                        stage="RECOVERY_REQUIRED", error=_safe_error(error),
                                         message="旧缓存布局恢复失败，系统保持维护状态")
                     raise RuntimeError("缓存 SQLite 回滚失败，系统保持维护状态") from error
                 STORAGE_JOBS.update(job["job_id"], status="INTERRUPTED", stage="INTERRUPTED",
@@ -812,7 +832,7 @@ def verify_cache_startup():
                     _rollback_sqlite_target(job["job_id"], job.get("result") or {})
                 except Exception as error:
                     STORAGE_JOBS.update(job["job_id"], status="RECOVERY_REQUIRED",
-                                        stage="RECOVERY_REQUIRED", error=str(error),
+                                        stage="RECOVERY_REQUIRED", error=_safe_error(error),
                                         message="缓存目标回滚未完成，系统保持维护状态")
                     raise RuntimeError("缓存 SQLite 回滚失败，系统保持维护状态") from error
                 STORAGE_JOBS.update(job["job_id"], status="FAILED", stage="FAILED",
