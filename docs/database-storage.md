@@ -72,7 +72,7 @@ SQLite 的文件名和目录由后端固定生成，不能在设置页或 API �
 
 备份/恢复仍未完成实库验收。本次没有生成或导入数据库备份，因此不记录耗时，也不把任何未测试平台标为已验证。部署操作仍按上文的“完整数据库备份与恢复”流程执行；正式启用恢复前应先在隔离副本完成目标数据库组合、损坏包和中断回滚验收。
 
-直接运行 smoke test 使用临时配置目录和 SQLite，验证 `/index`、登录以及 SIGINT 停止。Docker CLI 可用，但当前执行用户无法访问 Docker daemon socket，因此镜像构建、Supervisor 容器启动和容器内受控重启均未验证。前端 `npm run type-check` 与 `npm run build` 已通过；浏览器多视口/主题人工验收仍待执行。
+直接运行 smoke test 使用临时配置目录和 SQLite，验证 `/index`、登录以及 SIGINT 停止。PyInstaller 6.22.2 命令已安装，但未构建可执行产物。`docker compose -f docker/compose.yml config --quiet` 静态检查通过；Docker CLI 可用，但当前执行用户无法访问 daemon socket，镜像构建、Supervisor 容器启动和容器内受控重启均未验证。前端 `npm run type-check` 与 `npm run build` 已通过；浏览器空状态布局已按上文验证，真实 API、可访问性和迁移/恢复交互仍待验收。
 
 运行本地测试：
 

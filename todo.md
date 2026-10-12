@@ -226,8 +226,8 @@ database:
 - [x] 未配置 `database` 或缺少 `database.type` 时默认使用 SQLite；新安装直接初始化 `db/nastools.db`，旧安装先完成第 4.5 节合库升级。显式配置远程数据库或无效类型时不得回退到 SQLite。
 - [x] 使用 SQLAlchemy `URL.create()` 构建连接串，正确处理密码中的特殊字符；日志和 API 只输出脱敏连接信息。
 - [x] `pyproject.toml` 显式声明 SQLAlchemy，新增 PostgreSQL 与 MySQL/MariaDB 驱动并更新 `uv.lock`。
-  - [x] 在项目 Python 3.14.4 环境验证安装和测试可用性（见第 8 节）。
-  - [ ] Docker 镜像和 PyInstaller 打包环境的安装可用性尚未验证。
+  - [x] 在项目 Python 3.14.4 环境验证依赖和测试可用性；PyInstaller 6.22.2 命令可用。
+  - [ ] PyInstaller 实际产物构建及隔离运行验收。
 - [x] PostgreSQL 采用 `postgresql+psycopg` 同步驱动，符合当前同步业务模型。[SQLAlchemy PostgreSQL 驱动说明](https://docs.sqlalchemy.org/en/20/dialects/postgresql.html#module-sqlalchemy.dialects.postgresql.psycopg)
 - [x] MySQL 采用 `mysql+pymysql`，MariaDB 采用 `mariadb+pymysql`，设置 `utf8mb4`，并由后端分别识别服务端产品。[SQLAlchemy MariaDB 连接方式](https://docs.sqlalchemy.org/en/20/dialects/mysql.html#mariadb-only-mode)
   - [x] 分别连接真实 MySQL 与 MariaDB 服务执行隔离契约和空库 schema 初始化验收（见第 8 节）；完整业务迁移/恢复矩阵仍待验收。
@@ -627,7 +627,8 @@ flowchart TD
 实测服务端/驱动版本、隔离测试范围和初始化耗时见 `docs/database-storage.md`。以上远程测试库不是生产库；所有远程契约测试均要求检测目标为空，并清理本次创建的表。Python 3.14.4 使用项目 `.venv` 解释器。
 
 - [x] 使用临时配置目录完成当前代码的启动、SQLite 初始化/升级、缓存初始化、健康检查、前端代理登录及 SIGINT 停止验证。
-- [ ] Docker 镜像构建和 Supervisor 容器启动验证；当前执行用户没有 `/var/run/docker.sock` 访问权限。
+- [x] `docker compose -f docker/compose.yml config --quiet` 静态配置检查通过。
+- [ ] Docker 镜像构建、Supervisor 容器启动和受控重启仍未验证；当前执行用户没有 `/var/run/docker.sock` 访问权限。
 
 ### 8.2 缓存验收
 
