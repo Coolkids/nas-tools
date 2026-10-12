@@ -59,11 +59,6 @@ class MainDb:
                         reflected.c[system_column_names["KEY"]].in_(
                             ("CookieUserInfo", "CookieCloud"))))
             Base.metadata.create_all(engine)
-            if engine.dialect.name == "sqlite":
-                with engine.connect() as conn:
-                    conn.execute(text("PRAGMA journal_mode=WAL"))
-                    conn.execute(text("PRAGMA synchronous=NORMAL"))
-                    conn.execute(text("PRAGMA wal_autocheckpoint=1000"))
         MainDb.wal_checkpoint()
 
     @staticmethod
