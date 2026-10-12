@@ -212,3 +212,32 @@ class MediaSyncSnapshotTest(TestCase):
         self.assertEqual([{}, {}, {}, {}], [call.kwargs
                                             for call in media_db.cleanup_sync_generations.call_args_list])
         media_db.release_sync_lease.assert_called_once_with(lease, status="CLEANUP_PENDING")
+
+    def test_lost_sync_lease_before_publish_discards_unpublished_generation(self):
+        instance = MediaServer()
+        lease = {"server": "emby", "job_id": "job", "generation_id": "generation",
+                 "lease_token": 1, "expected_active_generation": "legacy"}
+        media_db = Mock()
+        media_db.acquire_sync_lease.return_value = lease
+        media_db.write_sync_batch.side_effect = lambda _lease, batch: len(batch)
+        media_db.renew_sync_lease.return_value = False
+
+        with patch.object(instance, "mediadb", media_db), \
+                patch.object(instance, "progress", Mock()), \
+                patch.object(instance, "_server_type", SimpleNamespace(value="emby")), \
+                patch.object(instance, "get_medias_count",
+                             return_value={"MovieCount": 1, "SeriesCount": 0}), \
+                patch.object(instance, "get_libraries",
+                             return_value=[{"id": "movies", "name": "电影"}]), \
+                patch.object(instance, "get_items", return_value=[{
+                    "id": "movie-1", "type": "Movie", "title": "电影 A"}]):
+            instance.sync_mediaserver()
+
+        media_db.publish_sync_generation.assert_not_called()
+        self.assertEqual(2, media_db.cleanup_sync_generations.call_count)
+        self.assertEqual((lease,), media_db.cleanup_sync_generations.call_args_list[0].args)
+        self.assertEqual({}, media_db.cleanup_sync_generations.call_args_list[0].kwargs)
+        self.assertEqual((lease,), media_db.cleanup_sync_generations.call_args_list[1].args)
+        self.assertEqual({"generation_id": "generation"},
+                         media_db.cleanup_sync_generations.call_args_list[1].kwargs)
+        media_db.release_sync_lease.assert_called_once_with(lease, status="FAILED")

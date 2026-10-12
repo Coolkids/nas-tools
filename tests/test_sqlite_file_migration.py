@@ -1,14 +1,18 @@
 """旧双库在隔离目录中升级并合并到固定单库。"""
 
 import hashlib
+import multiprocessing
+import os
 import sqlite3
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import URL, create_engine, text
 
 from app.db.models import Base
 from app.db.schema import LOGICAL_DOMAIN_TABLES
-from app.db.sqlite_files import prepare_sqlite_database
+from app.db.sqlite_files import finalize_sqlite_migration, prepare_sqlite_database
 from app.utils.storage_jobs import StorageJobStore
 
 
@@ -77,6 +81,63 @@ def _configure_migration(config_dir, monkeypatch):
     return config_dir / "db" / "nastools.db"
 
 
+def _prepare_migration_process(config_path, start, results):
+    from app.db.sqlite_files import prepare_sqlite_database
+
+    config_dir = Path(config_path)
+    jobs = StorageJobStore(str(config_dir / ".maintenance" / "jobs.sqlite3"))
+    with patch("config.Config", lambda: _Config(config_dir)), \
+            patch("app.db.sqlite_files.STORAGE_JOBS", jobs):
+        start.wait(10)
+        try:
+            results.put(("ok", prepare_sqlite_database()))
+        except Exception as error:
+            results.put(("error", repr(error)))
+
+
+def _interrupt_after_legacy_snapshot(config_path, snapshot_ready):
+    import time
+
+    import app.db.sqlite_files as sqlite_files
+
+    config_dir = Path(config_path)
+    jobs = StorageJobStore(str(config_dir / ".maintenance" / "jobs.sqlite3"))
+    original_copy_snapshot = sqlite_files._copy_snapshot
+
+    def pause_after_snapshot(source, target):
+        original_copy_snapshot(source, target)
+        snapshot_ready.set()
+        while True:
+            time.sleep(1)
+
+    with patch("config.Config", lambda: _Config(config_dir)), \
+            patch("app.db.sqlite_files.STORAGE_JOBS", jobs), \
+            patch.object(sqlite_files, "_copy_snapshot", side_effect=pause_after_snapshot):
+        prepare_sqlite_database()
+
+
+def _interrupt_during_legacy_archive(config_path, moved_source):
+    import time
+
+    import app.db.sqlite_files as sqlite_files
+
+    config_dir = Path(config_path)
+    jobs = StorageJobStore(str(config_dir / ".maintenance" / "jobs.sqlite3"))
+    original_replace = sqlite_files.os.replace
+
+    def pause_after_source_move(source, target):
+        original_replace(source, target)
+        if Path(source).name in {"user.db", "media.db"}:
+            moved_source.set()
+            while True:
+                time.sleep(1)
+
+    with patch("config.Config", lambda: _Config(config_dir)), \
+            patch("app.db.sqlite_files.STORAGE_JOBS", jobs), \
+            patch.object(sqlite_files.os, "replace", side_effect=pause_after_source_move):
+        finalize_sqlite_migration()
+
+
 @pytest.mark.parametrize("layout", ("root", "db"))
 def test_old_main_and_media_databases_merge_into_fixed_single_database(
         layout, tmp_path, monkeypatch):
@@ -107,6 +168,25 @@ def test_old_main_and_media_databases_merge_into_fixed_single_database(
             "SELECT value FROM __nastools_database_layout WHERE key='merge_status'").fetchone() == (
                 "complete",)
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        connection.execute("INSERT INTO CONFIG_USERS (NAME, PASSWORD, PRIS) "
+                           "VALUES ('迁移后用户', 'hash-new', 'all')")
+        new_user_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+        connection.execute("INSERT INTO MEDIASYNC_ITEMS "
+                           "(SERVER, ITEM_ID, ITEM_TYPE, TITLE) "
+                           "VALUES ('emby', 'after-migration', 'Movie', '迁移后媒体记录')")
+        new_media_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+        connection.commit()
+        assert new_user_id > 31
+        assert new_media_id > 32
+
+    # A subsequent startup sees the completed single database and does not
+    # re-import either legacy source over writes made after publication.
+    assert prepare_sqlite_database() == str(target_path)
+    with sqlite3.connect(target_path) as connection:
+        assert connection.execute("SELECT NAME FROM CONFIG_USERS WHERE ID=?",
+                                  (new_user_id,)).fetchone() == ("迁移后用户",)
+        assert connection.execute("SELECT ITEM_ID FROM MEDIASYNC_ITEMS WHERE ID=?",
+                                  (new_media_id,)).fetchone() == ("after-migration",)
 
     assert user_path.is_file()
     assert media_path.is_file()
@@ -131,22 +211,32 @@ def test_main_database_without_legacy_media_database_migrates(tmp_path, monkeypa
 
 def test_committed_wal_data_is_included_in_legacy_snapshot(tmp_path, monkeypatch):
     user_path = tmp_path / "user.db"
+    media_path = tmp_path / "media.db"
     _create_user_database(user_path)
-    writer = sqlite3.connect(user_path)
+    _create_media_database(media_path)
+    user_writer = sqlite3.connect(user_path)
+    media_writer = sqlite3.connect(media_path)
     try:
-        writer.execute("PRAGMA journal_mode=WAL")
-        writer.execute("UPDATE CONFIG_USERS SET NAME='WAL 管理员' WHERE ID=17")
-        writer.commit()
+        user_writer.execute("PRAGMA journal_mode=WAL")
+        user_writer.execute("UPDATE CONFIG_USERS SET NAME='WAL 管理员' WHERE ID=17")
+        user_writer.commit()
+        media_writer.execute("PRAGMA journal_mode=WAL")
+        media_writer.execute("UPDATE MEDIASYNC_ITEMS SET TITLE='WAL 媒体记录' WHERE ID=31")
+        media_writer.commit()
         assert (tmp_path / "user.db-wal").is_file()
+        assert (tmp_path / "media.db-wal").is_file()
 
         target_path = _configure_migration(tmp_path, monkeypatch)
         assert prepare_sqlite_database() == str(target_path)
     finally:
-        writer.close()
+        user_writer.close()
+        media_writer.close()
 
     with sqlite3.connect(target_path) as connection:
         assert connection.execute(
             "SELECT NAME FROM CONFIG_USERS WHERE ID=17").fetchone() == ("WAL 管理员",)
+        assert connection.execute(
+            "SELECT TITLE FROM MEDIASYNC_ITEMS WHERE ID=31").fetchone() == ("WAL 媒体记录",)
 
 
 def test_media_database_without_main_database_is_rejected(tmp_path, monkeypatch):
@@ -249,6 +339,34 @@ def test_corrupt_legacy_main_database_is_preserved_and_not_published(tmp_path, m
     assert user_path.read_bytes() == b"not a SQLite database"
 
 
+def test_same_named_legacy_view_is_rejected_without_publishing_or_mutating_source(
+        tmp_path, monkeypatch):
+    import app.db.sqlite_files as sqlite_files
+
+    user_path = tmp_path / "user.db"
+    _create_user_database(user_path)
+    with sqlite3.connect(user_path) as connection:
+        connection.execute("DROP TABLE CONFIG_USERS")
+        connection.execute("CREATE VIEW CONFIG_USERS AS "
+                           "SELECT 17 AS ID, 'view user' AS NAME")
+    source_hash = hashlib.sha256(user_path.read_bytes()).hexdigest()
+    target_path = _configure_migration(tmp_path, monkeypatch)
+    copy_domain = sqlite_files._copy_domain
+    reached_import = []
+
+    def check_rejected_before_domain_copy(*args, **kwargs):
+        reached_import.append(True)
+        return copy_domain(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite_files, "_copy_domain", check_rejected_before_domain_copy)
+    with pytest.raises(RuntimeError, match="与应用表同名的视图"):
+        prepare_sqlite_database()
+
+    assert reached_import == [True]
+    assert not target_path.exists()
+    assert hashlib.sha256(user_path.read_bytes()).hexdigest() == source_hash
+
+
 def test_unmarked_target_and_legacy_sources_are_rejected(tmp_path, monkeypatch):
     user_path = tmp_path / "user.db"
     _create_user_database(user_path)
@@ -314,3 +432,245 @@ def test_failure_while_copying_second_domain_does_not_publish_partial_database(
     assert not target_path.exists()
     assert hashlib.sha256(user_path.read_bytes()).hexdigest() == source_hashes[0]
     assert hashlib.sha256(media_path.read_bytes()).hexdigest() == source_hashes[1]
+
+
+def test_read_only_legacy_sources_can_be_snapshotted_without_rewriting_them(tmp_path, monkeypatch):
+    user_path = tmp_path / "user.db"
+    media_path = tmp_path / "media.db"
+    _create_user_database(user_path)
+    _create_media_database(media_path)
+    user_path.chmod(0o444)
+    media_path.chmod(0o444)
+    hashes = (hashlib.sha256(user_path.read_bytes()).hexdigest(),
+              hashlib.sha256(media_path.read_bytes()).hexdigest())
+    target_path = _configure_migration(tmp_path, monkeypatch)
+
+    assert prepare_sqlite_database() == str(target_path)
+
+    assert hashlib.sha256(user_path.read_bytes()).hexdigest() == hashes[0]
+    assert hashlib.sha256(media_path.read_bytes()).hexdigest() == hashes[1]
+    with sqlite3.connect(target_path) as connection:
+        assert connection.execute("SELECT NAME FROM CONFIG_USERS WHERE ID=17").fetchone() \
+            == ("管理员",)
+        assert connection.execute("SELECT count(*) FROM MEDIASYNC_ITEMS").fetchone() == (2,)
+
+
+def test_process_interruption_leaves_no_partial_target_and_next_startup_recovers(
+        tmp_path, monkeypatch):
+    user_path = tmp_path / "user.db"
+    media_path = tmp_path / "media.db"
+    _create_user_database(user_path)
+    _create_media_database(media_path)
+    target_path = tmp_path / "db" / "nastools.db"
+    _configure_migration(tmp_path, monkeypatch)
+    context = multiprocessing.get_context("spawn")
+    snapshot_ready = context.Event()
+    process = context.Process(target=_interrupt_after_legacy_snapshot,
+                              args=(str(tmp_path), snapshot_ready))
+    process.start()
+    try:
+        assert snapshot_ready.wait(60), "子进程未到达旧库快照边界"
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(10)
+        if process.is_alive():
+            process.kill()
+            process.join(5)
+    assert process.exitcode != 0
+    assert not target_path.exists()
+    orphan_staging = list((tmp_path / "db" / ".staging").glob("legacy-merge-*"))
+    assert len(orphan_staging) == 1
+
+    assert prepare_sqlite_database() == str(target_path)
+
+    assert not orphan_staging[0].exists()
+    with sqlite3.connect(target_path) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("SELECT NAME FROM CONFIG_USERS WHERE ID=17").fetchone() \
+            == ("管理员",)
+
+
+def test_completion_marker_failure_rolls_back_both_domains_and_preserves_sources(
+        tmp_path, monkeypatch):
+    import app.db.sqlite_files as sqlite_files
+
+    user_path = tmp_path / "user.db"
+    media_path = tmp_path / "media.db"
+    _create_user_database(user_path)
+    _create_media_database(media_path)
+    source_hashes = (hashlib.sha256(user_path.read_bytes()).hexdigest(),
+                     hashlib.sha256(media_path.read_bytes()).hexdigest())
+    target_path = _configure_migration(tmp_path, monkeypatch)
+    write_completion = sqlite_files._write_completion
+
+    def fail_after_completion_record(connection, job_id, sources):
+        write_completion(connection, job_id, sources)
+        raise RuntimeError("injected completion marker failure")
+
+    monkeypatch.setattr(sqlite_files, "_write_completion", fail_after_completion_record)
+    with pytest.raises(RuntimeError, match="completion marker failure"):
+        prepare_sqlite_database()
+
+    assert not target_path.exists()
+    assert not list((tmp_path / "db" / ".staging").glob("legacy-merge-*"))
+    assert hashlib.sha256(user_path.read_bytes()).hexdigest() == source_hashes[0]
+    assert hashlib.sha256(media_path.read_bytes()).hexdigest() == source_hashes[1]
+
+
+def test_legacy_schema_conversion_failure_preserves_original_databases(
+        tmp_path, monkeypatch):
+    import app.db.sqlite_files as sqlite_files
+
+    user_path = tmp_path / "user.db"
+    media_path = tmp_path / "media.db"
+    _create_user_database(user_path)
+    _create_media_database(media_path)
+    source_hashes = (hashlib.sha256(user_path.read_bytes()).hexdigest(),
+                     hashlib.sha256(media_path.read_bytes()).hexdigest())
+    target_path = _configure_migration(tmp_path, monkeypatch)
+
+    def fail_schema_conversion(*_args, **_kwargs):
+        raise RuntimeError("injected legacy schema conversion failure")
+
+    monkeypatch.setattr(sqlite_files, "_upgrade_snapshot", fail_schema_conversion)
+    with pytest.raises(RuntimeError, match="schema conversion failure"):
+        prepare_sqlite_database()
+
+    assert not target_path.exists()
+    assert not list((tmp_path / "db" / ".staging").glob("legacy-merge-*"))
+    assert hashlib.sha256(user_path.read_bytes()).hexdigest() == source_hashes[0]
+    assert hashlib.sha256(media_path.read_bytes()).hexdigest() == source_hashes[1]
+
+
+def test_atomic_publish_failure_keeps_legacy_sources_and_no_active_database(
+        tmp_path, monkeypatch):
+    import app.db.sqlite_files as sqlite_files
+
+    user_path = tmp_path / "user.db"
+    media_path = tmp_path / "media.db"
+    _create_user_database(user_path)
+    _create_media_database(media_path)
+    source_hashes = (hashlib.sha256(user_path.read_bytes()).hexdigest(),
+                     hashlib.sha256(media_path.read_bytes()).hexdigest())
+    target_path = _configure_migration(tmp_path, monkeypatch)
+    original_replace = sqlite_files.os.replace
+
+    def fail_target_publish(source, destination):
+        if os.path.basename(source) == "nastools.staged.sqlite3":
+            raise OSError("injected SQLite target publication failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(sqlite_files.os, "replace", fail_target_publish)
+    with pytest.raises(OSError, match="target publication failure"):
+        prepare_sqlite_database()
+
+    assert not target_path.exists()
+    assert not list((tmp_path / "db" / ".staging").glob("legacy-merge-*"))
+    assert hashlib.sha256(user_path.read_bytes()).hexdigest() == source_hashes[0]
+    assert hashlib.sha256(media_path.read_bytes()).hexdigest() == source_hashes[1]
+
+
+def test_failure_after_single_file_publish_removes_unverified_target_and_keeps_sources(
+        tmp_path, monkeypatch):
+    import app.db.sqlite_files as sqlite_files
+
+    user_path = tmp_path / "user.db"
+    _create_user_database(user_path)
+    source_hash = hashlib.sha256(user_path.read_bytes()).hexdigest()
+    target_path = _configure_migration(tmp_path, monkeypatch)
+    verify_integrity = sqlite_files._integrity
+
+    def fail_on_published_target(path):
+        if os.path.realpath(path) == os.path.realpath(target_path):
+            raise RuntimeError("injected published target integrity failure")
+        return verify_integrity(path)
+
+    monkeypatch.setattr(sqlite_files, "_integrity", fail_on_published_target)
+    with pytest.raises(RuntimeError, match="published target integrity failure"):
+        prepare_sqlite_database()
+
+    assert not target_path.exists()
+    assert user_path.is_file()
+    assert hashlib.sha256(user_path.read_bytes()).hexdigest() == source_hash
+
+
+def test_two_processes_migrating_same_legacy_layout_publish_one_fixed_database(
+        tmp_path):
+    user_path = tmp_path / "user.db"
+    media_path = tmp_path / "media.db"
+    _create_user_database(user_path)
+    _create_media_database(media_path)
+    target_path = tmp_path / "db" / "nastools.db"
+
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    results = context.Queue()
+    processes = [context.Process(target=_prepare_migration_process,
+                                 args=(str(tmp_path), start, results))
+                 for _ in range(2)]
+    for process in processes:
+        process.start()
+    start.set()
+    try:
+        messages = [results.get(timeout=60) for _ in processes]
+    finally:
+        for process in processes:
+            process.join(60)
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+            if process.is_alive():
+                process.kill()
+                process.join(5)
+
+    assert [message[0] for message in messages] == ["ok", "ok"]
+    assert {message[1] for message in messages} == {str(target_path)}
+    assert all(process.exitcode == 0 for process in processes)
+    with sqlite3.connect(target_path) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("SELECT count(*) FROM CONFIG_USERS").fetchone() == (1,)
+
+
+def test_process_interruption_during_legacy_archive_finishes_on_next_startup(
+        tmp_path, monkeypatch):
+    user_path = tmp_path / "user.db"
+    media_path = tmp_path / "media.db"
+    _create_user_database(user_path)
+    _create_media_database(media_path)
+    user_hash = hashlib.sha256(user_path.read_bytes()).hexdigest()
+    media_hash = hashlib.sha256(media_path.read_bytes()).hexdigest()
+    target_path = _configure_migration(tmp_path, monkeypatch)
+    assert prepare_sqlite_database() == str(target_path)
+    with sqlite3.connect(target_path) as connection:
+        job_id = connection.execute(
+            "SELECT value FROM __nastools_database_layout WHERE key='job_id'").fetchone()[0]
+
+    context = multiprocessing.get_context("spawn")
+    moved_source = context.Event()
+    process = context.Process(target=_interrupt_during_legacy_archive,
+                              args=(str(tmp_path), moved_source))
+    process.start()
+    try:
+        assert moved_source.wait(60), "子进程未到达旧库归档边界"
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(10)
+        if process.is_alive():
+            process.kill()
+            process.join(5)
+    assert process.exitcode != 0
+    assert user_path.exists() != media_path.exists()
+
+    finalize_sqlite_migration()
+
+    archive = tmp_path / "db" / ".legacy-archive" / f"legacy-merge-{job_id}"
+    assert not user_path.exists()
+    assert not media_path.exists()
+    assert hashlib.sha256((archive / "user.db").read_bytes()).hexdigest() == user_hash
+    assert hashlib.sha256((archive / "media.db").read_bytes()).hexdigest() == media_hash
+    with sqlite3.connect(target_path) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("SELECT NAME FROM CONFIG_USERS WHERE ID=17").fetchone() \
+            == ("管理员",)

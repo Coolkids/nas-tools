@@ -1,7 +1,8 @@
 """持久化媒体同步租约的互斥与 fencing token 回归。"""
 
+import multiprocessing
 import tempfile
-from types import SimpleNamespace
+import time
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -10,13 +11,35 @@ from app.db.media_db import MediaDb
 from app.db.models import Base, MEDIASYNCSYNCJOB
 
 
+class _Config:
+    def __init__(self, directory):
+        self.directory = directory
+
+    def get_config_path(self):
+        return self.directory
+
+    @staticmethod
+    def get_config(node=None):
+        return {"type": "sqlite"} if node == "database" else {}
+
+
+def _hold_unpublished_sync_generation(directory, ready):
+    config = _Config(directory)
+    with patch("config.Config", return_value=config):
+        DATABASE.dispose()
+        media_db = MediaDb()
+        lease = media_db.acquire_sync_lease("emby", lease_seconds=1)
+        media_db.write_sync_batch(lease, [{
+            "id": "child-unpublished", "type": "Movie", "title": "子进程未发布条目"}])
+        ready.set()
+        while True:
+            time.sleep(1)
+
+
 class MediaSyncJobLeaseTest(TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
-        config = SimpleNamespace(
-            get_config_path=lambda: self.directory.name,
-            get_config=lambda node=None: {"type": "sqlite"} if node == "database" else {},
-        )
+        config = _Config(self.directory.name)
         self.config_patch = patch("config.Config", return_value=config)
         self.config_patch.start()
         DATABASE.dispose()
@@ -87,3 +110,31 @@ class MediaSyncJobLeaseTest(TestCase):
 
         self.assertEqual([], self.media_db.recover_stale_sync_jobs())
         self.assertTrue(self.media_db.sync_lease_is_current(lease))
+
+    def test_process_death_recovers_expired_unpublished_generation(self):
+        self.assertTrue(self.media_db.statistics("emby", 1, 1, 0))
+        self.assertTrue(self.media_db.insert("emby", {
+            "id": "parent-active", "type": "Movie", "title": "父进程活动条目"}))
+        context = multiprocessing.get_context("spawn")
+        ready = context.Event()
+        child = context.Process(target=_hold_unpublished_sync_generation,
+                                args=(self.directory.name, ready))
+        child.start()
+        try:
+            self.assertTrue(ready.wait(30), "子进程未写入未发布媒体代次")
+        finally:
+            if child.is_alive():
+                child.terminate()
+                child.join(10)
+            if child.is_alive():
+                child.kill()
+                child.join(5)
+        self.assertNotEqual(0, child.exitcode)
+        time.sleep(1.1)
+
+        recovered = self.media_db.recover_stale_sync_jobs()
+
+        self.assertEqual([{"server": "emby", "status": "INTERRUPTED",
+                           "removed_rows": 1, "error": None}], recovered)
+        self.assertTrue(self.media_db.exists("emby", "父进程活动条目", None, None))
+        self.assertFalse(self.media_db.exists("emby", "子进程未发布条目", None, None))

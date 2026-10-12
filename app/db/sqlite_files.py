@@ -384,6 +384,19 @@ def _copy_domain(connection, source_path, domain, expected_tables, excluded_tabl
     if attached_sources is not None:
         attached_sources.append(alias)
     try:
+        unsupported_objects = _execute(
+            connection,
+            f"SELECT type, name FROM {_quote(alias)}.sqlite_master "
+            "WHERE type IN ('view', 'trigger') AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        conflicts = sorted(name for _kind, name in unsupported_objects
+                           if name.upper() in expected_tables)
+        if conflicts:
+            raise RuntimeError(
+                f"旧{domain}数据库包含与应用表同名的视图或触发器：{', '.join(conflicts)}")
+        if unsupported_objects:
+            names = ", ".join(sorted(name for _kind, name in unsupported_objects))
+            raise RuntimeError(f"旧{domain}数据库包含无法迁移的视图或触发器：{names}")
         source_tables = _table_names(connection, alias)
         unknown = source_tables - expected_tables - _RETIRED_TABLES - _VERSION_TABLES
         if unknown:
