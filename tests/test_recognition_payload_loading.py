@@ -31,16 +31,20 @@ class RecognitionPayloadLoadingTest(unittest.TestCase):
         session = sessionmaker(bind=engine)()
 
         class TestDb:
+            def __init__(self):
+                self.commit_count = 0
+
             @staticmethod
             def query(*models):
                 return session.query(*models)
 
-            @staticmethod
-            def commit():
+            def commit(self):
+                self.commit_count += 1
                 session.commit()
 
         previous_db = DbHelper._db
-        DbHelper._db = TestDb()
+        test_db = TestDb()
+        DbHelper._db = test_db
         try:
             session.add_all([
                 RECOGNITIONREQUEST(REQUEST_ID="old-1", CREATED_AT="2026-08-01 10:00:00",
@@ -63,6 +67,7 @@ class RecognitionPayloadLoadingTest(unittest.TestCase):
                     30, now=datetime.datetime(2026, 10, 4), batch_size=1)
 
             self.assertEqual(2, deleted)
+            self.assertEqual(2, test_db.commit_count)
             self.assertEqual({"running", "recent"}, {
                 row.REQUEST_ID for row in session.query(RECOGNITIONREQUEST).all()})
             self.assertEqual({"running", "recent"}, {
