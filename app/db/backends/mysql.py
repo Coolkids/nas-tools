@@ -42,6 +42,9 @@ class MySQLBackend(DatabaseBackend):
                 text("SELECT @@default_storage_engine")).scalar_one())
             lower_case_table_names = int(connection.execute(
                 text("SELECT @@lower_case_table_names")).scalar_one())
+            server_host, server_port, server_id, database = connection.execute(text(
+                "SELECT @@hostname, @@port, @@server_id, DATABASE()"
+            )).one()
         if charset.lower() != "utf8mb4":
             raise RuntimeError("MySQL/MariaDB 目标数据库默认字符集必须为 utf8mb4")
         if storage_engine.lower() not in {"innodb", "xtradb"}:
@@ -50,7 +53,9 @@ class MySQLBackend(DatabaseBackend):
                 "version": version, "character_set": charset, "collation": collation,
                 "sql_mode": sql_mode, "max_allowed_packet": packet,
                 "default_storage_engine": storage_engine,
-                "lower_case_table_names": lower_case_table_names}
+                "lower_case_table_names": lower_case_table_names,
+                "server_host": str(server_host), "server_port": int(server_port),
+                "server_id": int(server_id), "database": database}
 
     def estimated_table_counts(self, engine, metadata):
         estimates = {}

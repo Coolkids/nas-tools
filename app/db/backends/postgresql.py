@@ -34,8 +34,11 @@ class PostgreSQLBackend(DatabaseBackend):
             version_num = connection.execute(text("SHOW server_version_num")).scalar_one()
             database = connection.execute(text("SELECT current_database()")).scalar_one()
             schema = connection.execute(text("SELECT current_schema()")).scalar_one()
+            server_address, server_port = connection.execute(
+                text("SELECT inet_server_addr()::text, inet_server_port()")).one()
         return {"product": "PostgreSQL", "version": str(version),
-                "version_num": str(version_num), "database": database, "schema": schema}
+                "version_num": str(version_num), "database": database, "schema": schema,
+                "server_address": server_address, "server_port": server_port}
 
     def estimated_table_counts(self, engine, metadata):
         estimates = {}

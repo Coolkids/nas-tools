@@ -73,6 +73,24 @@ def _fingerprint(settings):
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _resolved_addresses(host):
+    try:
+        results = socket.getaddrinfo(str(host), None, type=socket.SOCK_STREAM)
+    except (OSError, socket.gaierror):
+        return []
+    addresses = set()
+    for result in results:
+        raw_address = str(result[4][0]).split("%", 1)[0]
+        try:
+            address = ipaddress.ip_address(raw_address)
+            if getattr(address, "ipv4_mapped", None):
+                address = address.ipv4_mapped
+            addresses.add(address.compressed)
+        except ValueError:
+            addresses.add(raw_address.casefold())
+    return sorted(addresses)
+
+
 def _safe_settings(settings):
     def scrub(value):
         if isinstance(value, dict):
@@ -145,25 +163,8 @@ def _same_database(left, right):
     if host_left == host_right:
         return True
 
-    def resolved_addresses(host):
-        try:
-            results = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-        except (OSError, socket.gaierror):
-            return set()
-        addresses = set()
-        for result in results:
-            raw_address = str(result[4][0]).split("%", 1)[0]
-            try:
-                address = ipaddress.ip_address(raw_address)
-                if getattr(address, "ipv4_mapped", None):
-                    address = address.ipv4_mapped
-                addresses.add(address.compressed)
-            except ValueError:
-                addresses.add(raw_address.casefold())
-        return addresses
-
-    left_addresses = resolved_addresses(host_left)
-    right_addresses = resolved_addresses(host_right)
+    left_addresses = set(_resolved_addresses(host_left))
+    right_addresses = set(_resolved_addresses(host_right))
     return bool(left_addresses and right_addresses and left_addresses & right_addresses)
 
 
@@ -423,11 +424,21 @@ def _sha256_file(path):
 
 def _target_identity(settings):
     if settings["type"] != "sqlite":
-        return {"fingerprint": _fingerprint(settings)}
+        engine = _new_engine(settings)
+        try:
+            return _engine_target_identity(settings, engine)
+        finally:
+            engine.dispose()
     from app.db.sqlite_files import database_path
     path = database_path()
     return {"path": path, "identity": _file_identity(path),
             "objects": _sqlite_objects(path)}
+
+
+def _engine_target_identity(settings, engine):
+    return {"fingerprint": _fingerprint(settings),
+            "capabilities": _server_capabilities(engine),
+            "resolved_addresses": _resolved_addresses(settings.get("host"))}
 
 
 def _current_database_status():
@@ -1236,6 +1247,9 @@ def _run_migration(job_id, candidate, source_fingerprint, target_fingerprint,
                 target_engine = _new_engine(candidate, sqlite_path=staged_path)
             else:
                 target_engine = _new_engine(candidate)
+            if (candidate["type"] != "sqlite"
+                    and _engine_target_identity(candidate, target_engine) != target_identity):
+                raise RuntimeError("目标数据库实例在检查后发生变化，请重新检查")
             if candidate["type"] != "sqlite":
                 objects = _database_objects(target_engine)
                 if objects:
