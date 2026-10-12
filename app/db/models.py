@@ -377,6 +377,7 @@ class SEARCHRESULTINFO(Base):
 
 class SEARCHTASK(Base):
     __tablename__ = 'SEARCH_TASK'
+    __portable_unique_keys__ = {("KEYWORD",): "KEYWORD_HASH"}
 
     ID = Column(Integer, primary_key=True)
     __table_args__ = (Index("UN_INDX_SEARCH_TASK_KEYWORD_HASH", "KEYWORD_HASH", unique=True),)

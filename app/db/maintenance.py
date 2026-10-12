@@ -1548,44 +1548,6 @@ def retry_database_restore_restart(job_id):
     return True
 
 
-def retry_database_restore_restart(job_id):
-    job = STORAGE_JOBS.get(job_id)
-    if (not job or job.get("kind") != _RESTORE_KIND
-            or job.get("status") not in {"RESTART_PENDING", "RECOVERY_REQUIRED"}
-            or not (job.get("result") or {}).get("restore_validated")):
-        return False
-    from app.db.migration import (_current_settings, _fingerprint, _verify_revision)
-
-    with STORAGE_JOBS.maintenance_lock(exclusive=True):
-        job = STORAGE_JOBS.get(job_id)
-        if (not job or job.get("status") not in {"RESTART_PENDING", "RECOVERY_REQUIRED"}
-                or not (job.get("result") or {}).get("restore_validated")):
-            return False
-        payload = job.get("payload") or {}
-        if not hmac_compare(_fingerprint(_current_settings()), payload.get("fingerprint")):
-            raise RuntimeError("活动数据库配置与恢复任务不匹配，拒绝重启")
-        gate = STORAGE_JOBS.maintenance_gate("database")
-        if gate and gate.get("job_id") != job_id:
-            raise RuntimeError("数据库维护闸门属于其他任务，拒绝重启")
-        if not gate:
-            STORAGE_JOBS.set_maintenance_gate("database", job_id, "VERIFYING_RESTORE")
-        engine = DATABASE.engine
-        _verify_revision(engine)
-        if not _content_digests_match(engine, _restore_expected_digests(job)):
-            raise RuntimeError("恢复后的数据库内容不再匹配检查通过的备份")
-        retired_spool = _clear_restore_derived_state(job_id)
-        result = dict(job.get("result") or {})
-        result.update({"retired_spool": retired_spool, "restart_required": True,
-                       "restore_validated": True})
-        STORAGE_JOBS.set_maintenance_gate("database", job_id, "RESTART_PENDING")
-        STORAGE_JOBS.update(job_id, status="RESTART_PENDING", stage="RESTART_PENDING",
-                            result=result, error=None,
-                            message="恢复数据已重新校验，等待受控重启", progress=0.98)
-    from app.utils.cache_migration import _schedule_restart
-    _schedule_restart()
-    return True
-
-
 def _run_database_restore(job_id, settings, fingerprint, upload_path):
     from app.db.migration import (_calibrate_sequences, _current_settings,
                                   _ensure_other_jobs_idle, _fingerprint,
