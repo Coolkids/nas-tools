@@ -65,8 +65,9 @@ class MediaDb:
         return False
 
     @contextmanager
-    def _database_maintenance_batch(self):
+    def _database_maintenance_batch(self, metrics=None):
         """在维护闸门开放时持有共享锁，维护期间停在批次边界等待恢复。"""
+        waiting_since = time.perf_counter()
         while True:
             retry = False
             try:
@@ -74,6 +75,10 @@ class MediaDb:
                     if STORAGE_JOBS.maintenance_gate("database"):
                         retry = True
                     else:
+                        if metrics is not None:
+                            metrics["maintenance_lock_wait_seconds"] = (
+                                metrics.get("maintenance_lock_wait_seconds", 0.0)
+                                + time.perf_counter() - waiting_since)
                         yield
                         return
             except TimeoutError:
@@ -82,15 +87,19 @@ class MediaDb:
                 time.sleep(0.5)
 
     @contextmanager
-    def transaction(self):
+    def transaction(self, metrics=None):
         """媒体数据库事务在维护窗口暂停，并在每个事务结束后释放共享锁。"""
-        with self._database_maintenance_batch():
+        with self._database_maintenance_batch(metrics=metrics):
+            started_at = time.perf_counter()
             try:
                 yield self.session
                 self.session.commit()
             except Exception:
                 self.session.rollback()
                 raise
+            finally:
+                if metrics is not None:
+                    metrics["transaction_seconds"] = time.perf_counter() - started_at
 
     @staticmethod
     def _lease_payload(job):
@@ -233,14 +242,26 @@ class MediaDb:
         } for item in items]
         if not rows:
             return 0
-        with self.transaction() as session:
-            if not self.sync_lease_is_current(lease, session=session):
-                raise RuntimeError("媒体同步租约已过期或已被接管")
-            job = session.query(MEDIASYNCSYNCJOB).filter(
-                MEDIASYNCSYNCJOB.SERVER == lease["server"]).with_for_update().one()
-            job.STATUS = "WRITING"
-            job.UPDATED_AT = time.time()
-            session.bulk_insert_mappings(MEDIASYNCITEMS, rows)
+        metrics = {}
+        started_at = time.perf_counter()
+        try:
+            with self.transaction(metrics=metrics) as session:
+                if not self.sync_lease_is_current(lease, session=session):
+                    raise RuntimeError("媒体同步租约已过期或已被接管")
+                job = session.query(MEDIASYNCSYNCJOB).filter(
+                    MEDIASYNCSYNCJOB.SERVER == lease["server"]).with_for_update().one()
+                job.STATUS = "WRITING"
+                job.UPDATED_AT = time.time()
+                session.bulk_insert_mappings(MEDIASYNCITEMS, rows)
+        finally:
+            sync_metrics = lease.setdefault("_sync_metrics", {})
+            sync_metrics["batch_count"] = sync_metrics.get("batch_count", 0) + 1
+            sync_metrics["longest_transaction_seconds"] = max(
+                sync_metrics.get("longest_transaction_seconds", 0.0),
+                metrics.get("transaction_seconds", time.perf_counter() - started_at))
+            sync_metrics["maintenance_lock_wait_seconds"] = (
+                sync_metrics.get("maintenance_lock_wait_seconds", 0.0)
+                + metrics.get("maintenance_lock_wait_seconds", 0.0))
         return len(rows)
 
     def publish_sync_generation(self, lease, movie_count, series_count):

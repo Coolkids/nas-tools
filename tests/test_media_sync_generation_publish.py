@@ -48,6 +48,8 @@ class MediaSyncGenerationPublishTest(TestCase):
         self.assertEqual("legacy", lease["expected_active_generation"])
         self.media_db.write_sync_batch(lease, [{
             "id": "new", "type": "Movie", "title": "新片", "tmdbid": "22"}])
+        self.assertEqual(1, lease["_sync_metrics"]["batch_count"])
+        self.assertGreater(lease["_sync_metrics"]["longest_transaction_seconds"], 0)
 
         self.assertTrue(self.media_db.exists("emby", "旧片", None, None))
         self.assertFalse(self.media_db.exists("emby", "新片", None, None))
@@ -159,3 +161,4 @@ class MediaSyncGenerationPublishTest(TestCase):
         self.assertTrue(batch_finished.is_set())
         self.assertEqual([], batch_errors)
         self.assertEqual(1, self._count_items())
+        self.assertGreaterEqual(lease["_sync_metrics"]["maintenance_lock_wait_seconds"], 0.05)
