@@ -4,6 +4,7 @@ from sqlalchemy import URL, create_engine, select, text, func
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 
 from app.db.contracts import DatabaseBackend
+from app.db.pool import MeasuredQueuePool
 
 
 class PostgreSQLBackend(DatabaseBackend):
@@ -23,7 +24,8 @@ class PostgreSQLBackend(DatabaseBackend):
             database=settings.get("name"),
             query=query,
         )
-        return create_engine(url, pool_pre_ping=True, pool_recycle=1800,
+        return create_engine(url, poolclass=MeasuredQueuePool,
+                             pool_pre_ping=True, pool_recycle=1800,
                              connect_args={"connect_timeout": int(settings.get("connect_timeout", 5))})
 
     def capabilities(self, engine):

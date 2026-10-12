@@ -118,4 +118,5 @@ def update_db():
     missing_tables = required_tables - available_tables
     if missing_tables:
         raise RuntimeError(f"数据库缺少应用表，结构升级未完成：{', '.join(sorted(missing_tables))}")
+    DATABASE.optimize()
     log.console('数据库更新完成')

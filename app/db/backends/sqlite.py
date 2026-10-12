@@ -5,9 +5,9 @@ import sqlite3
 
 from sqlalchemy import URL, create_engine, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.pool import QueuePool
 
 from app.db.contracts import DatabaseBackend
+from app.db.pool import MeasuredQueuePool
 
 
 class SQLiteBackend(DatabaseBackend):
@@ -25,28 +25,53 @@ class SQLiteBackend(DatabaseBackend):
         return create_engine(
             URL.create("sqlite", database=path),
             echo=False,
-            poolclass=QueuePool,
+            poolclass=MeasuredQueuePool,
             pool_pre_ping=True,
             pool_size=5,
             max_overflow=5,
             pool_recycle=1800,
             pool_timeout=60,
-            connect_args={"timeout": 60, "check_same_thread": False},
+            connect_args={"timeout": 60, "check_same_thread": False,
+                          "autocommit": False},
         )
 
     def configure_connection(self, connection):
-        cursor = connection.cursor()
+        # Python 3.14 uses sqlite3's PEP 249 transaction control by default.
+        # PRAGMAs that configure a connection must run outside that transaction.
+        previous_autocommit = connection.autocommit
         try:
-            cursor.execute("PRAGMA busy_timeout=60000")
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.execute("PRAGMA synchronous=NORMAL")
-            cursor.execute("PRAGMA wal_autocheckpoint=1000")
+            connection.autocommit = True
+            cursor = connection.cursor()
+            try:
+                cursor.execute("PRAGMA busy_timeout=60000")
+                cursor.execute("PRAGMA foreign_keys=ON")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute("PRAGMA wal_autocheckpoint=1000")
+            finally:
+                cursor.close()
         finally:
-            cursor.close()
+            connection.autocommit = previous_autocommit
 
     def initialize(self, engine):
-        with engine.connect() as connection:
-            connection.execute(text("PRAGMA journal_mode=WAL"))
+        connection = engine.raw_connection()
+        try:
+            dbapi_connection = connection.driver_connection
+            previous_autocommit = dbapi_connection.autocommit
+            try:
+                dbapi_connection.autocommit = True
+                cursor = dbapi_connection.cursor()
+                try:
+                    cursor.execute("PRAGMA journal_mode=WAL")
+                    row = cursor.fetchone()
+                    mode = str(row[0]).lower() if row else "unknown"
+                    if mode != "wal":
+                        raise RuntimeError(f"SQLite WAL 模式启用失败：{mode}")
+                finally:
+                    cursor.close()
+            finally:
+                dbapi_connection.autocommit = previous_autocommit
+        finally:
+            connection.close()
 
     @staticmethod
     def capabilities(engine):
@@ -122,6 +147,12 @@ class SQLiteBackend(DatabaseBackend):
         busy, log_frames, checkpointed_frames = (int(value) for value in result)
         return {"busy": busy, "log_frames": log_frames,
                 "checkpointed_frames": checkpointed_frames}
+
+    def optimize(self, engine):
+        # Run after Alembic/metadata changes during startup, before background
+        # work starts. SQLite decides whether fresh planner statistics help.
+        with engine.begin() as connection:
+            connection.exec_driver_sql("PRAGMA optimize")
 
     def upsert_many(self, session, model, rows, conflict_columns, update_columns=None):
         if not rows:

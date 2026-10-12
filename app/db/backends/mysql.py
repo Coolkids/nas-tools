@@ -4,6 +4,7 @@ from sqlalchemy import URL, create_engine, select, text, func
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 
 from app.db.contracts import DatabaseBackend
+from app.db.pool import MeasuredQueuePool
 
 
 class MySQLBackend(DatabaseBackend):
@@ -23,7 +24,8 @@ class MySQLBackend(DatabaseBackend):
         ssl = settings.get("ssl")
         if isinstance(ssl, dict) and ssl:
             connect_args["ssl"] = ssl
-        return create_engine(url, pool_pre_ping=True, pool_recycle=1800,
+        return create_engine(url, poolclass=MeasuredQueuePool,
+                             pool_pre_ping=True, pool_recycle=1800,
                              connect_args=connect_args)
 
     def capabilities(self, engine):
