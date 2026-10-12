@@ -24,6 +24,21 @@ _RETIRED_TABLES = {
     "SITE_FAVICON", "CONFIG_SITE", "SITE_BRUSH_TASK", "SITE_BRUSH_TORRENTS",
 }
 _VERSION_TABLES = {"alembic_version", "alembic_version_media"}
+_MEDIA_UPGRADE_BASE = "b3c4d5e6f7a8"
+_MEDIA_TABLES_REQUIRED = {
+    "MEDIASYNC_ITEMS": {"ID", "SERVER", "ITEM_ID", "ITEM_TYPE", "TITLE"},
+    "MEDIASYNC_STATISTICS": {"ID", "SERVER", "TOTAL_COUNT", "MOVIE_COUNT",
+                              "TV_COUNT", "UPDATE_TIME"},
+}
+_MEDIA_TABLE_COLUMNS = {
+    "MEDIASYNC_ITEMS": _MEDIA_TABLES_REQUIRED["MEDIASYNC_ITEMS"] | {
+        "LIBRARY", "ORGIN_TITLE", "YEAR", "TMDBID", "IMDBID", "PATH", "NOTE", "JSON",
+        "GENERATION_ID",
+    },
+    "MEDIASYNC_STATISTICS": _MEDIA_TABLES_REQUIRED["MEDIASYNC_STATISTICS"] | {
+        "ACTIVE_GENERATION",
+    },
+}
 _LEGACY_ARCHIVE_RETENTION_SECONDS = 30 * 24 * 60 * 60
 logger = logging.getLogger(__name__)
 
@@ -168,7 +183,7 @@ def _file_manifest(path):
     return manifest
 
 
-def _upgrade_snapshot(path, config_path):
+def _upgrade_snapshot(path, config_path, target_revision="head"):
     script_location = os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", "db_scripts")
     script_location = os.path.abspath(script_location)
     from alembic.script import ScriptDirectory
@@ -195,15 +210,90 @@ def _upgrade_snapshot(path, config_path):
             alembic_cfg = AlembicConfig()
             alembic_cfg.set_main_option("script_location", script_location)
             alembic_cfg.attributes["connection"] = connection
-            command.upgrade(alembic_cfg, "head")
+            command.upgrade(alembic_cfg, target_revision)
         source = _connect(path, read_only=True)
         try:
             versions = [row[0] for row in source.execute(
                 "SELECT version_num FROM alembic_version")]
-            if versions != [current_schema_revision(script_location)]:
+            expected_revision = (current_schema_revision(script_location)
+                                 if target_revision == "head" else target_revision)
+            if versions != [expected_revision]:
                 raise RuntimeError("旧主数据库结构升级后版本校验失败")
         finally:
             source.close()
+        _integrity(path)
+    finally:
+        engine.dispose()
+
+
+def _upgrade_legacy_media_snapshot(path, config_path):
+    """仅升级经结构指纹识别的旧媒体库，不在媒体快照上运行主库迁移。"""
+    script_location = os.path.abspath(os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "..", "db_scripts"))
+    from alembic.script import ScriptDirectory
+    script = ScriptDirectory(script_location)
+    parent = script.get_revision(_MEDIA_UPGRADE_BASE)
+    if parent is None:
+        raise RuntimeError("缺少已知的媒体结构升级基线")
+
+    connection = _connect(path, read_only=True)
+    try:
+        tables = {name.upper(): name for name in _table_names(connection)}
+        for expected, required_columns in _MEDIA_TABLES_REQUIRED.items():
+            actual = tables.get(expected)
+            if not actual:
+                raise RuntimeError(f"旧媒体库缺少已知结构表：{expected}")
+            columns = {row[1].upper() for row in connection.execute(
+                f"PRAGMA table_info({_quote(actual)})")}
+            if not required_columns.issubset(columns):
+                missing = sorted(required_columns - columns)
+                raise RuntimeError(
+                    f"旧媒体库结构指纹不匹配，{actual} 缺少字段：{', '.join(missing)}")
+            unexpected_columns = columns - _MEDIA_TABLE_COLUMNS[expected]
+            if unexpected_columns:
+                raise RuntimeError(
+                    f"旧媒体库结构指纹不匹配，{actual} 含未识别字段："
+                    f"{', '.join(sorted(unexpected_columns))}")
+        allowed = set(_MEDIA_TABLES_REQUIRED) | _VERSION_TABLES
+        unknown = set(tables) - allowed
+        if unknown:
+            raise RuntimeError(f"旧媒体库包含未识别表：{', '.join(sorted(unknown))}")
+        version_table = tables.get("ALEMBIC_VERSION")
+        media_version_table = tables.get("ALEMBIC_VERSION_MEDIA")
+        for candidate in (version_table, media_version_table):
+            if not candidate:
+                continue
+            versions = [row[0] for row in connection.execute(
+                f"SELECT version_num FROM {_quote(candidate)}")]
+            known = {revision.revision for revision in script.walk_revisions()}
+            if len(versions) != 1 or versions[0] not in known:
+                raise RuntimeError("旧媒体库结构版本无法识别，拒绝猜测升级路径")
+            if versions[0] not in {_MEDIA_UPGRADE_BASE, "f2a3b4c5d6e7", "f3a4b5c6d7e8"}:
+                raise RuntimeError(f"旧媒体库结构版本不受支持：{versions[0]}")
+    finally:
+        connection.close()
+
+    # 媒体库的旧版本没有独立 Alembic 链。其表/字段指纹确认后，从只
+    # 影响媒体表的 f2 revision 开始升级，避免对它套用主库历史迁移。
+    connection = _connect(path)
+    try:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS alembic_version "
+            "(version_num VARCHAR(32) NOT NULL)")
+        connection.execute("DELETE FROM alembic_version")
+        connection.execute("INSERT INTO alembic_version(version_num) VALUES (?)",
+                           (_MEDIA_UPGRADE_BASE,))
+        connection.commit()
+    finally:
+        connection.close()
+
+    engine = create_engine(URL.create("sqlite", database=path), connect_args={"timeout": 30})
+    try:
+        with engine.connect() as connection:
+            alembic_cfg = AlembicConfig()
+            alembic_cfg.set_main_option("script_location", script_location)
+            alembic_cfg.attributes["connection"] = connection
+            command.upgrade(alembic_cfg, "head")
         _integrity(path)
     finally:
         engine.dispose()
@@ -260,7 +350,7 @@ def _digest_rows(connection, schema, table, columns, primary_key):
     return count, digest.hexdigest()
 
 
-def _copy_domain(connection, source_path, domain, expected_tables):
+def _copy_domain(connection, source_path, domain, expected_tables, excluded_tables=()):
     alias = f"source_{domain}"
     _execute(connection, f"ATTACH DATABASE ? AS {_quote(alias)}", (source_path,))
     try:
@@ -272,7 +362,7 @@ def _copy_domain(connection, source_path, domain, expected_tables):
                         else source_tables & (expected_tables - MEDIA_TABLES))
         if wrong_domain:
             raise RuntimeError(f"旧{domain}数据库包含来源不符的业务表：{', '.join(sorted(wrong_domain))}")
-        for table in sorted(source_tables & expected_tables):
+        for table in sorted(source_tables & expected_tables - set(excluded_tables)):
             source_columns = [row[1] for row in _execute(
                 connection, f"PRAGMA {alias}.table_info({_quote(table)})")]
             target_columns = [row[1] for row in _execute(
@@ -438,9 +528,19 @@ def _prepare_sqlite_database():
             "files": _file_manifest(source["user"]),
             "snapshot_sha256": _sha256(user_snapshot),
         }
-        _upgrade_snapshot(user_snapshot, config_path)
+        user_tables = set()
+        source_connection = _connect(user_snapshot, read_only=True)
+        try:
+            user_tables = {name.upper() for name in _table_names(source_connection)}
+        finally:
+            source_connection.close()
+        user_has_media_schema = set(_MEDIA_TABLES_REQUIRED).issubset(user_tables)
+        _upgrade_snapshot(
+            user_snapshot, config_path,
+            target_revision="head" if user_has_media_schema else _MEDIA_UPGRADE_BASE)
         if source.get("media"):
             _copy_snapshot(source["media"], media_snapshot)
+            _upgrade_legacy_media_snapshot(media_snapshot, config_path)
             source_records["media"] = {
                 "path": source["media"],
                 "files": _file_manifest(source["media"]),
@@ -457,7 +557,10 @@ def _prepare_sqlite_database():
                 expected_tables = set(Base.metadata.tables)
                 _copy_domain(connection, user_snapshot, "main", expected_tables)
                 if source.get("media"):
-                    _copy_domain(connection, media_snapshot, "media", expected_tables)
+                    # Sync leases are process control state, not media data. A
+                    # stale legacy lease must never block the first new sync.
+                    _copy_domain(connection, media_snapshot, "media", expected_tables,
+                                 excluded_tables={"MEDIASYNC_SYNC_JOBS"})
                 head = current_schema_revision()
                 connection.exec_driver_sql(
                     "CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)")
