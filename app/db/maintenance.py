@@ -27,6 +27,7 @@ _RECLAIM_KIND = "database_space_reclaim"
 _BACKUP_KIND = "database_backup"
 _BACKUP_CHECK_KIND = "database_backup_check"
 _RESTORE_KIND = "database_restore"
+_STATISTICS_KIND = "database_statistics"
 _MAX_UPLOAD_BYTES = 100 * 1024 * 1024 * 1024
 _MAX_ARCHIVE_BYTES = 200 * 1024 * 1024 * 1024
 _MAX_ARCHIVE_ENTRIES = 2000
@@ -186,6 +187,127 @@ def _table_counts(engine):
                 for table in Base.metadata.sorted_tables}
 
 
+def _estimated_table_counts(engine):
+    """Read planner/catalog estimates without scanning application tables."""
+    table_names = [table.name for table in Base.metadata.sorted_tables]
+    estimates = {}
+    reasons = {}
+    try:
+        with engine.connect() as connection:
+            if engine.dialect.name == "sqlite":
+                has_stats = connection.exec_driver_sql(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_stat1'").first()
+                if has_stats:
+                    for table_name, statistic in connection.exec_driver_sql(
+                            "SELECT tbl, stat FROM sqlite_stat1").all():
+                        try:
+                            rows = int(str(statistic).split()[0])
+                        except (TypeError, ValueError, IndexError):
+                            continue
+                        key = str(table_name).upper()
+                        estimates[key] = max(estimates.get(key, 0), rows)
+                else:
+                    reasons["_all"] = "尚无 SQLite 查询规划统计；可异步刷新精确记录数"
+            elif engine.dialect.name == "postgresql":
+                for table_name in table_names:
+                    row = connection.execute(text("""
+                        SELECT reltuples::bigint FROM pg_class
+                        WHERE relname=:table_name AND relkind IN ('r', 'p')
+                        ORDER BY (relnamespace = current_schema()::regnamespace) DESC LIMIT 1
+                    """), {"table_name": table_name}).first()
+                    if row is not None and int(row[0]) >= 0:
+                        estimates[table_name.upper()] = int(row[0])
+            elif engine.dialect.name in {"mysql", "mariadb"}:
+                for table_name in table_names:
+                    row = connection.execute(text("""
+                        SELECT TABLE_ROWS FROM information_schema.TABLES
+                        WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=:table_name
+                    """), {"table_name": table_name}).first()
+                    if row is not None and row[0] is not None and int(row[0]) >= 0:
+                        estimates[table_name.upper()] = int(row[0])
+    except Exception as error:
+        reasons["_all"] = _safe_database_error(error)[:500]
+    for table_name in table_names:
+        if table_name.upper() not in estimates:
+            reasons[table_name] = reasons.get(
+                "_all", "数据库未提供该表的记录数估算；可异步刷新精确记录数")
+    return ({name: estimates.get(name.upper()) for name in table_names}, reasons)
+
+
+def _count_tables_with_progress(engine, job_id):
+    inspector = inspect(engine)
+    available = {name.upper() for name in inspector.get_table_names()}
+    required = {name.upper() for name in Base.metadata.tables}
+    missing = required - available
+    if missing:
+        raise RuntimeError(f"数据库缺少应用表：{', '.join(sorted(missing))}")
+    tables = Base.metadata.sorted_tables
+    counts = {}
+    with engine.connect() as connection:
+        for index, table in enumerate(tables, start=1):
+            counts[table.name] = int(connection.execute(
+                select(func.count()).select_from(table)).scalar_one())
+            STORAGE_JOBS.update(job_id, status="COUNTING", stage="COUNTING",
+                                progress=index / len(tables),
+                                message=f"正在统计 {table.name}（{index}/{len(tables)}）")
+    return counts
+
+
+def _run_exact_statistics(job_id, fingerprint):
+    try:
+        with STORAGE_JOBS.maintenance_lock(exclusive=False, timeout=5):
+            if STORAGE_JOBS.maintenance_gate("database"):
+                raise RuntimeError("数据库正在维护，精确统计未启动")
+            settings = DATABASE._read_settings()
+            from app.db.migration import _fingerprint
+            if _fingerprint(settings) != fingerprint:
+                raise RuntimeError("数据库配置已变化，请重新发起精确统计")
+            engine = DATABASE.engine
+            if DATABASE._settings != settings:
+                raise RuntimeError("活动数据库配置与已保存配置不一致")
+            counts = _count_tables_with_progress(engine, job_id)
+            STORAGE_JOBS.update(job_id, status="SUCCEEDED", stage="SUCCEEDED",
+                                result={"fingerprint": fingerprint, "tables": counts,
+                                        "statistics_at": datetime.utcnow().isoformat(
+                                            timespec="seconds") + "Z"},
+                                progress=1, message="所有应用表的精确记录数统计完成")
+    except Exception as error:
+        STORAGE_JOBS.update(job_id, status="FAILED", stage="FAILED",
+                            error=_safe_database_error(error), message="精确统计失败")
+
+
+def start_database_statistics_refresh(values=None):
+    """Start a persistent background task for exact per-table row counts."""
+    values = dict(values or {})
+    try:
+        with STORAGE_JOBS.maintenance_lock(exclusive=False, timeout=2):
+            if STORAGE_JOBS.maintenance_gate("database"):
+                return {"code": 1, "msg": "数据库正在维护，暂不能刷新精确统计"}
+            active = STORAGE_JOBS.active(_STATISTICS_KIND)
+            if active:
+                return {"code": 0, "job_id": active[0]["job_id"], "job": active[0]}
+            settings, fingerprint, _ = _settings()
+            if DATABASE._settings is not None and DATABASE._settings != settings:
+                return {"code": 1, "msg": "活动数据库配置与已保存配置不一致，暂不能统计"}
+            key = str(values.get("idempotency_key") or "").strip()[:128] or None
+            job, created = STORAGE_JOBS.create(
+                _STATISTICS_KIND, {"fingerprint": fingerprint}, idempotency_key=key)
+        if created:
+            STORAGE_JOBS.update(job["job_id"], status="COUNTING", stage="COUNTING",
+                                message="精确统计任务已启动")
+            worker = threading.Thread(target=_run_exact_statistics,
+                                      args=(job["job_id"], fingerprint),
+                                      name=f"database-statistics-{job['job_id'][:8]}",
+                                      daemon=True)
+            with _WORKERS_LOCK:
+                _WORKERS[job["job_id"]] = worker
+            worker.start()
+        return {"code": 0, "job_id": job["job_id"],
+                "job": STORAGE_JOBS.get(job["job_id"])}
+    except Exception as error:
+        return {"code": 1, "msg": _safe_database_error(error)}
+
+
 def _sqlite_object_sizes(path):
     connection = sqlite3.connect(path, timeout=10)
     try:
@@ -260,6 +382,9 @@ def get_database_info():
     engine = DATABASE._engine
     connected = False
     tables = {}
+    table_count_mode = "estimated"
+    table_count_reasons = {}
+    exact_statistics_at = None
     error = None
     actual_revision = None
     server_version = None
@@ -282,7 +407,15 @@ def get_database_info():
                         text("SELECT version_num FROM alembic_version"))]
                     actual_revision = revisions[0] if len(revisions) == 1 else None
             connected = True
-            tables = _table_counts(engine)
+            tables, table_count_reasons = _estimated_table_counts(engine)
+            exact_job = STORAGE_JOBS.latest(_STATISTICS_KIND)
+            if exact_job and exact_job.get("status") == "SUCCEEDED":
+                from app.db.migration import _fingerprint
+                exact_result = exact_job.get("result") or {}
+                if exact_result.get("fingerprint") == _fingerprint(active_settings or configured):
+                    tables = exact_result.get("tables") or tables
+                    table_count_mode = "exact"
+                    exact_statistics_at = exact_result.get("statistics_at")
             if engine.dialect.name == "sqlite":
                 object_sizes = _sqlite_object_sizes(_sqlite_path())
                 object_sizes["database_size_bytes"] = _file_size(_sqlite_path())
@@ -292,7 +425,8 @@ def get_database_info():
         error = _safe_database_error(exception, configured)
 
     maintenance_jobs = {}
-    for kind in (_RECLAIM_KIND, _BACKUP_KIND, _BACKUP_CHECK_KIND, _RESTORE_KIND):
+    for kind in (_RECLAIM_KIND, _BACKUP_KIND, _BACKUP_CHECK_KIND, _RESTORE_KIND,
+                 _STATISTICS_KIND):
         job = STORAGE_JOBS.latest(kind)
         if job:
             maintenance_jobs[kind] = job
@@ -304,11 +438,15 @@ def get_database_info():
         "expected_schema_revision": current_schema_revision(),
         "server_version": str(server_version) if server_version is not None else None,
         "tables": tables,
+        "table_count_mode": table_count_mode,
+        "table_count_reasons": table_count_reasons,
+        "exact_statistics_at": exact_statistics_at,
         "logical_domains": {domain: {name: tables.get(name) for name in names}
                             for domain, names in LOGICAL_DOMAIN_TABLES.items()},
         "supports_space_reclaim": bool(DATABASE._backend and DATABASE._backend.supports_space_reclaim),
         "statistics_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "current_job": STORAGE_JOBS.latest(_RECLAIM_KIND),
+        "statistics_job": STORAGE_JOBS.latest(_STATISTICS_KIND),
         "pending_database_job": STORAGE_JOBS.latest("database_migration"),
         "maintenance_jobs": maintenance_jobs,
         "storage": object_sizes,

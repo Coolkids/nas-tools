@@ -77,6 +77,7 @@ class WebAction:
         "check_database", "prepare_sqlite_migration_target", "start_database_migration",
         "get_database_job", "cancel_database_job", "retry_database_restart",
         "get_database_info", "start_database_space_reclaim", "start_database_backup",
+        "start_database_statistics_refresh",
         "check_database_backup", "start_database_restore",
         "restory_backup",
     })
@@ -254,6 +255,7 @@ class WebAction:
             "cancel_database_job": self.__cancel_database_job,
             "retry_database_restart": self.__retry_database_restart,
             "get_database_info": self.__get_database_info,
+            "start_database_statistics_refresh": self.__start_database_statistics_refresh,
             "start_database_space_reclaim": self.__start_database_space_reclaim,
             "start_database_backup": self.__start_database_backup,
             "check_database_backup": self.__check_database_backup,
@@ -5054,6 +5056,7 @@ class WebAction:
             database[key] = _sanitize_database_job(database.get(key))
         for key in ("current_job", "pending_database_job"):
             database[key] = _sanitize_database_job(database.get(key))
+        database["statistics_job"] = _sanitize_database_job(database.get("statistics_job"))
         database["maintenance_jobs"] = {
             kind: _sanitize_database_job(job)
             for kind, job in (database.get("maintenance_jobs") or {}).items()
@@ -5062,6 +5065,12 @@ class WebAction:
         if isinstance(sqlite_info, dict):
             sqlite_info.pop("path", None)
         return result
+
+    @staticmethod
+    def __start_database_statistics_refresh(data=None):
+        from app.db.maintenance import start_database_statistics_refresh
+
+        return start_database_statistics_refresh(data or {})
 
     @staticmethod
     def __start_database_space_reclaim(data=None):
