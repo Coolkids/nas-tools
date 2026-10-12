@@ -1,6 +1,7 @@
+import logging
 import os
-import time
 import threading
+import time
 from contextlib import contextmanager
 from sqlalchemy import MetaData, Table, delete, inspect, text, update
 
@@ -10,6 +11,7 @@ from app.utils import ExceptionUtils, PathUtils
 from config import Config
 
 lock = threading.Lock()
+logger = logging.getLogger(__name__)
 _db_metrics = {
     "commits": 0,
     "retries": 0,
@@ -70,7 +72,21 @@ class MainDb:
             if DATABASE.backend.name != "sqlite":
                 return
             with DATABASE.engine.connect() as conn:
-                conn.execute(text("PRAGMA wal_checkpoint(PASSIVE)"))
+                busy, log_frames, checkpointed_frames = conn.execute(
+                    text("PRAGMA wal_checkpoint(PASSIVE)")).one()
+                result = {
+                    "busy": int(busy),
+                    "log_frames": int(log_frames),
+                    "checkpointed_frames": int(checkpointed_frames),
+                }
+                if result["busy"] or (
+                        result["log_frames"] >= 0
+                        and result["checkpointed_frames"] < result["log_frames"]):
+                    logger.info(
+                        "SQLite WAL PASSIVE checkpoint incomplete: busy=%s, "
+                        "log_frames=%s, checkpointed_frames=%s",
+                        result["busy"], result["log_frames"], result["checkpointed_frames"])
+                return result
 
     def init_data(self):
         """
