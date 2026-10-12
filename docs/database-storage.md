@@ -51,7 +51,7 @@ SQLite 的文件名和目录由后端固定生成，不能在设置页或 API �
 
 回收需要独占维护窗口。程序会暂停新的数据库访问、等待在途事务结束、检查 WAL checkpoint 状态，再执行 SQLite `VACUUM` 并校验数据库。可用空间不足、数据库健康检查失败或其他维护任务运行时，页面会显示不可执行原因。远程数据库不提供此操作。
 
-`tests/test_database_space_reclaim.py` 当前 `6 passed`，覆盖零空闲页时的空业务库回收、可用空间不足保护和真实长读事务造成的 TRUNCATE checkpoint busy；失败后业务库仍通过完整性检查。长读事务通过直接执行真实 WAL checkpoint 并验证同一 busy 校验函数测试，后台任务持锁等待恢复仍待专门验收。
+`tests/test_database_space_reclaim.py` 当前 `13 passed`，覆盖零空闲页、空间不足、长读事务 checkpoint busy、已提交 WAL 数据、回收前取消、VACUUM 后 checkpoint 故障、启动恢复、写探针失败时保持维护闸门、回收后 WAL 模式及 main/media 统计分组。真实文件只读权限用例会在当前用户可绕过权限时跳过；数据库目录写失败另有确定性注入覆盖。
 
 ## SQLite 查询计划评估
 
@@ -76,15 +76,15 @@ SQLite 的文件名和目录由后端固定生成，不能在设置页或 API �
 
 `tests/test_database_backup_archive_validation.py` 验证完整归档检查器拒绝损坏 ZIP、缺失 manifest 字段、未来格式、表摘要错误、路径穿越、符号链接、重复 ZIP 成员、未知文件、BZIP2 高压缩比载荷以及文件数、清单和总解压体积超限；正常归档基线检查通过，结果为 `1 passed`。
 
-`tests/test_database_backup_restore_lifecycle.py` 当前 `3 passed`。隔离 SQLite 配置目录完整运行后台快照、上传、备份检查、维护锁、恢复确认、暂存构建和原子发布，逐表校验业务历史、识别请求和媒体记录，并验证待重启状态、受控重启重试及解除维护后新写入。另注入发布后校验失败，确认恢复前副本回滚、完整性通过且维护闸门解除；上传中断与磁盘不足均清除部分文件并保留活动数据。该验收仅覆盖 SQLite 与小型夹具，不等于远程后端全生命周期、大数据压力或全部恢复阶段杀进程覆盖。
+`tests/test_database_backup_restore_lifecycle.py` 当前 `11 passed`。隔离 SQLite 配置目录覆盖后台快照、上传、检查、恢复、固定路径发布和待重启；还验证旧完整双库备份转换、设置备份拒绝、暂存 checkpoint/旧库快照/辅助文件/原子替换故障，以及恢复任务标记失败后保持维护闸门并可重试。发布后校验失败会从恢复前副本回滚。该验收不等于远程后端全生命周期或大数据压力验证。
 
 `tests/test_database_migration_contract.py` 通过 `_copy_table`、逐表内容摘要和自增校准验证全部 16 个源/目标引擎组合，远程运行 `16 passed`。每个用例从空隔离库开始，复制含 Unicode、长路径和 JSON 的样例，校验目标摘要并验证新增主键。相同远程实例的用例使用本地 SQLite 快照作为隔离中间库，因为正式流程应拒绝源/目标为同一实例。此项不覆盖 `start_database_migration` 的检查凭证、维护锁、配置提交、重启及故障恢复编排。
 
 `tests/test_database_filter_priority.py` 验证旧配置中的数字字符串、空值及非数字优先级按稳定顺序读取，结果为 `1 passed`。完整过滤、订阅、用户、搜索历史、转移和媒体同步业务链路仍未在四种引擎上全量联调。
 
-`tests/test_media_sync_snapshot.py` 另外验证新媒体代次发布后旧代次清理失败会重试三次、保留已发布结果并记录 `CLEANUP_PENDING`，不会重复发布；该故障分支发现日志调用名与 `log.py` 接口不一致，修为 `log.warn`。媒体同步相关本地单元测试还覆盖快照缺页、重复/畸形条目、批次、活动代次可见性、空间不足、租约 fencing 和启动恢复；真实服务器 API、生产负载和 Docker/Supervisor 重启仍未联调。
+`tests/test_media_sync_snapshot.py` 还验证租约在发布前失效会丢弃未发布代次、旧代次清理失败会重试并保留已发布结果。Emby、Jellyfin 与 Plex 的分页客户端现在对瞬时服务端错误作有限重试，`tests/test_media_client_pagination.py` 用失败后成功的分页响应验证重试和继续读取；真实媒体服务器 API 与生产负载仍未联调。媒体租约进程退出恢复和跨语句快照一致性分别由 `tests/test_media_sync_job_leases.py`、`tests/test_database_snapshot_consistency.py` 覆盖。
 
-`tests/test_sqlite_file_migration.py` 结果为 `13 passed`。测试覆盖根目录与 `db/` 两种旧双库布局、仅主库、已提交 WAL、缺失主库、两处来源冲突、损坏源库、空间不足、无效媒体结构、数据库目录被普通文件占用、无完成标记的新旧库冲突、重复启动，以及媒体域导入失败时不发布部分结果；同时校验固定目标路径、相同数值 ID 在不同逻辑表中保留、完成标记、旧源保留、媒体代次回填和数据库完整性。只读权限、进程级并发、归档中断恢复及完整生产历史版本升级仍待验收。
+`tests/test_sqlite_file_migration.py` 当前 `21 passed`。覆盖两种旧目录布局、main/media 已提交 WAL、只读快照、同名视图拒绝、结构转换/域导入/完成标记/发布故障、快照和旧文件归档阶段进程中断、并发启动、固定路径、迁移后新 ID 及再次启动读写。迁移逐表比较导入前后的行数和内容摘要，源文件保留或进入可校验归档。测试使用小型合成旧库；其他真实历史修订和生产数据关系仍待补充。
 
 `tests/test_database_fixed_sqlite_path.py` 结果为 `6 passed`，验证缺少数据库配置时默认 SQLite，后端路径固定为 `<配置目录>/db/nastools.db`，以及迁移 API 拒绝数据库路径和 DSN 覆盖字段。前端路径入口和恢复/切换后的运行路径仍待验收。
 
@@ -92,13 +92,15 @@ SQLite 的文件名和目录由后端固定生成，不能在设置页或 API �
 
 `tests/test_cache_legacy_migration.py` 结果为 `5 passed`。用例注入旧迁移标记删除失败并验证重启续清理；另覆盖旧 CacheLib 文件、`tmdb.dat`、缓存目录旧 SQLite（含已提交 WAL）迁入固定 `cache/system.sqlite3`，以及“导入 → 清空 → 重启”不复活。损坏旧记录和多来源同键不同值会阻止导入并保留来源；冲突此前被误报成损坏数据库，本次修正为报告明确的来源冲突。已知 `cache/migrations/` 删除，邻近 `db_scripts/` 文件不受影响。
 
+`tests/test_cache_migration_process_recovery.py` 杀停子进程后验证纯内存缓存可从已落盘迁移快照恢复，且缓存迁移持有共享维护锁时另一个进程的独占维护任务无法进入。`tests/test_storage_job_locks.py` 另验证跨进程共享任务锁互斥。
+
 2026-10-13 隔离内存缓存微基准：单进程写入 10,000 条 128 字节载荷，在 100、1,000、5,000、10,000 条时分段统计写入和 `memory_info()`。分段写入 P50 保持在 0.163–0.175 ms/条、P95 为 0.312–0.352 ms/条；统计中位数为 0.137–0.156 ms；`tracemalloc` 峰值从 0.18 MiB 增至 4.74 MiB，进程最大 RSS 从 98.0 MiB 增至 107.2 MiB。该结果支持在此规模下没有明显的逐次全量扫描退化；它是本机合成负载的一次观测，不代表持久化后端、真实载荷分布或生产负载。
 
-2026-10-13 本地回归：后端 `379 passed, 43 skipped, 83 subtests passed`；隔离缓存容量压力 `2 passed`；前端 `npm run type-check` 和 `npm run build` 均通过。跳过项包含未注入远程设置和门控压力用例；远程契约、备份归档矩阵、迁移复制矩阵和压力用例另行运行并记录在上文。
+2026-10-13 本地回归：后端 `410 passed, 43 skipped, 87 subtests passed`；隔离缓存容量压力 `2 passed`；前端 `npm run type-check` 和 `npm run build` 均通过。当前未配置 `NASTOOLS_TEST_DATABASE_SETTINGS`，跳过项包含需要远程数据库凭证的用例及运行用户可绕过文件只读权限的用例；既有隔离远程契约和低层跨库矩阵结果另列于上文。
 
 使用 Google Chrome 154 headless 加本地 mock `/do` 响应加载构建产物，缓存和数据库标签在 360、390、768、1280、1440 px 与浅/深色主题下均无页面横向溢出。此项只验证空数据状态的布局，不覆盖真实 API 联调、含数据表格、软键盘、安全区、放大、键盘/屏幕阅读器或迁移/恢复交互。
 
-隔离 SQLite 的后台备份/恢复任务链已完成端到端测试，发布后校验失败会回滚到恢复前副本。PostgreSQL、MySQL、MariaDB 的完整任务链、大数据流式压力、SQLite 其他发布阶段中断恢复和真实进程重启仍未验收；因此不记录端到端恢复耗时，也不将低层跨库导入结果视为远程后台恢复通过。
+隔离 SQLite 的后台备份/恢复任务链已完成端到端测试，覆盖恢复快照、暂存 checkpoint、旧库辅助文件、原子替换前和恢复任务标记等边界；发布后校验失败会回滚到恢复前副本。PostgreSQL、MySQL、MariaDB 的完整任务链、大数据流式压力、Docker/Supervisor 真实进程重启仍未验收；因此不记录端到端恢复耗时，也不将低层跨库导入结果视为远程后台恢复通过。
 
 直接运行 smoke test 使用临时配置目录和 SQLite，验证 `/index`、登录以及 SIGINT 停止。PyInstaller 6.22.2 Linux x86_64 onedir 产物在另一临时配置目录启动，数据库升级/初始化、`/index` 健康检查及 SIGTERM 退出通过；冻结入口通过 `multiprocessing.freeze_support()` 避免资源跟踪器递归启动。Windows 可执行文件未构建。`docker compose -f docker/compose.yml config --quiet` 静态检查通过；Docker CLI 可用，但当前执行用户无法访问 daemon socket，镜像构建、Supervisor 容器启动和容器内受控重启均未验证。前端 `npm run type-check` 与 `npm run build` 已通过；浏览器空状态布局已按上文验证，真实 API、可访问性和迁移/恢复交互仍待验收。
 
