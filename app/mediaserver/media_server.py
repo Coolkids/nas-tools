@@ -14,6 +14,82 @@ lock = threading.Lock()
 server_lock = threading.Lock()
 
 
+def _collect_media_sync_items(media_counts, libraries, get_items, on_library=None):
+    """校验完整的全库拉取结果，禁止把不完整响应当成空索引发布。"""
+    if not isinstance(media_counts, dict):
+        raise ValueError("媒体服务器未返回有效的媒体统计")
+
+    expected = {}
+    for key, kind in (("MovieCount", "movie"), ("SeriesCount", "series")):
+        value = media_counts.get(key)
+        if isinstance(value, bool):
+            raise ValueError("媒体服务器媒体统计格式无效")
+        try:
+            count = int(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError("媒体服务器媒体统计不完整") from error
+        if (count < 0 or (isinstance(value, float) and not value.is_integer())
+                or (isinstance(value, str) and value.strip() != str(count))):
+            raise ValueError("媒体服务器媒体统计格式无效")
+        expected[kind] = count
+
+    if not isinstance(libraries, (list, tuple)):
+        raise ValueError("媒体服务器未返回有效的媒体库列表")
+    if sum(expected.values()) and not libraries:
+        raise ValueError("媒体服务器媒体统计非空，但未返回媒体库")
+
+    rows = []
+    actual = {"movie": 0, "series": 0}
+    seen_item_ids = set()
+    seen_library_ids = set()
+    for library in libraries:
+        if not isinstance(library, dict):
+            raise ValueError("媒体服务器返回了无效的媒体库记录")
+        library_id = library.get("id")
+        if library_id is None or not str(library_id).strip():
+            raise ValueError("媒体服务器返回的媒体库缺少标识")
+        library_id = str(library_id)
+        if library_id in seen_library_ids:
+            raise ValueError("媒体服务器重复返回媒体库")
+        seen_library_ids.add(library_id)
+        library_name = library.get("name") or library_id
+        items = get_items(library_id)
+        if items is None:
+            raise ValueError("媒体服务器未返回媒体条目列表")
+        for item in items:
+            # Emby、Jellyfin 和 Plex 的旧适配器会以空对象结束生成器。
+            if not item:
+                continue
+            if not isinstance(item, dict):
+                raise ValueError("媒体服务器返回了无效的媒体条目")
+            item_id = item.get("id")
+            title = item.get("title")
+            item_type = str(item.get("type") or "").strip().lower()
+            if item_id is None or not str(item_id).strip() or not title:
+                raise ValueError("媒体服务器返回的媒体条目缺少标识或标题")
+            if item_type == "movie":
+                kind = "movie"
+            elif item_type in {"series", "show"}:
+                kind = "series"
+            else:
+                raise ValueError("媒体服务器返回了不支持的媒体类型")
+            item_id = str(item_id)
+            if item_id in seen_item_ids:
+                raise ValueError("媒体服务器重复返回媒体条目")
+            seen_item_ids.add(item_id)
+            normalized = dict(item)
+            normalized["id"] = item_id
+            normalized.setdefault("library", library_name)
+            rows.append(normalized)
+            actual[kind] += 1
+        if on_library:
+            on_library(library_name, len(rows))
+
+    if actual != expected:
+        raise ValueError("媒体条目数量与服务器统计不一致，可能存在分页或拉取失败")
+    return rows, actual["movie"], actual["series"]
+
+
 @singleton
 class MediaServer:
     _mediaserver_schemas = []
@@ -175,24 +251,16 @@ class MediaServer:
             log.info("【MediaServer】开始同步媒体库数据...")
             self.progress.start("mediasync")
             self.progress.update(ptype="mediasync", text="请稍候...")
-            # 汇总统计
-            medias_count = self.get_medias_count()
-            total_media_count = medias_count.get("MovieCount") + medias_count.get("SeriesCount")
-            total_count = 0
-            movie_count = 0
-            tv_count = 0
-            # 完整拉取成功后再替换旧索引，避免网络失败导致旧数据被清空。
-            for library in self.get_libraries():
-                self.progress.update(ptype="mediasync",
-                                     text="正在获取 %s 数据..." % (library.get("name")))
-                items = self.get_items(library.get("id")) or []
-                for item in items:
-                    if item:
-                        item.setdefault("library", library.get("name"))
-                        all_items.append(item)
-                self.progress.update(
-                    ptype="mediasync",
-                    text="已拉取 %s，累计：%s ..." % (library.get("name"), len(all_items)))
+            try:
+                all_items, movie_count, tv_count = _collect_media_sync_items(
+                    self.get_medias_count(), self.get_libraries(), self.get_items,
+                    on_library=lambda name, count: self.progress.update(
+                        ptype="mediasync", text="已拉取 %s，累计：%s ..." % (name, count)))
+            except Exception:
+                log.error("【MediaServer】媒体库全量拉取失败或数据不完整，保留旧索引")
+                self.progress.update(ptype="mediasync", text="媒体库数据不完整，同步已取消")
+                self.progress.end("mediasync")
+                return
             fetch_elapsed = time.perf_counter() - fetch_started_at
 
             db_started_at = time.perf_counter()
@@ -202,11 +270,6 @@ class MediaServer:
                 self.progress.end("mediasync")
                 return
             total_count = replaced_count
-            for item in all_items:
-                if item.get("type") in ['Movie', 'movie']:
-                    movie_count += 1
-                elif item.get("type") in ['Series', 'show']:
-                    tv_count += 1
             db_elapsed = time.perf_counter() - db_started_at
             # 更新总体同步情况
             self.mediadb.statistics(server_type=self._server_type.value,
