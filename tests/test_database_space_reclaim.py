@@ -61,6 +61,16 @@ class DatabaseSpaceReclaimTest(TestCase):
         self.config_patch.stop()
         self.directory.cleanup()
 
+    def _wait_for_job(self, job_id):
+        deadline = time.monotonic() + 30
+        job = self.jobs.get(job_id)
+        while job["status"] not in {"SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"}:
+            if time.monotonic() >= deadline:
+                self.fail(f"空间回收任务超时：{job}")
+            time.sleep(0.05)
+            job = self.jobs.get(job_id)
+        return job
+
     def test_reclaim_compacts_fixed_database_and_preserves_rows(self):
         before_size = sum(os.path.getsize(self.database_path + suffix)
                           for suffix in ("", "-wal", "-shm")
@@ -75,13 +85,7 @@ class DatabaseSpaceReclaimTest(TestCase):
         result = start_database_space_reclaim()
         self.assertEqual(0, result["code"])
         job_id = result["job_id"]
-        deadline = time.monotonic() + 30
-        job = self.jobs.get(job_id)
-        while job["status"] not in {"SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"}:
-            if time.monotonic() >= deadline:
-                self.fail(f"空间回收任务超时：{job}")
-            time.sleep(0.05)
-            job = self.jobs.get(job_id)
+        job = self._wait_for_job(job_id)
 
         self.assertEqual("SUCCEEDED", job["status"], job.get("error"))
         self.assertTrue(job["result"]["vacuum_completed"])
@@ -102,6 +106,71 @@ class DatabaseSpaceReclaimTest(TestCase):
                 VALUES (101, 'server', 'item-101', 'title-101', 'new')"""))
             self.assertEqual(6, connection.execute(
                 text("SELECT count(*) FROM MEDIASYNC_ITEMS")).scalar_one())
+
+    def test_empty_database_without_free_pages_is_a_valid_reclaim(self):
+        with sqlite3.connect(self.database_path, isolation_level=None) as connection:
+            connection.execute("DELETE FROM MEDIASYNC_ITEMS")
+            connection.execute("VACUUM")
+            self.assertEqual(0, connection.execute("PRAGMA freelist_count").fetchone()[0])
+
+        result = start_database_space_reclaim()
+        self.assertEqual(0, result["code"])
+        job = self._wait_for_job(result["job_id"])
+
+        self.assertEqual("SUCCEEDED", job["status"], job.get("error"))
+        self.assertTrue(job["result"]["vacuum_completed"])
+        self.assertEqual(0, job["result"]["before"]["freelist_count"])
+        self.assertEqual(0, job["result"]["after"]["freelist_count"])
+        self.assertEqual(0, job["result"]["after"]["freed_bytes"])
+        self.assertIsNone(self.jobs.maintenance_gate("database"))
+
+    def test_insufficient_volume_space_fails_before_vacuum_and_reopens_database(self):
+        with patch("app.db.maintenance.shutil.disk_usage",
+                   return_value=SimpleNamespace(total=1024, used=1024, free=0)):
+            result = start_database_space_reclaim()
+            self.assertEqual(0, result["code"])
+            job = self._wait_for_job(result["job_id"])
+
+        self.assertEqual("FAILED", job["status"])
+        self.assertIn("可用空间不足", job["error"])
+        self.assertFalse(job["result"]["vacuum_completed"])
+        self.assertIsNone(self.jobs.maintenance_gate("database"))
+        with DATABASE.engine.connect() as connection:
+            self.assertEqual(5, connection.execute(text(
+                "SELECT count(*) FROM MEDIASYNC_ITEMS")).scalar_one())
+        with sqlite3.connect(self.database_path) as connection:
+            self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
+
+    def test_long_reader_prevents_truncate_checkpoint_without_losing_database(self):
+        reader = sqlite3.connect(self.database_path, timeout=1, isolation_level=None)
+        checkpoint_connection = None
+        try:
+            self.assertEqual("wal", reader.execute("PRAGMA journal_mode").fetchone()[0].lower())
+            reader.execute("BEGIN")
+            reader.execute("SELECT count(*) FROM MEDIASYNC_ITEMS").fetchone()
+            with DATABASE.engine.begin() as connection:
+                connection.execute(text("""INSERT INTO MEDIASYNC_ITEMS
+                    (ID, SERVER, ITEM_ID, TITLE, JSON)
+                    VALUES (101, 'server', 'item-101', 'title-101', 'new')"""))
+
+            checkpoint_connection = sqlite3.connect(
+                self.database_path, timeout=0, isolation_level=None)
+            checkpoint_connection.execute("PRAGMA busy_timeout=0")
+            checkpoint = checkpoint_connection.execute(
+                "PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            with self.assertRaisesRegex(RuntimeError, "WAL checkpoint 未完成"):
+                _check_checkpoint(checkpoint, "长读事务")
+        finally:
+            if checkpoint_connection:
+                checkpoint_connection.close()
+            reader.rollback()
+            reader.close()
+
+        with DATABASE.engine.connect() as connection:
+            self.assertEqual(6, connection.execute(text(
+                "SELECT count(*) FROM MEDIASYNC_ITEMS")).scalar_one())
+        with sqlite3.connect(self.database_path) as connection:
+            self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
 
     def test_rejects_file_or_scope_overrides(self):
         for values in ({"path": "/tmp/other.db"}, {"domain": "media"}, {"table": "MEDIASYNC_ITEMS"}):

@@ -51,6 +51,8 @@ SQLite 的文件名和目录由后端固定生成，不能在设置页或 API �
 
 回收需要独占维护窗口。程序会暂停新的数据库访问、等待在途事务结束、检查 WAL checkpoint 状态，再执行 SQLite `VACUUM` 并校验数据库。可用空间不足、数据库健康检查失败或其他维护任务运行时，页面会显示不可执行原因。远程数据库不提供此操作。
 
+`tests/test_database_space_reclaim.py` 当前 `6 passed`，覆盖零空闲页时的空业务库回收、可用空间不足保护和真实长读事务造成的 TRUNCATE checkpoint busy；失败后业务库仍通过完整性检查。长读事务通过直接执行真实 WAL checkpoint 并验证同一 busy 校验函数测试，后台任务持锁等待恢复仍待专门验收。
+
 ## SQLite 查询计划评估
 
 识别记录分页用 20 万条合成记录对比了当前 ORM 查询形状的执行计划。仅按创建时间和请求 ID 排序时，旧单列索引需要额外临时 B-tree 排序；`(CREATED_AT, REQUEST_ID)` 可直接覆盖稳定排序。来源、状态和时间范围查询使用 `(SOURCE, CREATED_AT, REQUEST_ID)` 后也能按索引顺序分页。新索引替换原来的 `SOURCE` 与 `CREATED_AT` 单列索引。
@@ -78,7 +80,7 @@ SQLite 的文件名和目录由后端固定生成，不能在设置页或 API �
 
 `tests/test_cache_legacy_migration.py` 注入旧迁移标记删除失败，验证重启后可继续清理，且“旧 CacheLib 数据导入 → 清空 → 重启”不会复活；已知 `cache/migrations/` 删除，邻近 `db_scripts/` 文件不受影响，结果为 `1 passed`。
 
-2026-10-13 本地回归：后端 `345 passed, 43 skipped, 83 subtests passed`；隔离缓存容量压力 `2 passed`；前端 `npm run type-check` 和 `npm run build` 均通过。跳过项包含未注入远程设置和门控压力用例；远程契约、备份归档矩阵、迁移复制矩阵和压力用例另行运行并记录在上文。
+2026-10-13 本地回归：后端 `348 passed, 43 skipped, 83 subtests passed`；隔离缓存容量压力 `2 passed`；前端 `npm run type-check` 和 `npm run build` 均通过。跳过项包含未注入远程设置和门控压力用例；远程契约、备份归档矩阵、迁移复制矩阵和压力用例另行运行并记录在上文。
 
 使用 Google Chrome 154 headless 加本地 mock `/do` 响应加载构建产物，缓存和数据库标签在 360、390、768、1280、1440 px 与浅/深色主题下均无页面横向溢出。此项只验证空数据状态的布局，不覆盖真实 API 联调、含数据表格、软键盘、安全区、放大、键盘/屏幕阅读器或迁移/恢复交互。
 
