@@ -856,10 +856,10 @@ class CacheStore:
                                 (namespace,)):
                             try:
                                 key, value = pickle.loads(payload)
-                                add_record(key, value, expires, filename)
                             except Exception as error:
                                 raise sqlite3.DatabaseError(
                                     f"旧缓存命名空间 {namespace} 包含损坏载荷") from error
+                            add_record(key, value, expires, filename)
                     except sqlite3.DatabaseError as error:
                         raise sqlite3.DatabaseError(f"无法读取旧缓存数据库：{filename}") from error
                     finally:
