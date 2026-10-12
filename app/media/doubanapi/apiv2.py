@@ -155,7 +155,7 @@ class DoubanApi(object):
                                 ).decode()
 
     @classmethod
-    @persistent_memoize('douban_api', maxsize=1024)
+    @persistent_memoize('douban_api')
     def __invoke(cls, url, **kwargs):
         req_url = cls._base_url + url
 

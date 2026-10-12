@@ -150,7 +150,7 @@ class WebUtils:
         return medias
 
     @staticmethod
-    @persistent_memoize('web_request', maxsize=1024)
+    @persistent_memoize('web_request')
     def request_cache(url):
         """
         带缓存的请求

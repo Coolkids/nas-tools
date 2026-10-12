@@ -41,8 +41,7 @@ class TMDb(object):
     TMDB_CACHE_ENABLED = "TMDB_CACHE_ENABLED"
     TMDB_PROXIES = "TMDB_PROXIES"
     TMDB_DOMAIN = "TMDB_DOMAIN"
-    REQUEST_CACHE_MAXSIZE = 20000
-    _parsed_cache = PersistentCache("tmdb_request", maxsize=REQUEST_CACHE_MAXSIZE, ttl=86400)
+    _parsed_cache = PersistentCache("tmdb_request", ttl=86400)
     _parsed_cache_lock = threading.Lock()
     _cache_session = requests.Session()
     _cache_hits = 0

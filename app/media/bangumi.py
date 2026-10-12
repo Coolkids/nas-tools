@@ -24,7 +24,7 @@ class Bangumi(object):
         pass
 
     @classmethod
-    @persistent_memoize('bangumi', maxsize=1024)
+    @persistent_memoize('bangumi')
     def __invoke(cls, url, **kwargs):
         req_url = cls._base_url + url
         params = {}

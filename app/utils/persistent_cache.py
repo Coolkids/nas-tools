@@ -25,9 +25,9 @@ class _Stats:
 
 
 class PersistentCache:
-    """兼容旧接口；值由 CacheLib 保存，远程模式仅保留本机 LRU 键索引。"""
+    """兼容旧接口；默认不限制容量，仅有限容量缓存维护淘汰顺序。"""
 
-    def __init__(self, name, store=None, maxsize=1024, ttl=0, timer=time.time,
+    def __init__(self, name, store=None, maxsize=0, ttl=0, timer=time.time,
                  default=None, enable_stats=False):
         self.name, self.maxsize, self.ttl = name, maxsize, ttl
         self.store = store if store is not None else STORE
@@ -40,7 +40,8 @@ class PersistentCache:
     def _sync(self):
         revision = self.store.revision
         if revision != self._revision:
-            self._order = OrderedDict((key, expires) for key, _, expires in self.store.load(self.name))
+            self._order = (OrderedDict((key, expires) for key, _, expires in self.store.load(self.name))
+                           if self.maxsize else OrderedDict())
             self._revision = self.store.revision
             while self.maxsize and len(self._order) > self.maxsize:
                 self.delete(next(iter(self._order)))
@@ -54,24 +55,45 @@ class PersistentCache:
                 self.stats.misses += 1
                 return self.default if default is None else default
             self.stats.hits += 1
-            self._order[key] = record[2]
-            self._order.move_to_end(key)
+            if self.maxsize:
+                self._order[key] = record[2]
+                self._order.move_to_end(key)
             return record[1]
+
+    def get_with_expiration(self, key):
+        """返回缓存值和绝对过期时间，供格式迁移保留原 TTL。"""
+        with self._lock:
+            self._sync()
+            record = self.store.get(self.name, key)
+            return (record[1], record[2]) if record is not None else (None, None)
+
+    def set_with_expiration(self, key, value, expires):
+        """按绝对过期时间写入，不因格式迁移重新授予 TTL。"""
+        with self._lock:
+            self._sync()
+            self.store.put(self.name, key, value, expires)
+            if self.maxsize:
+                self._order[key] = expires
+                self._order.move_to_end(key)
+                while len(self._order) > self.maxsize:
+                    self.delete(next(iter(self._order)))
 
     def set(self, key, value, ttl=None):
         with self._lock:
             self._sync()
             effective_ttl = self.ttl if ttl is None else ttl
             expires = time.time() + effective_ttl if effective_ttl else None
-            for old, expiration in list(self._order.items()):
-                if expiration is not None and expiration <= time.time():
-                    self.delete(old)
-            if key not in self._order:
+            if self.maxsize:
+                for old, expiration in list(self._order.items()):
+                    if expiration is not None and expiration <= time.time():
+                        self.delete(old)
+            if self.maxsize and key not in self._order:
                 while self.maxsize and len(self._order) >= self.maxsize:
                     self.delete(next(iter(self._order)))
             self.store.put(self.name, key, value, expires)
-            self._order[key] = expires
-            self._order.move_to_end(key)
+            if self.maxsize:
+                self._order[key] = expires
+                self._order.move_to_end(key)
 
     def set_many(self, mapping, ttl=None):
         for key, value in mapping.items():
@@ -92,6 +114,8 @@ class PersistentCache:
         with self._lock:
             self._sync()
             records = {key: (value, expires) for key, value, expires in self.store.load(self.name)}
+            if not self.maxsize:
+                return {key: value for key, (value, _) in records.items()}
             for key in list(self._order):
                 if key not in records:
                     self._order.pop(key)
@@ -103,17 +127,16 @@ class PersistentCache:
         return {key: expires for key, _, expires in self.store.load(self.name) if expires is not None}
 
     def delete_expired(self):
-        before = len(self._order)
-        self.copy()
-        return max(0, before - len(self._order))
+        with self._lock:
+            return self.store.prune_expired(self.name)
 
     def memory_info(self):
         with self._lock:
             self._sync()
-            return self.store.memory_info(self.name)
+        return self.store.memory_info(self.name)
 
     def __len__(self):
-        return len(self.copy())
+        return self.memory_info()["entries"]
 
     def __iter__(self):
         return iter(self.copy())
@@ -138,7 +161,7 @@ class PersistentCache:
 FUNCTION_CACHES = {}
 
 
-def persistent_memoize(name, maxsize=1024, ttl=86400):
+def persistent_memoize(name, maxsize=0, ttl=86400):
     cache = PersistentCache(name, maxsize=maxsize, ttl=ttl, enable_stats=True)
     FUNCTION_CACHES[name] = cache
 

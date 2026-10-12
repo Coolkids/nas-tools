@@ -54,6 +54,8 @@ export NASTOOL_CONFIG="/xxx/config/config.yaml"
 nohup uv run python run.py &
 ```
 
+缓存选择“内存 + 本地持久化”时，缓存数据库固定保存在配置目录的 `cache/system.sqlite3`；业务数据库使用配置目录下的 `db/nastools.db`。部署时应将整个配置目录持久挂载，缓存与业务数据库文件不会随应用备份接口打包。更改缓存保存方式请在“设置 → 缓存”执行目标检查和迁移，迁移校验完成后应用会保存配置并重启。
+
 ## 配置
 ### 1、申请相关API KEY
 * 申请TMDB用户，在 https://www.themoviedb.org/ 申请用户，得到API KEY。

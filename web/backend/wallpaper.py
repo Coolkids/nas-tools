@@ -7,7 +7,7 @@ from app.utils import RequestUtils, ExceptionUtils
 from config import Config
 
 
-@persistent_memoize('wallpaper', maxsize=2)
+@persistent_memoize('wallpaper', maxsize=1)
 def get_login_wallpaper(today=datetime.datetime.strftime(datetime.datetime.now(), '%Y%m%d')):
     """
     获取Base64编码的壁纸图片

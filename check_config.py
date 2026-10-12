@@ -279,9 +279,7 @@ def update_config():
         'cache': {
             'enabled': True,
             'parse_ttl_seconds': 86400,
-            'parse': {'enabled': True, 'ttl_seconds': 86400, 'max_entries': 4096,
-                      'max_bytes': 67108864, 'max_entry_bytes': 1048576,
-                      'singleflight': True},
+            'parse': {'enabled': True, 'ttl_seconds': 86400, 'singleflight': True},
             'tmdb_ttl_seconds': 3600,
             'decision_ttl_seconds': 3600,
             'negative_ttl_seconds': 300,
@@ -311,6 +309,12 @@ def update_config():
         overwrite_cofig = True
     merge_recognition_defaults(_config['recognition'], recognition_defaults)
     recognition = _config['recognition']
+    parse_cache = (recognition.get('cache') or {}).get('parse')
+    if isinstance(parse_cache, dict):
+        for key in ('max_entries', 'max_bytes', 'max_entry_bytes'):
+            if key in parse_cache:
+                parse_cache.pop(key)
+                overwrite_cofig = True
     if recognition['decision']['title_evidence'].get('on_multiple_matches') != 'fail':
         recognition['decision']['title_evidence']['on_multiple_matches'] = 'fail'
         overwrite_cofig = True

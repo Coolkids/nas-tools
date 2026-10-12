@@ -2,7 +2,8 @@ import os
 import shutil
 import sys
 import tempfile
-from threading import Lock
+from copy import deepcopy
+from threading import Lock, RLock
 import ruamel.yaml
 
 # 种子名/文件名要素分隔字符
@@ -75,6 +76,7 @@ XVFB_PATH = [
 
 # 线程锁
 lock = Lock()
+CONFIG_LOCK = RLock()
 
 # 全局实例
 _CONFIG = None
@@ -146,7 +148,22 @@ class Config(object):
             return self._config
         return self._config.get(node, {})
 
+    def get_config_for_api(self):
+        """返回前端配置快照；缓存口令只报告是否已设置。"""
+        config = deepcopy(self._config)
+        cache = config.get("cache")
+        if isinstance(cache, dict):
+            cache["password_set"] = bool(cache.get("password"))
+            cache["username_set"] = bool(cache.get("username"))
+            cache["password"] = ""
+            cache["username"] = ""
+        return config
+
     def save_config(self, new_cfg):
+        with CONFIG_LOCK:
+            return self._save_config(new_cfg)
+
+    def _save_config(self, new_cfg):
         config_dir = os.path.dirname(os.path.abspath(self._config_path))
         os.makedirs(config_dir, exist_ok=True)
         old_mode = None

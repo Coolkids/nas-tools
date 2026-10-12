@@ -218,6 +218,12 @@ class WebAction:
             "clear_recognition_parse_cache": self.__clear_recognition_parse_cache,
             "get_system_cache_info": self.__get_system_cache_info,
             "clear_system_cache": self.__clear_system_cache,
+            "check_cache_storage": self.__check_cache_storage,
+            "start_cache_migration": self.__start_cache_migration,
+            "get_cache_job": self.__get_cache_job,
+            "cancel_cache_job": self.__cancel_cache_job,
+            "retry_cache_restart": self.__retry_cache_restart,
+            "recover_cache_migration": self.__recover_cache_migration,
             "get_recognition_records": self.__get_recognition_records,
             "get_recognition_record_detail": self.__get_recognition_record_detail,
             "version": self.__version
@@ -1079,17 +1085,27 @@ class WebAction:
         更新配置信息
         """
         cfg = deepcopy(Config().get_config())
-        data = data or {}
+        data = deepcopy(data or {})
+        deprecated_cache_limits = {
+            "recognition.cache.parse.max_entries",
+            "recognition.cache.parse.max_bytes",
+            "recognition.cache.parse.max_entry_bytes",
+        }
+        ignored_cache_limits = deprecated_cache_limits.intersection(data)
+        for key in ignored_cache_limits:
+            data.pop(key, None)
+        nested_recognition = data.get("recognition")
+        if isinstance(nested_recognition, dict):
+            nested_cache = nested_recognition.get("cache")
+            nested_parse = nested_cache.get("parse") if isinstance(nested_cache, dict) else None
+            if isinstance(nested_parse, dict):
+                for key in deprecated_cache_limits:
+                    field = key.rsplit(".", 1)[-1]
+                    if field in nested_parse:
+                        nested_parse.pop(field, None)
+                        ignored_cache_limits.add(key)
         if any(key.startswith("cache.") for key in data):
-            from app.utils.cache_backend import DEFAULT_SETTINGS, validate_settings
-
-            candidate = {**DEFAULT_SETTINGS, **(cfg.get("cache") or {})}
-            candidate.update({key.removeprefix("cache."): value for key, value in data.items()
-                              if key.startswith("cache.")})
-            try:
-                validate_settings(candidate)
-            except ValueError as error:
-                return {"code": 1, "msg": str(error)}
+            return {"code": 1, "msg": "缓存保存方式需通过缓存迁移流程修改"}
         strategy = data.get("recognition.decision.strategy")
         if strategy and strategy not in ("legacy", "title_evidence"):
             return {"code": 1, "msg": "媒体识别策略无效"}
@@ -1178,9 +1194,6 @@ class WebAction:
             "recognition.decision.weights.input_evidence": float,
             "recognition.decision.weights.provider_reliability": float,
             "recognition.cache.parse.ttl_seconds": int,
-            "recognition.cache.parse.max_entries": int,
-            "recognition.cache.parse.max_bytes": int,
-            "recognition.cache.parse.max_entry_bytes": int,
         }
         boolean_fields = {
             "recognition.records.cleanup.enabled",
@@ -1306,15 +1319,10 @@ class WebAction:
             return {"code": 1, "msg": "识别并发上限必须为整数"}
         parse_cache = ((recognition.get("cache") or {}).get("parse") or {})
         try:
-            cache_limits = [int(parse_cache.get(key, default)) for key, default in (
-                ("ttl_seconds", 86400), ("max_entries", 4096),
-                ("max_bytes", 67108864), ("max_entry_bytes", 1048576))]
-            if any(value < 1 for value in cache_limits):
-                return {"code": 1, "msg": "解析缓存 TTL 和容量必须大于 0"}
-            if cache_limits[3] > cache_limits[2]:
-                return {"code": 1, "msg": "单条解析缓存上限不能大于缓存总容量"}
+            if int(parse_cache.get("ttl_seconds", 86400)) < 1:
+                return {"code": 1, "msg": "解析缓存 TTL 必须大于 0"}
         except (TypeError, ValueError):
-            return {"code": 1, "msg": "解析缓存 TTL 和容量必须为整数"}
+            return {"code": 1, "msg": "解析缓存 TTL 必须为整数"}
         weights = decision.get("weights") or {}
         try:
             weight_values = [float(weights.get(key, 0) or 0) for key in (
@@ -1350,7 +1358,12 @@ class WebAction:
         # 保存配置
         if not config_test:
             try:
-                Config().save_config(cfg)
+                from config import CONFIG_LOCK
+                with CONFIG_LOCK:
+                    latest = Config().get_config()
+                    if isinstance(latest, dict) and "cache" in latest:
+                        cfg["cache"] = deepcopy(latest["cache"])
+                    Config().save_config(cfg)
             except Exception as error:
                 log.error(f"【Config】保存配置失败：{error}")
                 return {"code": 1, "msg": "保存配置失败，旧配置保持不变"}
@@ -1360,7 +1373,7 @@ class WebAction:
                     "recognition.records.cleanup.retention_days")):
                 restart_scheduler()
 
-        return {"code": 0}
+        return {"code": 0, "msg": "已忽略旧客户端提交的 AI 缓存容量字段" if ignored_cache_limits else ""}
 
     def __add_or_edit_sync_path(self, data):
         """
@@ -4373,13 +4386,14 @@ class WebAction:
         """
         维护媒体库目录
         """
-        cfg = self.set_config_directory(Config().get_config(),
-                                        data.get("oper"),
-                                        data.get("key"),
-                                        data.get("value"),
-                                        data.get("replace_value"))
-        # 保存配置
-        Config().save_config(cfg)
+        from config import CONFIG_LOCK
+        with CONFIG_LOCK:
+            cfg = self.set_config_directory(deepcopy(Config().get_config()),
+                                            data.get("oper"),
+                                            data.get("key"),
+                                            data.get("value"),
+                                            data.get("replace_value"))
+            Config().save_config(cfg)
         return {"code": 0}
 
     @staticmethod
@@ -4770,7 +4784,7 @@ class WebAction:
         """
         获取配置信息（供Vue前端使用）
         """
-        cfg = Config().get_config()
+        cfg = Config().get_config_for_api()
         return {"code": 0, "config": cfg}
 
     @staticmethod
@@ -4832,6 +4846,52 @@ class WebAction:
         return {"code": 0, "caches": cache_info(), "backend": backend_status()}
 
     @staticmethod
+    def __check_cache_storage(data=None):
+        from app.utils.cache_migration import check_cache_storage
+
+        result = check_cache_storage(data or {})
+        if result.get("code"):
+            return result
+        return {"code": 0, **result}
+
+    @staticmethod
+    def __start_cache_migration(data=None):
+        from app.utils.cache_migration import start_cache_migration
+
+        return start_cache_migration(data or {})
+
+    @staticmethod
+    def __get_cache_job(data=None):
+        from app.utils.cache_migration import get_cache_job
+
+        job = get_cache_job((data or {}).get("job_id"))
+        return {"code": 0, "job": job} if job else {"code": 1, "msg": "缓存任务不存在"}
+
+    @staticmethod
+    def __cancel_cache_job(data=None):
+        from app.utils.cache_migration import cancel_cache_job
+
+        if cancel_cache_job((data or {}).get("job_id")):
+            return {"code": 0}
+        return {"code": 1, "msg": "当前阶段不能取消缓存任务"}
+
+    @staticmethod
+    def __retry_cache_restart(data=None):
+        from app.utils.cache_migration import retry_cache_restart
+
+        if retry_cache_restart((data or {}).get("job_id")):
+            return {"code": 0}
+        return {"code": 1, "msg": "没有可重试的缓存重启任务"}
+
+    @staticmethod
+    def __recover_cache_migration(data=None):
+        from app.utils.cache_migration import recover_cache_migration
+
+        if recover_cache_migration((data or {}).get("job_id")):
+            return {"code": 0}
+        return {"code": 1, "msg": "缓存目标回滚仍未完成，系统继续保持维护状态"}
+
+    @staticmethod
     def __clear_system_cache(data=None):
         from app.utils.system_cache import clear_cache
 
@@ -4876,8 +4936,11 @@ class WebAction:
     @staticmethod
     def __clear_recognition_parse_cache(data=None):
         """只清除 anitopy-ml 解析缓存，不影响 TMDB 缓存与识别记录。"""
+        from app.utils.persistent_cache import STORE
         from app.media.recognition import cache
 
+        if STORE.status().get("maintenance"):
+            return {"code": 1, "msg": "缓存迁移期间不能清理缓存"}
         before = cache.info("parse")
         cache.clear("parse")
         after = cache.info("parse")

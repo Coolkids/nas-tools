@@ -792,7 +792,7 @@ class ConfigInfo(ClientResource):
         return {
             "code": 0,
             "success": True,
-            "data": Config().get_config()
+            "data": Config().get_config_for_api()
         }
 
 

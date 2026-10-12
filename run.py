@@ -96,6 +96,15 @@ def init_system():
     update_config()
     # 检查配置文件
     check_config()
+    # 本地缓存布局升级与旧数据导入必须在定时任务和后台服务启动前完成。
+    try:
+        from app.utils.cache_backend import STORE
+        STORE.initialize()
+        from app.utils.cache_migration import verify_cache_startup
+        verify_cache_startup()
+    except Exception as e:
+        log.error(f"本地缓存存储初始化失败：{e}")
+        raise
     # 恢复异常中断的搜索任务
     try:
         from web.backend.search_task import SearchTaskPool
