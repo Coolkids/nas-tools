@@ -2,7 +2,8 @@ import time
 from contextlib import contextmanager
 from sqlalchemy import text, or_
 
-from app.db.models import Base, MEDIASYNCITEMS, MEDIASYNCSTATISTIC
+from app.db.models import (Base, MEDIA_SYNC_LEGACY_GENERATION, MEDIASYNCITEMS,
+                           MEDIASYNCSTATISTIC)
 from app.db.manager import DATABASE
 from app.utils import ExceptionUtils
 
@@ -38,6 +39,7 @@ class MediaDb:
             self.session.flush()
             self.session.add(MEDIASYNCITEMS(
                 SERVER=server_type,
+                GENERATION_ID=MEDIA_SYNC_LEGACY_GENERATION,
                 LIBRARY=iteminfo.get("library"),
                 ITEM_ID=iteminfo.get("id"),
                 ITEM_TYPE=iteminfo.get("type"),
@@ -71,6 +73,7 @@ class MediaDb:
             return 0
         rows = [{
             "SERVER": server_type,
+            "GENERATION_ID": MEDIA_SYNC_LEGACY_GENERATION,
             "LIBRARY": item.get("library"),
             "ITEM_ID": item.get("id"),
             "ITEM_TYPE": item.get("type"),
@@ -140,6 +143,7 @@ class MediaDb:
             self.session.flush()
             self.session.add(MEDIASYNCSTATISTIC(
                 SERVER=server_type,
+                ACTIVE_GENERATION=MEDIA_SYNC_LEGACY_GENERATION,
                 TOTAL_COUNT=total_count,
                 MOVIE_COUNT=movie_count,
                 TV_COUNT=tv_count,

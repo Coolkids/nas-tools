@@ -6,6 +6,8 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import deferred
 from sqlalchemy.dialects.mysql import LONGTEXT
 
+MEDIA_SYNC_LEGACY_GENERATION = "legacy"
+
 Base = declarative_base()
 # 两个业务逻辑域共用一份 metadata 和结构版本。
 BaseMedia = declarative_base(metadata=Base.metadata)
@@ -524,11 +526,14 @@ class MEDIASYNCITEMS(BaseMedia):
     __tablename__ = 'MEDIASYNC_ITEMS'
     __table_args__ = (
         Index('INDX_MEDIASYNC_ITEMS_SL', 'SERVER', 'LIBRARY'),
-        Index('UN_INDX_MEDIASYNC_ITEMS_SERVER_ITEM', 'SERVER', 'ITEM_ID', unique=True),
+        Index('UN_INDX_MEDIASYNC_ITEMS_SERVER_GENERATION_ITEM',
+              'SERVER', 'GENERATION_ID', 'ITEM_ID', unique=True),
     )
 
     ID = Column(Integer, primary_key=True)
     SERVER = Column(String(128))
+    GENERATION_ID = Column(String(64), nullable=False, default=MEDIA_SYNC_LEGACY_GENERATION,
+                           server_default=MEDIA_SYNC_LEGACY_GENERATION)
     LIBRARY = Column(Text)
     ITEM_ID = Column(String(256), index=True)
     ITEM_TYPE = Column(Text)
@@ -562,9 +567,12 @@ def _sync_sync_history_hash(mapper, connection, target):
 
 class MEDIASYNCSTATISTIC(BaseMedia):
     __tablename__ = 'MEDIASYNC_STATISTICS'
+    __table_args__ = (Index('UN_INDX_MEDIASYNC_STATISTICS_SERVER', 'SERVER', unique=True),)
 
     ID = Column(Integer, primary_key=True)
-    SERVER = Column(Text, index=True)
+    SERVER = Column(Text)
+    ACTIVE_GENERATION = Column(String(64), nullable=False, default=MEDIA_SYNC_LEGACY_GENERATION,
+                               server_default=MEDIA_SYNC_LEGACY_GENERATION)
     TOTAL_COUNT = Column(Text)
     MOVIE_COUNT = Column(Text)
     TV_COUNT = Column(Text)
