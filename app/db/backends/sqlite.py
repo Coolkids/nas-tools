@@ -130,23 +130,58 @@ class SQLiteBackend(DatabaseBackend):
         if engine.pool.checkedout():
             raise RuntimeError("SQLite 仍有业务连接，不能回收空间")
         connection = engine.raw_connection()
+        dbapi_connection = connection.driver_connection
+        previous_autocommit = dbapi_connection.autocommit
         try:
-            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            connection.execute("VACUUM")
-            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            dbapi_connection.autocommit = True
+            cursor = dbapi_connection.cursor()
+            try:
+                before = self._checkpoint_cursor(cursor, "TRUNCATE")
+                self._require_checkpoint_complete(before, "VACUUM 前")
+                cursor.execute("VACUUM")
+                after = self._checkpoint_cursor(cursor, "TRUNCATE")
+                self._require_checkpoint_complete(after, "VACUUM 后")
+            finally:
+                cursor.close()
         finally:
+            dbapi_connection.autocommit = previous_autocommit
             connection.close()
 
     def checkpoint(self, engine, mode="PASSIVE"):
         mode = str(mode or "PASSIVE").upper()
         if mode not in {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}:
             raise ValueError("SQLite WAL checkpoint 模式无效")
-        with engine.connect() as connection:
-            result = connection.exec_driver_sql(
-                f"PRAGMA wal_checkpoint({mode})").one()
-        busy, log_frames, checkpointed_frames = (int(value) for value in result)
+        connection = engine.raw_connection()
+        dbapi_connection = connection.driver_connection
+        previous_autocommit = dbapi_connection.autocommit
+        try:
+            dbapi_connection.autocommit = True
+            cursor = dbapi_connection.cursor()
+            try:
+                busy, log_frames, checkpointed_frames = self._checkpoint_cursor(cursor, mode)
+            finally:
+                cursor.close()
+        finally:
+            dbapi_connection.autocommit = previous_autocommit
+            connection.close()
         return {"busy": busy, "log_frames": log_frames,
                 "checkpointed_frames": checkpointed_frames}
+
+    @staticmethod
+    def _checkpoint_cursor(cursor, mode):
+        cursor.execute(f"PRAGMA wal_checkpoint({mode})")
+        result = cursor.fetchone()
+        if not result or len(result) != 3:
+            raise RuntimeError("SQLite WAL checkpoint 未返回有效状态")
+        return tuple(int(value) for value in result)
+
+    @staticmethod
+    def _require_checkpoint_complete(result, stage):
+        busy, log_frames, checkpointed_frames = result
+        if busy or (log_frames >= 0 and checkpointed_frames < log_frames):
+            raise RuntimeError(
+                f"SQLite {stage} WAL checkpoint 未完成：busy={busy}，"
+                f"log_frames={log_frames}，checkpointed_frames={checkpointed_frames}")
 
     def optimize(self, engine):
         # Run after Alembic/metadata changes during startup, before background
