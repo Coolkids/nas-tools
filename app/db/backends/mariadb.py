@@ -3,6 +3,7 @@
 from sqlalchemy import URL, create_engine
 
 from app.db.backends.mysql import MySQLBackend
+from app.db.pool import MeasuredQueuePool
 
 
 class MariaDBBackend(MySQLBackend):
@@ -22,5 +23,6 @@ class MariaDBBackend(MySQLBackend):
         ssl = settings.get("ssl")
         if isinstance(ssl, dict) and ssl:
             connect_args["ssl"] = ssl
-        return create_engine(url, pool_pre_ping=True, pool_recycle=1800,
+        return create_engine(url, poolclass=MeasuredQueuePool,
+                             pool_pre_ping=True, pool_recycle=1800,
                              connect_args=connect_args)
