@@ -3,7 +3,7 @@ from app.utils.types import MediaServerType
 
 import log
 from config import Config
-from app.mediaserver.client._base import _IMediaClient
+from app.mediaserver.client._base import _IMediaClient, MEDIA_SYNC_PAGE_SIZE
 from plexapi.myplex import MyPlexAccount
 from plexapi.server import PlexServer
 
@@ -187,27 +187,39 @@ class Plex(_IMediaClient):
 
     def get_items(self, parent):
         """
-        获取媒体服务器所有媒体库列表
+        分页读取媒体库条目，避免将整个 Plex 媒体库保存在内存中。
         """
         if not parent:
-            yield {}
+            raise ValueError("Plex 媒体库标识为空")
         if not self._plex:
-            yield {}
+            raise RuntimeError("Plex 连接不可用")
         try:
             section = self._plex.library.sectionByID(parent)
-            if section:
-                for item in section.all():
+            if not section:
+                raise RuntimeError("Plex 媒体库不存在")
+            page_size = MEDIA_SYNC_PAGE_SIZE
+            start_index = 0
+            while True:
+                page = section.all(container_start=start_index,
+                                   container_size=page_size,
+                                   maxresults=page_size)
+                if not page:
+                    break
+                for item in page:
                     if not item:
-                        continue
+                        raise ValueError("Plex 返回了无效的媒体条目")
                     yield {"id": item.key,
                            "library": item.librarySectionID,
                            "type": item.type,
                            "title": item.title,
                            "year": item.year if hasattr(item, 'year') and item.year is not None else 2024,
                            "json": str(item.__dict__)}
+                start_index += len(page)
+                if len(page) < page_size:
+                    break
         except Exception as err:
             ExceptionUtils.exception_traceback(err)
-        yield {}
+            raise
 
     def get_playing_sessions(self):
         """

@@ -39,8 +39,9 @@ def _media_sync_batches(items, max_rows=_MEDIA_SYNC_BATCH_ROWS,
         yield batch
 
 
-def _collect_media_sync_items(media_counts, libraries, get_items, on_library=None):
-    """校验完整的全库拉取结果，禁止把不完整响应当成空索引发布。"""
+def _collect_media_sync_items(media_counts, libraries, get_items, on_library=None,
+                              on_batch=None):
+    """校验完整拉取结果并按批交付，支持直接写入隐藏代次以控制内存。"""
     if not isinstance(media_counts, dict):
         raise ValueError("媒体服务器未返回有效的媒体统计")
 
@@ -63,52 +64,61 @@ def _collect_media_sync_items(media_counts, libraries, get_items, on_library=Non
     if sum(expected.values()) and not libraries:
         raise ValueError("媒体服务器媒体统计非空，但未返回媒体库")
 
-    rows = []
+    rows = [] if on_batch is None else None
     actual = {"movie": 0, "series": 0}
-    seen_item_ids = set()
+    seen_item_ids = set() if on_batch is None else None
     seen_library_ids = set()
-    for library in libraries:
-        if not isinstance(library, dict):
-            raise ValueError("媒体服务器返回了无效的媒体库记录")
-        library_id = library.get("id")
-        if library_id is None or not str(library_id).strip():
-            raise ValueError("媒体服务器返回的媒体库缺少标识")
-        library_id = str(library_id)
-        if library_id in seen_library_ids:
-            raise ValueError("媒体服务器重复返回媒体库")
-        seen_library_ids.add(library_id)
-        library_name = library.get("name") or library_id
-        items = get_items(library_id)
-        if items is None:
-            raise ValueError("媒体服务器未返回媒体条目列表")
-        for item in items:
-            # Emby、Jellyfin 和 Plex 的旧适配器会以空对象结束生成器。
-            if not item:
-                continue
-            if not isinstance(item, dict):
-                raise ValueError("媒体服务器返回了无效的媒体条目")
-            item_id = item.get("id")
-            title = item.get("title")
-            item_type = str(item.get("type") or "").strip().lower()
-            if item_id is None or not str(item_id).strip() or not title:
-                raise ValueError("媒体服务器返回的媒体条目缺少标识或标题")
-            if item_type == "movie":
-                kind = "movie"
-            elif item_type in {"series", "show"}:
-                kind = "series"
-            else:
-                raise ValueError("媒体服务器返回了不支持的媒体类型")
-            item_id = str(item_id)
-            if item_id in seen_item_ids:
-                raise ValueError("媒体服务器重复返回媒体条目")
-            seen_item_ids.add(item_id)
-            normalized = dict(item)
-            normalized["id"] = item_id
-            normalized.setdefault("library", library_name)
-            rows.append(normalized)
-            actual[kind] += 1
-        if on_library:
-            on_library(library_name, len(rows))
+
+    def normalized_items():
+        for library in libraries:
+            if not isinstance(library, dict):
+                raise ValueError("媒体服务器返回了无效的媒体库记录")
+            library_id = library.get("id")
+            if library_id is None or not str(library_id).strip():
+                raise ValueError("媒体服务器返回的媒体库缺少标识")
+            library_id = str(library_id)
+            if library_id in seen_library_ids:
+                raise ValueError("媒体服务器重复返回媒体库")
+            seen_library_ids.add(library_id)
+            library_name = library.get("name") or library_id
+            items = get_items(library_id)
+            if items is None:
+                raise ValueError("媒体服务器未返回媒体条目列表")
+            for item in items:
+                # Emby、Jellyfin 和 Plex 的旧适配器会以空对象结束生成器。
+                if not item:
+                    continue
+                if not isinstance(item, dict):
+                    raise ValueError("媒体服务器返回了无效的媒体条目")
+                item_id = item.get("id")
+                title = item.get("title")
+                item_type = str(item.get("type") or "").strip().lower()
+                if item_id is None or not str(item_id).strip() or not title:
+                    raise ValueError("媒体服务器返回的媒体条目缺少标识或标题")
+                if item_type == "movie":
+                    kind = "movie"
+                elif item_type in {"series", "show"}:
+                    kind = "series"
+                else:
+                    raise ValueError("媒体服务器返回了不支持的媒体类型")
+                item_id = str(item_id)
+                if seen_item_ids is not None:
+                    if item_id in seen_item_ids:
+                        raise ValueError("媒体服务器重复返回媒体条目")
+                    seen_item_ids.add(item_id)
+                normalized = dict(item)
+                normalized["id"] = item_id
+                normalized.setdefault("library", library_name)
+                actual[kind] += 1
+                yield normalized
+            if on_library:
+                on_library(library_name, sum(actual.values()))
+
+    if rows is not None:
+        rows.extend(item for batch in _media_sync_batches(normalized_items()) for item in batch)
+    else:
+        for batch in _media_sync_batches(normalized_items()):
+            on_batch(batch)
 
     if actual != expected:
         raise ValueError("媒体条目数量与服务器统计不一致，可能存在分页或拉取失败")
@@ -315,12 +325,26 @@ class MediaServer:
                 except Exception:
                     log.warning("【MediaServer】同步租约释放失败，将在过期后由后续任务接管")
 
+            written_count = 0
+            stream_write_elapsed = 0.0
+
+            def write_sync_batch(batch):
+                nonlocal written_count, stream_write_elapsed
+                if heartbeat_lost.is_set():
+                    raise RuntimeError("媒体同步租约已失效，停止写入新代次")
+                batch_started = time.perf_counter()
+                written_count += self.mediadb.write_sync_batch(lease, batch)
+                stream_write_elapsed += time.perf_counter() - batch_started
+
             try:
                 self.mediadb.cleanup_sync_generations(lease)
-                all_items, movie_count, tv_count = _collect_media_sync_items(
+                _, movie_count, tv_count = _collect_media_sync_items(
                     self.get_medias_count(), self.get_libraries(), self.get_items,
                     on_library=lambda name, count: self.progress.update(
-                        ptype="mediasync", text="已拉取 %s，累计：%s ..." % (name, count)))
+                        ptype="mediasync", text="已拉取 %s，累计：%s ..." % (name, count)),
+                    on_batch=write_sync_batch)
+                if written_count != movie_count + tv_count:
+                    raise RuntimeError("媒体新代次写入条数与拉取快照不一致")
                 if heartbeat_lost.is_set():
                     raise RuntimeError("媒体同步租约已失效")
             except Exception:
@@ -336,17 +360,10 @@ class MediaServer:
                 heartbeat_stop.set()
                 heartbeat.join(timeout=2)
                 return
-            fetch_elapsed = time.perf_counter() - fetch_started_at
+            fetch_elapsed = max(0.0, time.perf_counter() - fetch_started_at - stream_write_elapsed)
 
             db_started_at = time.perf_counter()
             try:
-                written_count = 0
-                for batch in _media_sync_batches(all_items):
-                    if heartbeat_lost.is_set():
-                        raise RuntimeError("媒体同步租约已失效，停止写入新代次")
-                    written_count += self.mediadb.write_sync_batch(lease, batch)
-                if written_count != len(all_items):
-                    raise RuntimeError("媒体新代次写入条数与拉取快照不一致")
                 if (heartbeat_lost.is_set()
                         or not self.mediadb.renew_sync_lease(
                             lease, lease_seconds=_MEDIA_SYNC_LEASE_SECONDS)):
@@ -369,7 +386,7 @@ class MediaServer:
                 return
 
             total_count = publish_result["total_count"]
-            db_elapsed = time.perf_counter() - db_started_at
+            db_elapsed = stream_write_elapsed + time.perf_counter() - db_started_at
             cleanup_error = None
             for attempt in range(3):
                 try:

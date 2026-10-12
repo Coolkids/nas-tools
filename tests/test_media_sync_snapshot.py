@@ -78,6 +78,24 @@ class MediaSyncSnapshotTest(TestCase):
         by_bytes = list(_media_sync_batches(items, max_rows=20, max_bytes=3))
         self.assertEqual([1, 1, 1, 1, 1], [len(batch) for batch in by_bytes])
 
+    def test_streaming_validation_delivers_bounded_batches_without_retaining_snapshot(self):
+        batches = []
+
+        def store_batch(batch):
+            batches.append(batch)
+
+        rows, movie_count, series_count = _collect_media_sync_items(
+            {"MovieCount": 1001, "SeriesCount": 0}, [{"id": "movies"}],
+            lambda _: ({"id": number, "type": "Movie", "title": str(number)}
+                       for number in range(1001)),
+            on_batch=store_batch)
+
+        self.assertIsNone(rows)
+        self.assertEqual((1001, 0), (movie_count, series_count))
+        self.assertEqual([500, 500, 1], [len(batch) for batch in batches])
+        self.assertEqual("0", batches[0][0]["id"])
+        self.assertEqual("1000", batches[-1][-1]["id"])
+
     def test_sync_does_not_write_or_publish_when_snapshot_is_incomplete(self):
         instance = MediaServer()
         lease = {"server": "emby", "job_id": "job", "generation_id": "generation",
@@ -105,3 +123,35 @@ class MediaSyncSnapshotTest(TestCase):
                          media_db.cleanup_sync_generations.call_args_list[1].kwargs)
         media_db.release_sync_lease.assert_called_once_with(lease, status="FAILED")
         progress.end.assert_called_once_with("mediasync")
+
+    def test_sync_writes_bounded_batches_while_the_remote_generator_is_consumed(self):
+        instance = MediaServer()
+        lease = {"server": "emby", "job_id": "job", "generation_id": "generation",
+                 "lease_token": 1, "expected_active_generation": "legacy"}
+        media_db = Mock()
+        media_db.acquire_sync_lease.return_value = lease
+        media_db.write_sync_batch.side_effect = lambda _lease, batch: len(batch)
+        media_db.publish_sync_generation.return_value = {"total_count": 501}
+        progress = Mock()
+
+        def items(_library):
+            for number in range(501):
+                yield {"id": number, "type": "Movie", "title": str(number)}
+                if number == 500:
+                    self.assertEqual(1, media_db.write_sync_batch.call_count)
+
+        with patch.object(instance, "mediadb", media_db), \
+                patch.object(instance, "progress", progress), \
+                patch.object(instance, "_server_type", SimpleNamespace(value="emby")), \
+                patch.object(instance, "get_medias_count",
+                             return_value={"MovieCount": 501, "SeriesCount": 0}), \
+                patch.object(instance, "get_libraries",
+                             return_value=[{"id": "movies", "name": "电影"}]), \
+                patch.object(instance, "get_items", side_effect=items):
+            instance.sync_mediaserver()
+
+        self.assertEqual([500, 1], [len(call.args[1])
+                                     for call in media_db.write_sync_batch.call_args_list])
+        media_db.publish_sync_generation.assert_called_once_with(
+            lease, movie_count=501, series_count=0)
+        media_db.release_sync_lease.assert_called_once_with(lease, status="SUCCEEDED")

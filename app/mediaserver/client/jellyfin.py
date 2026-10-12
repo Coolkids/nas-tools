@@ -1,8 +1,9 @@
 import re
+from urllib.parse import urlencode
 
 import log
 from config import Config
-from app.mediaserver.client._base import _IMediaClient
+from app.mediaserver.client._base import _IMediaClient, MEDIA_SYNC_PAGE_SIZE
 from app.utils.types import MediaServerType
 from app.utils import RequestUtils, SystemUtils, ExceptionUtils
 
@@ -383,39 +384,79 @@ class Jellyfin(_IMediaClient):
 
     def get_items(self, parent):
         """
-        获取媒体服务器所有媒体库列表
+        分页读取媒体库条目；媒体详情字段直接从分页响应提取。
         """
         if not parent:
-            yield {}
+            raise ValueError("Jellyfin 媒体库标识为空")
         if not self._host or not self._apikey:
-            yield {}
-        req_url = "%sUsers/%s/Items?parentId=%s&api_key=%s" % (self._host, self._user, parent, self._apikey)
+            raise RuntimeError("Jellyfin 连接配置不完整")
+        page_size = MEDIA_SYNC_PAGE_SIZE
+        start_index = 0
+        total_count = None
         try:
-            res = RequestUtils().get_res(req_url)
-            if res and res.status_code == 200:
-                results = res.json().get("Items") or []
+            while total_count is None or start_index < total_count:
+                params = urlencode({
+                    "ParentId": parent,
+                    "UserId": self._user,
+                    "api_key": self._apikey,
+                    "StartIndex": start_index,
+                    "Limit": page_size,
+                    "Fields": "Path,ProviderIds,OriginalTitle",
+                })
+                req_url = "%sUsers/%s/Items?%s" % (self._host, self._user, params)
+                res = RequestUtils().get_res(req_url)
+                if not res or res.status_code != 200:
+                    raise RuntimeError("Jellyfin 条目分页请求失败")
+                payload = res.json()
+                if not isinstance(payload, dict) or not isinstance(payload.get("Items"), list):
+                    raise ValueError("Jellyfin 条目分页响应格式无效")
+                raw_total = payload.get("TotalRecordCount")
+                if raw_total is not None:
+                    if isinstance(raw_total, bool):
+                        raise ValueError("Jellyfin 条目分页总数格式无效")
+                    page_total = int(raw_total)
+                    if page_total < 0 or str(raw_total).strip() != str(page_total):
+                        raise ValueError("Jellyfin 条目分页总数格式无效")
+                    if total_count is not None and page_total != total_count:
+                        raise RuntimeError("Jellyfin 条目分页期间总数发生变化")
+                    total_count = page_total
+
+                results = payload["Items"]
+                if len(results) > page_size:
+                    raise ValueError("Jellyfin 返回条数超过请求的分页上限")
+                if total_count is not None and start_index + len(results) > total_count:
+                    raise ValueError("Jellyfin 分页条数超过服务器报告的总数")
                 for result in results:
-                    if not result:
-                        continue
-                    if result.get("Type") in ["Movie", "Series"]:
-                        item_info = self.get_iteminfo(result.get("Id"))
+                    if not isinstance(result, dict):
+                        raise ValueError("Jellyfin 返回了无效的媒体条目")
+                    item_type = result.get("Type") or ""
+                    if item_type in ("Movie", "Series"):
+                        provider_ids = result.get("ProviderIds") or {}
                         yield {"id": result.get("Id"),
-                               "library": item_info.get("ParentId"),
-                               "type": item_info.get("Type"),
-                               "title": item_info.get("Name"),
-                               "originalTitle": item_info.get("OriginalTitle"),
-                               "year": item_info.get("ProductionYear"),
-                               "tmdbid": item_info.get("ProviderIds", {}).get("Tmdb"),
-                               "imdbid": item_info.get("ProviderIds", {}).get("Imdb"),
-                               "path": item_info.get("Path"),
-                               "json": str(item_info)}
-                    elif "Folder" in result.get("Type"):
-                        for item in self.get_items(result.get("Id")):
-                            yield item
+                               "library": result.get("ParentId") or parent,
+                               "type": item_type,
+                               "title": result.get("Name"),
+                               "originalTitle": result.get("OriginalTitle"),
+                               "year": result.get("ProductionYear"),
+                               "tmdbid": provider_ids.get("Tmdb"),
+                               "imdbid": provider_ids.get("Imdb"),
+                               "path": result.get("Path"),
+                               "json": str(result)}
+                    elif "Folder" in item_type:
+                        yield from self.get_items(result.get("Id"))
+
+                start_index += len(results)
+                if total_count is not None:
+                    if start_index >= total_count:
+                        break
+                    if not results:
+                        raise RuntimeError("Jellyfin 媒体条目分页提前结束")
+                elif len(results) < page_size:
+                    break
         except Exception as e:
             ExceptionUtils.exception_traceback(e)
             log.error(f"【{self.server_type}】连接Users/Items出错：" + str(e))
-        yield {}
+            raise
 
     def get_playing_sessions(self):
         """

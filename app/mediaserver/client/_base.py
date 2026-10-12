@@ -1,6 +1,9 @@
 from abc import ABCMeta, abstractmethod
 
 
+MEDIA_SYNC_PAGE_SIZE = 500
+
+
 class _IMediaClient(metaclass=ABCMeta):
 
     @abstractmethod

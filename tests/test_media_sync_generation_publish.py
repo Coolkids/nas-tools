@@ -8,6 +8,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from app.db.manager import DATABASE
 from app.db.media_db import MediaDb
@@ -81,6 +82,23 @@ class MediaSyncGenerationPublishTest(TestCase):
         with self.assertRaisesRegex(RuntimeError, "租约已过期或已被接管"):
             self.media_db.publish_sync_generation(lease, movie_count=1, series_count=0)
         self.assertFalse(self.media_db.exists("emby", "待发布", None, None))
+        self.assertEqual(1, self._count_items())
+
+    def test_database_unique_key_rejects_duplicate_ids_across_streamed_batches(self):
+        self.assertTrue(self.media_db.insert("emby", {
+            "id": "active", "type": "Movie", "title": "活动条目"}))
+        lease = self.media_db.acquire_sync_lease("emby")
+        self.media_db.write_sync_batch(lease, [{
+            "id": "duplicate", "type": "Movie", "title": "暂存条目"}])
+
+        with self.assertRaises(IntegrityError):
+            self.media_db.write_sync_batch(lease, [{
+                "id": "duplicate", "type": "Movie", "title": "重复条目"}])
+
+        self.assertTrue(self.media_db.exists("emby", "活动条目", None, None))
+        self.assertFalse(self.media_db.exists("emby", "暂存条目", None, None))
+        self.assertEqual(2, self._count_items())
+        self.assertEqual(1, self.media_db.cleanup_sync_generations(lease))
         self.assertEqual(1, self._count_items())
 
     def test_legacy_items_without_statistics_remain_active_until_first_publish(self):
