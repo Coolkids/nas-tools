@@ -1,3 +1,5 @@
+import time
+
 from app.utils import ExceptionUtils
 from app.utils.types import MediaServerType
 
@@ -200,9 +202,22 @@ class Plex(_IMediaClient):
             page_size = MEDIA_SYNC_PAGE_SIZE
             start_index = 0
             while True:
-                page = section.all(container_start=start_index,
-                                   container_size=page_size,
-                                   maxresults=page_size)
+                page = None
+                last_error = None
+                for attempt in range(3):
+                    try:
+                        page = section.all(container_start=start_index,
+                                           container_size=page_size,
+                                           maxresults=page_size)
+                        if page is None:
+                            raise RuntimeError("Plex 未返回分页数据")
+                        break
+                    except Exception as error:
+                        last_error = error
+                        if attempt < 2:
+                            time.sleep(0.2 * (2 ** attempt))
+                else:
+                    raise RuntimeError("Plex 媒体条目分页请求失败，已重试 3 次") from last_error
                 if not page:
                     break
                 for item in page:

@@ -1,4 +1,28 @@
+import time
 from abc import ABCMeta, abstractmethod
+
+import requests
+
+
+def _get_media_sync_page(url, client_name, request_utils, attempts=3):
+    """对媒体全量同步的瞬时网络错误和服务端拥塞作有限重试。"""
+    last_error = None
+    attempts = max(1, int(attempts))
+    for attempt in range(attempts):
+        try:
+            response = request_utils().get_res(url)
+        except requests.exceptions.RequestException as error:
+            last_error = error
+        else:
+            if response is None:
+                last_error = RuntimeError("远程服务未返回分页响应")
+            elif response.status_code in {408, 429} or response.status_code >= 500:
+                last_error = RuntimeError(f"远程服务返回 HTTP {response.status_code}")
+            else:
+                return response
+        if attempt + 1 < attempts:
+            time.sleep(min(0.2 * (2 ** attempt), 1.0))
+    raise RuntimeError(f"{client_name} 条目分页请求失败，已重试 {attempts} 次") from last_error
 
 
 MEDIA_SYNC_PAGE_SIZE = 500

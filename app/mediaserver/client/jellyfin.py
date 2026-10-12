@@ -3,7 +3,8 @@ from urllib.parse import urlencode
 
 import log
 from config import Config
-from app.mediaserver.client._base import _IMediaClient, MEDIA_SYNC_PAGE_SIZE
+from app.mediaserver.client._base import (_IMediaClient, MEDIA_SYNC_PAGE_SIZE,
+                                          _get_media_sync_page)
 from app.utils.types import MediaServerType
 from app.utils import RequestUtils, SystemUtils, ExceptionUtils
 
@@ -404,7 +405,7 @@ class Jellyfin(_IMediaClient):
                     "Fields": "Path,ProviderIds,OriginalTitle",
                 })
                 req_url = "%sUsers/%s/Items?%s" % (self._host, self._user, params)
-                res = RequestUtils().get_res(req_url)
+                res = _get_media_sync_page(req_url, "Jellyfin", RequestUtils)
                 if not res or res.status_code != 200:
                     raise RuntimeError("Jellyfin 条目分页请求失败")
                 payload = res.json()

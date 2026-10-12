@@ -65,9 +65,34 @@ class MediaClientPaginationTest(TestCase):
         response = Mock()
         response.get_res.return_value = SimpleNamespace(status_code=503)
 
-        with patch("app.mediaserver.client.emby.RequestUtils", return_value=response):
+        with patch("app.mediaserver.client.emby.RequestUtils", return_value=response), \
+                patch("app.mediaserver.client._base.time.sleep"):
             with self.assertRaisesRegex(RuntimeError, "分页请求失败"):
                 list(client.get_items("movies"))
+        self.assertEqual(3, response.get_res.call_count)
+
+    def test_http_page_retries_transient_server_failure_and_continues_pagination(self):
+        for client_type, host in ((Emby, "http://emby/"), (Jellyfin, "http://jellyfin/")):
+            with self.subTest(client=client_type.__name__):
+                client = object.__new__(client_type)
+                client._host = host
+                client._user = "user"
+                client._apikey = "api-key"
+                client.server_type = client_type.server_type
+                result = {"Id": "movie-1", "Type": "Movie", "Name": "电影",
+                          "ParentId": "movies", "ProductionYear": 2024}
+                response = Mock()
+                response.get_res.side_effect = [
+                    SimpleNamespace(status_code=503),
+                    self._page_response([result], 1),
+                ]
+                with patch(f"{client_type.__module__}.RequestUtils", return_value=response), \
+                        patch("app.mediaserver.client._base.time.sleep"):
+                    items = list(client.get_items("movies"))
+
+                self.assertEqual(1, len(items))
+                self.assertEqual("movie-1", items[0]["id"])
+                self.assertEqual(2, response.get_res.call_count)
 
     def test_plex_reads_multiple_bounded_pages(self):
         client = object.__new__(Plex)
@@ -90,3 +115,19 @@ class MediaClientPaginationTest(TestCase):
         self.assertEqual([500, 500], [call.kwargs["container_size"]
                                       for call in section.all.call_args_list])
         self.assertEqual("last", items[-1]["id"])
+
+    def test_plex_page_retries_transient_remote_failure(self):
+        client = object.__new__(Plex)
+        result = SimpleNamespace(key="movie-1", librarySectionID=1, type="movie",
+                                 title="电影", year=2024)
+        section = Mock()
+        section.all.side_effect = [RuntimeError("temporary server failure"), [result]]
+        client._plex = SimpleNamespace(
+            library=SimpleNamespace(sectionByID=Mock(return_value=section)))
+
+        with patch("app.mediaserver.client.plex.time.sleep"):
+            items = list(client.get_items(1))
+
+        self.assertEqual(1, len(items))
+        self.assertEqual("movie-1", items[0]["id"])
+        self.assertEqual(2, section.all.call_count)
