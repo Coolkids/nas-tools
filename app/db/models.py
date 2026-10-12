@@ -1,7 +1,7 @@
 # coding: utf-8
 import hashlib
 
-from sqlalchemy import Column, Float, Index, Integer, String, Text, event, text
+from sqlalchemy import BigInteger, Column, Float, Index, Integer, String, Text, event, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import deferred
 from sqlalchemy.dialects.mysql import LONGTEXT
@@ -577,6 +577,22 @@ class MEDIASYNCSTATISTIC(BaseMedia):
     MOVIE_COUNT = Column(Text)
     TV_COUNT = Column(Text)
     UPDATE_TIME = Column(Text)
+
+
+class MEDIASYNCSYNCJOB(BaseMedia):
+    """每个媒体服务器至多一个有效的全量同步租约。"""
+    __tablename__ = "MEDIASYNC_SYNC_JOBS"
+    __table_args__ = (Index("UN_INDX_MEDIASYNC_SYNC_JOBS_JOB_ID", "JOB_ID", unique=True),)
+
+    SERVER = Column(String(128), primary_key=True)
+    JOB_ID = Column(String(64), nullable=False)
+    GENERATION_ID = Column(String(64), nullable=False)
+    LEASE_TOKEN = Column(BigInteger, nullable=False)
+    LEASE_UNTIL = Column(Float, nullable=False)
+    EXPECTED_ACTIVE_GENERATION = Column(String(64))
+    STATUS = Column(String(32), nullable=False)
+    CREATED_AT = Column(Float, nullable=False)
+    UPDATED_AT = Column(Float, nullable=False)
 
 
 class DATABASEMIGRATIONMARKER(Base):

@@ -3,7 +3,7 @@
 from app.db.models import Base
 
 
-MEDIA_TABLES = frozenset({"MEDIASYNC_ITEMS", "MEDIASYNC_STATISTICS"})
+MEDIA_TABLES = frozenset({"MEDIASYNC_ITEMS", "MEDIASYNC_STATISTICS", "MEDIASYNC_SYNC_JOBS"})
 LOGICAL_DOMAIN_TABLES = {
     "main": frozenset(set(Base.metadata.tables) - MEDIA_TABLES),
     "media": MEDIA_TABLES,

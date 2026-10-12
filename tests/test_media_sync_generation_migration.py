@@ -14,6 +14,12 @@ MIGRATION_PATH = Path(__file__).resolve().parents[1] / "db_scripts" / "versions"
 SPEC = importlib.util.spec_from_file_location("media_sync_generation_migration", MIGRATION_PATH)
 MIGRATION = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MIGRATION)
+LEASE_MIGRATION_PATH = Path(__file__).resolve().parents[1] / "db_scripts" / "versions" / \
+    "f3a4b5c6d7e8_media_sync_job_leases.py"
+LEASE_SPEC = importlib.util.spec_from_file_location("media_sync_job_lease_migration",
+                                                   LEASE_MIGRATION_PATH)
+LEASE_MIGRATION = importlib.util.module_from_spec(LEASE_SPEC)
+LEASE_SPEC.loader.exec_module(LEASE_MIGRATION)
 
 
 class MediaSyncGenerationMigrationTest(TestCase):
@@ -67,3 +73,20 @@ class MediaSyncGenerationMigrationTest(TestCase):
         self.assertNotIn("UN_INDX_MEDIASYNC_ITEMS_SERVER_ITEM", indexes)
         self.assertNotIn("ix_MEDIASYNC_STATISTICS_SERVER", stats_indexes)
         self.assertTrue(stats_indexes["UN_INDX_MEDIASYNC_STATISTICS_SERVER"]["unique"])
+
+    def test_job_lease_migration_is_repeatable_and_enforces_unique_job_ids(self):
+        engine = sa.create_engine("sqlite:///:memory:")
+        with engine.begin() as connection:
+            with Operations.context(MigrationContext.configure(connection)):
+                LEASE_MIGRATION.upgrade()
+                LEASE_MIGRATION.upgrade()
+            inspector = sa.inspect(connection)
+            self.assertIn("MEDIASYNC_SYNC_JOBS", inspector.get_table_names())
+            columns = {column["name"] for column in inspector.get_columns("MEDIASYNC_SYNC_JOBS")}
+            indexes = {index["name"]: index for index in inspector.get_indexes(
+                "MEDIASYNC_SYNC_JOBS")}
+            self.assertEqual({"SERVER", "JOB_ID", "GENERATION_ID", "LEASE_TOKEN",
+                              "LEASE_UNTIL", "EXPECTED_ACTIVE_GENERATION", "STATUS",
+                              "CREATED_AT", "UPDATED_AT"}, columns)
+            self.assertTrue(indexes["UN_INDX_MEDIASYNC_SYNC_JOBS_JOB_ID"]["unique"])
+        engine.dispose()

@@ -1,9 +1,11 @@
 import time
+import uuid
 from contextlib import contextmanager
 from sqlalchemy import text, or_
+from sqlalchemy.exc import IntegrityError
 
 from app.db.models import (Base, MEDIA_SYNC_LEGACY_GENERATION, MEDIASYNCITEMS,
-                           MEDIASYNCSTATISTIC)
+                           MEDIASYNCSYNCJOB, MEDIASYNCSTATISTIC)
 from app.db.manager import DATABASE
 from app.utils import ExceptionUtils
 
@@ -66,6 +68,118 @@ class MediaDb:
         except Exception:
             self.session.rollback()
             raise
+
+    @staticmethod
+    def _lease_payload(job):
+        return {
+            "server": job.SERVER,
+            "job_id": job.JOB_ID,
+            "generation_id": job.GENERATION_ID,
+            "lease_token": int(job.LEASE_TOKEN),
+            "expected_active_generation": job.EXPECTED_ACTIVE_GENERATION,
+            "lease_until": float(job.LEASE_UNTIL),
+        }
+
+    def acquire_sync_lease(self, server_type, lease_seconds=60):
+        """原子取得或接管过期的服务器同步租约，返回带 fencing token 的作业凭证。"""
+        if not server_type:
+            return None
+        server_type = str(server_type).strip()
+        if not server_type:
+            return None
+        now = time.time()
+        try:
+            with self.transaction() as session:
+                job = session.query(MEDIASYNCSYNCJOB).filter(
+                    MEDIASYNCSYNCJOB.SERVER == server_type).with_for_update().first()
+                if job and float(job.LEASE_UNTIL) > now:
+                    return None
+                statistic = session.query(MEDIASYNCSTATISTIC).filter(
+                    MEDIASYNCSTATISTIC.SERVER == server_type).with_for_update().first()
+                expected_generation = statistic.ACTIVE_GENERATION if statistic else None
+                payload = {
+                    "server": str(server_type),
+                    "job_id": uuid.uuid4().hex,
+                    "generation_id": uuid.uuid4().hex,
+                    "lease_token": int(job.LEASE_TOKEN) + 1 if job else 1,
+                    "expected_active_generation": expected_generation,
+                    "lease_until": now + max(1.0, float(lease_seconds)),
+                }
+                if job:
+                    job.JOB_ID = payload["job_id"]
+                    job.GENERATION_ID = payload["generation_id"]
+                    job.LEASE_TOKEN = payload["lease_token"]
+                    job.LEASE_UNTIL = payload["lease_until"]
+                    job.EXPECTED_ACTIVE_GENERATION = expected_generation
+                    job.STATUS = "FETCHING"
+                    job.CREATED_AT = now
+                    job.UPDATED_AT = now
+                else:
+                    session.add(MEDIASYNCSYNCJOB(
+                        SERVER=payload["server"],
+                        JOB_ID=payload["job_id"],
+                        GENERATION_ID=payload["generation_id"],
+                        LEASE_TOKEN=payload["lease_token"],
+                        LEASE_UNTIL=payload["lease_until"],
+                        EXPECTED_ACTIVE_GENERATION=expected_generation,
+                        STATUS="FETCHING",
+                        CREATED_AT=now,
+                        UPDATED_AT=now,
+                    ))
+            return payload
+        except IntegrityError:
+            # 两个进程同时创建服务器首个租约时，唯一主键只允许一个成功。
+            self.session.rollback()
+            return None
+
+    def renew_sync_lease(self, lease, lease_seconds=60):
+        """仅有效且未过期的持有者可以续租。"""
+        if not isinstance(lease, dict):
+            return False
+        now = time.time()
+        renewed_until = None
+        with self.transaction() as session:
+            job = session.query(MEDIASYNCSYNCJOB).filter(
+                MEDIASYNCSYNCJOB.SERVER == lease.get("server")).with_for_update().first()
+            if (not job or job.JOB_ID != lease.get("job_id")
+                    or job.GENERATION_ID != lease.get("generation_id")
+                    or int(job.LEASE_TOKEN) != lease.get("lease_token")
+                    or float(job.LEASE_UNTIL) <= now):
+                return False
+            renewed_until = now + max(1.0, float(lease_seconds))
+            job.LEASE_UNTIL = renewed_until
+            job.UPDATED_AT = now
+        lease["lease_until"] = renewed_until
+        return True
+
+    def release_sync_lease(self, lease, status="FAILED"):
+        """释放当前凭证；过期或被接管的旧任务不能修改新租约状态。"""
+        if not isinstance(lease, dict):
+            return False
+        now = time.time()
+        with self.transaction() as session:
+            job = session.query(MEDIASYNCSYNCJOB).filter(
+                MEDIASYNCSYNCJOB.SERVER == lease.get("server")).with_for_update().first()
+            if (not job or job.JOB_ID != lease.get("job_id")
+                    or job.GENERATION_ID != lease.get("generation_id")
+                    or int(job.LEASE_TOKEN) != lease.get("lease_token")):
+                return False
+            job.STATUS = str(status)[:32]
+            job.LEASE_UNTIL = 0
+            job.UPDATED_AT = now
+            return True
+
+    def sync_lease_is_current(self, lease, session=None):
+        """校验租约身份与有效期；写入批次可传入已锁定的事务会话。"""
+        if not isinstance(lease, dict):
+            return False
+        session = session or self.session
+        job = session.query(MEDIASYNCSYNCJOB).filter(
+            MEDIASYNCSYNCJOB.SERVER == lease.get("server")).with_for_update().first()
+        return bool(job and job.JOB_ID == lease.get("job_id")
+                    and job.GENERATION_ID == lease.get("generation_id")
+                    and int(job.LEASE_TOKEN) == lease.get("lease_token")
+                    and float(job.LEASE_UNTIL) > time.time())
 
     def insert_many(self, server_type, items):
         """批量插入媒体记录，提交由调用方负责。"""
