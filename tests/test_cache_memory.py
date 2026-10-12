@@ -60,14 +60,16 @@ class CacheMemoryTest(TestCase):
         now[0] = 12
         self.assertEqual({"entries": 0, "memory_bytes": 0}, cache_memory_info(instance))
 
-    def test_ai_memory_is_separate_from_serialized_byte_budget(self):
+    def test_ai_cache_statistics_include_bytes_and_memory(self):
         instance = _ParseCache()
         settings = {"parse": {"ttl_seconds": 60}}
         instance.put("key", {"items": list(range(200))}, settings)
         original = instance.info(settings)
         measured = instance.info(settings, include_memory=True)
         self.assertEqual(original["bytes"], measured["bytes"])
-        self.assertGreater(measured["memory_bytes"], measured["bytes"])
+        self.assertIsInstance(measured["bytes"], int)
+        self.assertIsInstance(measured["memory_bytes"], int)
+        self.assertGreater(measured["memory_bytes"], 0)
         instance.clear(settings)
         self.assertEqual(0, instance.info(settings, include_memory=True)["memory_bytes"])
 

@@ -11,9 +11,9 @@ import pytest
 import redis
 from redis.backoff import NoBackoff
 from redis.retry import Retry
-from cachelib import SimpleCache, FileSystemCache, RedisCache, ValkeyCache
+from cachelib import SimpleCache, RedisCache, ValkeyCache
 
-from app.utils.cache_backend import CacheStore, PREFIX
+from app.utils.cache_backend import CacheStore, PREFIX, _SQLiteCache
 from app.utils.persistent_cache import PersistentCache
 
 
@@ -29,12 +29,12 @@ def test_memory_mode_never_writes_disk_and_copies_values(tmp_path):
     assert CacheStore(str(tmp_path / "cache"), settings={"backend": "memory"}).get("test", "a") is None
 
 
-def test_disk_mode_uses_cachelib_and_other_process_changes_invalidate_memory(tmp_path):
+def test_disk_mode_uses_sqlite_and_other_process_changes_invalidate_memory(tmp_path):
     path = str(tmp_path / "cache")
     first = CacheStore(path, settings={"backend": "memory_disk"})
     second = CacheStore(path, settings={"backend": "memory_disk"})
     first.put("test", "a", {"items": [1]}, time.time() + 60)
-    assert isinstance(first._backends["test"][1], FileSystemCache)
+    assert isinstance(first._backends["test"][1], _SQLiteCache)
     assert second.get("test", "a")[1] == {"items": [1]}
     second.put("test", "a", {"items": [2]}, time.time() + 60)
     assert first.get("test", "a")[1] == {"items": [2]}
@@ -42,19 +42,21 @@ def test_disk_mode_uses_cachelib_and_other_process_changes_invalidate_memory(tmp
     assert first.get("test", "a") is None
 
 
-def test_configuration_changes_take_effect_without_recreating_cache(tmp_path):
+def test_configuration_changes_wait_for_controlled_restart(tmp_path):
     settings = {"backend": "memory"}
     store = CacheStore(str(tmp_path / "cache"), settings=settings)
     cache = PersistentCache("test", store=store)
     cache.set("before", 1)
     settings["backend"] = "memory_disk"
-    assert cache.get("before") is None
+    assert cache.get("before") == 1
+    assert store.status()["restart_required"]
+    assert store.status()["pending_backend"] == "memory_disk"
+    assert store.status()["backend"] == "memory"
     cache.set("after", 2)
-    restored = CacheStore(str(tmp_path / "cache"), settings={"backend": "memory_disk"})
-    assert restored.get("test", "after")[1] == 2
+    assert store.status()["backend"] == "memory"
 
 
-def test_ai_cache_revalidates_persisted_settings_when_switching_back_to_disk(tmp_path):
+def test_ai_cache_ignores_pending_backend_change_and_revalidates_cache_settings(tmp_path):
     from app.media.recognition.cache import CACHE_MISS, _ParseCache
 
     settings = {"backend": "memory_disk"}
@@ -64,8 +66,9 @@ def test_ai_cache_revalidates_persisted_settings_when_switching_back_to_disk(tmp
     settings["backend"] = "memory"
     cache.put("new", {"value": 2}, {"parse": {"ttl_seconds": 120}})
     settings["backend"] = "memory_disk"
-    assert cache.info({"parse": {"ttl_seconds": 120}})["entries"] == 0
+    assert cache.info({"parse": {"ttl_seconds": 120}})["entries"] == 1
     assert cache.get("old", {"parse": {"ttl_seconds": 120}}) is CACHE_MISS
+    assert cache.get("new", {"parse": {"ttl_seconds": 120}}) == {"value": 2}
 
 
 def test_invalid_manual_configuration_and_connection_failure_fall_back_without_leaking_password():
@@ -223,10 +226,15 @@ def test_fixing_configuration_after_outage_preserves_pending_invalidation(server
     store = CacheStore(settings=settings)
     try:
         store.put("test", "old", 1)
-        settings["port"] = 1
+        server.stop()
         store.clear("test")
         assert store.status()["fallback"]
+        settings["port"] = 1
+        assert store.status()["restart_required"]
         settings["port"] = server.port
+        assert not store.status()["restart_required"]
+        server.start()
+        store._retry_at = 0
         assert store.get("test", "old") is None
         assert store.status()["backend"] == "valkey"
     finally:

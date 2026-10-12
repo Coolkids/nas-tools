@@ -44,43 +44,31 @@ class RecognitionCacheTest(TestCase):
             self.assertIs(cache.CACHE_MISS, cache.get("parse", "same"))
             self.assertFalse(cache.put("parse", "new", {"ok": True}))
 
-    def test_parse_cache_enforces_entry_and_byte_limits_with_lru_eviction(self):
+    def test_parse_cache_ignores_legacy_capacity_limits(self):
         store = cache._ParseCache()
         settings = {"enabled": True, "parse": {
             "enabled": True, "ttl_seconds": 60, "max_entries": 2,
             "max_bytes": 100, "max_entry_bytes": 60, "singleflight": True,
         }}
-        self.assertTrue(store.put("a", {"x": 1}, settings))
-        self.assertTrue(store.put("b", {"x": 2}, settings))
-        self.assertEqual({"x": 1}, store.get("a", settings))  # a 成为最近使用项
-        self.assertTrue(store.put("c", {"x": 3}, settings))
-        self.assertIs(cache.CACHE_MISS, store.get("b", settings))
-        self.assertEqual({"entries": 2, "bytes": store.info(settings)["bytes"],
-                          "generation": store.info(settings)["generation"],
-                          "enabled": True, "ttl_seconds": 60, "max_entries": 2,
-                          "max_bytes": 100, "max_entry_bytes": 60,
-                          "singleflight": True}, store.info(settings))
+        large = {"payload": "x" * 1024}
+        for key, value in (("a", {"x": 1}), ("b", {"x": 2}), ("large", large)):
+            self.assertTrue(store.put(key, value, settings))
+        self.assertEqual({"x": 1}, store.get("a", settings))
+        self.assertEqual({"x": 2}, store.get("b", settings))
+        self.assertEqual(large, store.get("large", settings))
+        self.assertEqual(3, store.info(settings)["entries"])
+        self.assertGreater(store.info(settings)["bytes"], 100)
+        self.assertIsNone(store.info(settings)["max_entries"])
+        self.assertIsNone(store.info(settings)["max_bytes"])
 
-    def test_parse_cache_evicts_until_total_byte_budget_is_met(self):
-        store = cache._ParseCache()
-        settings = {"parse": {"enabled": True, "ttl_seconds": 60,
-                              "max_entries": 5, "max_bytes": 60,
-                              "max_entry_bytes": 40}}
-        first = {"text": "a" * 25}
-        second = {"text": "b" * 25}
-        self.assertTrue(store.put("first", first, settings))
-        self.assertTrue(store.put("second", second, settings))
-        self.assertLessEqual(store.info(settings)["bytes"], 60)
-        self.assertEqual({"text": "b" * 25}, store.get("second", settings))
-        self.assertIs(cache.CACHE_MISS, store.get("first", settings))
-
-    def test_parse_cache_rejects_oversized_entry_and_respects_ttl(self):
+    def test_parse_cache_accepts_legacy_oversized_entry_and_respects_ttl(self):
         store = cache._ParseCache()
         settings = {"parse": {"enabled": True, "ttl_seconds": 1,
                               "max_entries": 2, "max_bytes": 100,
                               "max_entry_bytes": 10}}
-        self.assertFalse(store.put("large", {"text": "too large"}, settings))
-        self.assertIs(cache.CACHE_MISS, store.get("large", settings))
+        large = {"text": "x" * 1024}
+        self.assertTrue(store.put("large", large, settings))
+        self.assertEqual(large, store.get("large", settings))
         now = [10]
         with patch("app.media.recognition.cache.time.time", side_effect=lambda: now[0]):
             self.assertTrue(store.put("short", {"x": 1}, settings))

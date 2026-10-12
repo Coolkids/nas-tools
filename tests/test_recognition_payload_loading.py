@@ -35,6 +35,10 @@ class RecognitionPayloadLoadingTest(unittest.TestCase):
             def query(*models):
                 return session.query(*models)
 
+            @staticmethod
+            def commit():
+                session.commit()
+
         previous_db = DbHelper._db
         DbHelper._db = TestDb()
         try:

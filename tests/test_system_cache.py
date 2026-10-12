@@ -149,9 +149,12 @@ store.close()
 
     def test_corrupt_entry_does_not_hide_valid_entries(self):
         self.make_cache().set("good", 1)
+        self.store.put("test", "broken", "unused", time.time() + 60)
         disk = self.store._backends["test"][1]
-        with open(disk._get_filename("broken"), "wb") as stream:
-            stream.write(b"broken")
+        with disk._connection() as connection:
+            connection.execute("UPDATE cache_entries_v2 SET payload=? "
+                               "WHERE namespace=? AND cache_key=?",
+                               (b"broken", "test", self.store._key("broken")))
         self.assertEqual({"good": 1}, self.make_cache().copy())
 
     def test_concurrent_writes_recover_all_entries(self):
@@ -198,7 +201,9 @@ class SystemCacheApiTest(TestCase):
         self.assertIn("recognition_parse", [item["name"] for item in result["caches"]])
 
     def test_clear_one_does_not_clear_other_caches(self):
-        first, second = Cache(), Cache()
+        store = CacheStore(settings={"backend": "memory"})
+        first = PersistentCache("first", store=store)
+        second = PersistentCache("second", store=store)
         first.set("a", 1)
         second.set("b", 2)
         with patch.object(system_cache, "_caches", return_value={"first": first, "second": second}):
@@ -206,6 +211,7 @@ class SystemCacheApiTest(TestCase):
         self.assertEqual({"code": 0, "cleared_entries": 1}, result)
         self.assertEqual(0, len(first))
         self.assertEqual(1, len(second))
+        store.close()
 
     def test_invalid_name_never_clears_anything(self):
         instance = Mock()
@@ -216,7 +222,8 @@ class SystemCacheApiTest(TestCase):
         instance.clear.assert_not_called()
 
     def test_clear_all_covers_memory_disk_and_recognition(self):
-        instance = Cache()
+        store = CacheStore(settings={"backend": "memory"})
+        instance = PersistentCache("test", store=store)
         instance.set("a", 1)
         helper = Mock()
         helper.cache_info.return_value = {"entries": 4}
@@ -229,6 +236,7 @@ class SystemCacheApiTest(TestCase):
         self.assertEqual(0, len(instance))
         self.assertEqual({"parse", "tmdb", "decision"}, {call.args[0] for call in clear.call_args_list})
         helper.clear_meta_data.assert_called_once()
+        store.close()
 
     def test_cache_actions_require_login(self):
         from web.main import App

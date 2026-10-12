@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from sqlalchemy import create_engine, inspect, text
@@ -23,7 +24,7 @@ class SiteAccountStatisticsRemovalTest(unittest.TestCase):
                 "('SystemConfig', 'CookieUserInfo', '{\"username\":\"old\"}')"))
 
         try:
-            with patch.object(main_db, "_Engine", engine), \
+            with patch.object(main_db, "DATABASE", SimpleNamespace(engine=engine)), \
                     patch.object(main_db.MainDb, "wal_checkpoint"):
                 main_db.MainDb.init_db()
 

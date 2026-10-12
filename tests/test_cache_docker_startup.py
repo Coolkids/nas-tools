@@ -68,7 +68,7 @@ def test_entrypoint_creates_missing_cache_directory_and_valid_valkey_configurati
             client.connection_pool.disconnect()
 
 
-def test_cache_configuration_validation_does_not_save_invalid_values():
+def test_cache_settings_cannot_bypass_migration_workflow():
     from unittest.mock import Mock, patch
     from copy import deepcopy
     from config import Config
@@ -87,9 +87,6 @@ def test_cache_configuration_validation_does_not_save_invalid_values():
         result = action._WebAction__update_config({"cache.backend": "valkey", "cache.port": "6380",
                                                    "cache.db": "2", "cache.auth_mode": "password",
                                                    "cache.password": "test-password", "cache.connect_timeout": "0.5"})
-        assert result["code"] == 0
-        saved = configuration.save_config.call_args.args[0]["cache"]
-        assert saved["port"] == 6380
-        assert saved["db"] == 2
-        assert saved["connect_timeout"] == 0.5
-        assert saved["password"] == "test-password"
+        assert result["code"] == 1
+        assert "迁移" in result["msg"]
+        configuration.save_config.assert_not_called()

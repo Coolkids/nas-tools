@@ -535,7 +535,7 @@ class CacheStore:
             logger.warning("%s，缓存降级到内存", self._reason)
 
     def _mark_dirty(self, namespace):
-        if self._settings.get("backend") in {"redis", "valkey"} and self._actual == "memory":
+        if self._settings.get("backend") in ("redis", "valkey") and self._actual == "memory":
             self._dirty.add(namespace)
 
     @property
@@ -770,8 +770,25 @@ class CacheStore:
                     logger.warning("旧缓存导入失败：%s", namespace)
         memory, disk = self._backends[namespace]
         if disk is not None:
-            self._disk_stamps[namespace] = os.stat(disk._path).st_mtime_ns
+            stamp = self._disk_stamp(disk._path)
+            previous = self._disk_stamps.get(namespace)
+            if previous is not None and previous != stamp:
+                # SQLite 可由其他进程写入；丢弃本进程的副本后再从持久层读取。
+                memory.clear()
+                self._revision += 1
+            self._disk_stamps[namespace] = stamp
         return self._backends[namespace]
+
+    @staticmethod
+    def _disk_stamp(path):
+        stamp = []
+        for filename in (path, path + "-wal"):
+            try:
+                item = os.stat(filename)
+                stamp.append((item.st_mtime_ns, item.st_size))
+            except FileNotFoundError:
+                stamp.append(None)
+        return tuple(stamp)
 
     def _migrate(self, namespace, disk, mark_imported=True):
         """导入旧文件/SQLite 缓存；完成标记保存在清理缓存不会删除的目录。"""
@@ -1038,18 +1055,24 @@ class CacheStore:
         return max(1, math.ceil(expires - time.time()) + 1) if expires is not None else 0
 
     def _call(self, namespace, operation, blocked=None):
+        def invoke(memory, disk):
+            result = operation(memory, disk)
+            if disk is not None:
+                self._disk_stamps[namespace] = self._disk_stamp(disk._path)
+            return result
+
         if not self._maintenance_enabled:
             with self._lock:
                 self._sync()
                 memory, disk = self._backend(namespace)
                 try:
-                    return operation(memory, disk)
+                    return invoke(memory, disk)
                 except REMOTE_ERRORS as error:
                     if self._actual not in {"redis", "valkey"}:
                         raise
                     self._fallback(error)
                     memory, disk = self._backend(namespace)
-                    return operation(memory, disk)
+                    return invoke(memory, disk)
         if self._is_frozen() and not STORAGE_JOBS.owns_exclusive_lock():
             return blocked
         with STORAGE_JOBS.maintenance_lock(exclusive=False):
@@ -1059,13 +1082,13 @@ class CacheStore:
                     return blocked
                 memory, disk = self._backend(namespace)
                 try:
-                    return operation(memory, disk)
+                    return invoke(memory, disk)
                 except REMOTE_ERRORS as error:
                     if self._actual not in {"redis", "valkey"}:
                         raise
                     self._fallback(error)
                     memory, disk = self._backend(namespace)
-                    return operation(memory, disk)
+                    return invoke(memory, disk)
 
     def get(self, namespace, key):
         wire_key = self._key(key)

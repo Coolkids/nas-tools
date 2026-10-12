@@ -14,5 +14,5 @@ os.environ.setdefault("NASTOOL_CONFIG", _config_path)
 def initialize_test_databases():
     from app.db import init_db, update_db
 
-    init_db()
     update_db()
+    init_db()

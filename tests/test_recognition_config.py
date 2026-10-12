@@ -279,7 +279,6 @@ class RecognitionConfigTest(TestCase):
                 {"recognition.execution.total_timeout_seconds": 301},
                 {"recognition.execution.max_inflight_provider_requests": 0},
                 {"recognition.cache.parse.ttl_seconds": 0},
-                {"recognition.cache.parse.max_entry_bytes": 70000000},
                 {"recognition.profiles.parse_only.tmdb_allowed": True},
                 {"recognition.profiles.resolve.providers": ["anitopy_ml"]},
                 {"recognition.providers.anitopy_ml.reliability": 1.1}):
