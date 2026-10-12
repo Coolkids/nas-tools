@@ -585,12 +585,14 @@ def prepare_sqlite_migration_target(values):
         return {"code": 1, "msg": str(error)}
 
 
-def _snapshot_sqlite_file(source_path, target_path):
-    uri = f"file:{os.path.abspath(source_path)}?mode=ro"
-    source = sqlite3.connect(uri, uri=True, timeout=30)
+def _snapshot_sqlite_file(source_path, target_path, source_connection=None):
+    owns_source = source_connection is None
+    if source_connection is None:
+        uri = f"file:{os.path.abspath(source_path)}?mode=ro"
+        source_connection = sqlite3.connect(uri, uri=True, timeout=30)
     target = sqlite3.connect(target_path, timeout=30)
     try:
-        source.backup(target, pages=1000, sleep=0.01)
+        source_connection.backup(target, pages=1000, sleep=0.01)
         target.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         target.commit()
         result = target.execute("PRAGMA integrity_check").fetchone()
@@ -598,7 +600,8 @@ def _snapshot_sqlite_file(source_path, target_path):
             raise RuntimeError(f"SQLite 备份完整性检查失败：{source_path}")
     finally:
         target.close()
-        source.close()
+        if owns_source:
+            source_connection.close()
 
 
 def _sqlite_integrity(path):
@@ -610,6 +613,24 @@ def _sqlite_integrity(path):
             raise RuntimeError(f"SQLite 完整性检查失败：{path}")
     finally:
         connection.close()
+
+
+def _lock_sqlite_source(path, timeout=5):
+    """Hold a writer-excluding lock while an old SQLite file is snapshotted and retired."""
+    connection = sqlite3.connect(path, timeout=timeout, isolation_level=None)
+    try:
+        connection.execute(f"PRAGMA busy_timeout={max(1, int(timeout * 1000))}")
+        connection.execute("BEGIN EXCLUSIVE")
+        integrity = connection.execute("PRAGMA integrity_check").fetchone()
+        if integrity != ("ok",):
+            raise RuntimeError(f"待退役 SQLite 文件完整性检查失败：{path}")
+        return connection
+    except sqlite3.Error as error:
+        connection.close()
+        raise RuntimeError(f"SQLite 文件仍被其他进程占用，拒绝准备目标：{path}") from error
+    except Exception:
+        connection.close()
+        raise
 
 
 def _issue_prepared_check(job_id, candidate, payload, archive, manifest):
@@ -715,6 +736,7 @@ def _recover_target_preparation(job):
 
 
 def _run_target_preparation(job_id, candidate):
+    sqlite_locks = []
     try:
         with STORAGE_JOBS.maintenance_lock(exclusive=True):
             job = STORAGE_JOBS.get(job_id)
@@ -737,6 +759,8 @@ def _run_target_preparation(job_id, candidate):
                 expected_identity = (payload.get("target_file_identities") or {}).get(path)
                 if _sqlite_file_set_identity(path) != expected_identity:
                     raise ValueError(f"检查后 SQLite 文件身份发生变化：{path}")
+            for path in current_files:
+                sqlite_locks.append(_lock_sqlite_source(path))
             archive = os.path.join(config_path, ".maintenance", "database-retired", job_id)
             _secure_directory(os.path.dirname(archive))
             os.makedirs(archive, mode=0o700, exist_ok=False)
@@ -757,7 +781,8 @@ def _run_target_preparation(job_id, candidate):
                 before = _sqlite_file_set_identity(path)
                 _sqlite_integrity(path)
                 backup_path = os.path.join(archive, f"{index}-{os.path.basename(path)}.sqlite3")
-                _snapshot_sqlite_file(path, backup_path)
+                _snapshot_sqlite_file(
+                    path, backup_path, source_connection=sqlite_locks[index - 1])
                 _secure_file(backup_path)
                 after = _sqlite_file_set_identity(path)
                 if before != after:
@@ -786,6 +811,17 @@ def _run_target_preparation(job_id, candidate):
                                     result={"archive": archive, "files": manifest},
                                     message="在删除旧 SQLite 文件前取消；原文件保持不变")
                 return
+            if os.name == "nt":
+                # Windows refuses to unlink an open SQLite database. The identity
+                # is checked again immediately before removal after releasing locks.
+                for connection in reversed(sqlite_locks):
+                    connection.rollback()
+                    connection.close()
+                sqlite_locks.clear()
+                for item in manifest:
+                    if _sqlite_file_set_identity(item["source"]) != item["identity"]:
+                        raise RuntimeError(
+                            f"释放 SQLite 文件锁后文件身份变化：{item['source']}")
             for path in current_files:
                 for suffix in ("-wal", "-shm", ""):
                     try:
@@ -843,6 +879,12 @@ def _run_target_preparation(job_id, candidate):
                                 result=current.get("result"),
                                 message="SQLite 目标准备失败；远程活动数据库配置保持不变")
     finally:
+        for connection in reversed(sqlite_locks):
+            try:
+                connection.rollback()
+            except sqlite3.Error:
+                pass
+            connection.close()
         with _WORKERS_LOCK:
             _WORKERS.pop(job_id, None)
 
