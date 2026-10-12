@@ -4,6 +4,7 @@ import itertools
 import os
 import shutil
 import sqlite3
+import threading
 import time
 
 import pytest
@@ -502,3 +503,98 @@ def test_snapshot_disk_full_failure_keeps_memory_source_available(
     assert not source_store.status()["maintenance"]
     assert not (tmp_path / "cache" / "system.sqlite3").exists()
     assert restart_calls == []
+
+
+def test_target_validation_mismatch_keeps_old_configuration_and_source(
+        tmp_path, monkeypatch, request, cache_migration_environment):
+    config, jobs, restart_calls = cache_migration_environment
+    source_settings = {**DEFAULT_SETTINGS, "backend": "memory"}
+    config.config["cache"] = dict(source_settings)
+    source_store = CacheStore(path=str(tmp_path / "cache"), settings=source_settings)
+    request.addfinalizer(source_store.close)
+    monkeypatch.setattr(cache_migration, "STORE", source_store)
+    monkeypatch.setattr(cache_backend, "STORE", source_store)
+    source_store.initialize()
+    source_store.put("recognition_tmdb", "source-data", {"title": "keep"})
+
+    checked = cache_migration.check_cache_storage({"backend": "memory_disk"})
+    assert "code" not in checked, checked
+    original_iter_records = CacheStore.iter_records
+
+    def add_unexpected_target_record(store, namespace, strict=False):
+        yield from original_iter_records(store, namespace, strict=strict)
+        if store is not source_store and store._settings["backend"] == "memory_disk" \
+                and namespace == "recognition_tmdb":
+            yield "unexpected", {"title": "not in snapshot"}, None
+
+    monkeypatch.setattr(CacheStore, "iter_records", add_unexpected_target_record)
+    started = cache_migration.start_cache_migration({"backend": "memory_disk",
+                                                     "check_id": checked["check_id"]})
+    assert started["code"] == 0, started
+    worker = cache_migration._WORKERS.get(started["job_id"])
+    assert worker is not None
+    worker.join(timeout=30)
+
+    job = jobs.get(started["job_id"])
+    assert job["status"] == "FAILED", job
+    assert "目标校验失败" in job["error"]
+    assert config.config["cache"]["backend"] == "memory"
+    assert source_store.get("recognition_tmdb", "source-data")[1] == {"title": "keep"}
+    assert jobs.maintenance_gate("cache") is None
+    assert not source_store.status()["maintenance"]
+    assert not (tmp_path / "cache" / "system.sqlite3").exists()
+    assert restart_calls == []
+
+
+def test_cache_clear_is_blocked_during_migration_snapshot_and_data_is_preserved(
+        tmp_path, monkeypatch, request, cache_migration_environment):
+    config, jobs, restart_calls = cache_migration_environment
+    source_settings = {**DEFAULT_SETTINGS, "backend": "memory"}
+    config.config["cache"] = dict(source_settings)
+    source_store = CacheStore(path=str(tmp_path / "cache"), settings=source_settings)
+    stores = [source_store]
+    request.addfinalizer(lambda: [store.close() for store in stores])
+    monkeypatch.setattr(cache_migration, "STORE", source_store)
+    monkeypatch.setattr(cache_backend, "STORE", source_store)
+    source_store.initialize()
+    source_store.put("recognition_tmdb", "source-data", {"title": "keep"})
+
+    checked = cache_migration.check_cache_storage({"backend": "memory_disk"})
+    assert "code" not in checked, checked
+    entered_snapshot = threading.Event()
+    continue_snapshot = threading.Event()
+    write_snapshot_namespace = cache_migration._write_snapshot_namespace
+
+    def pause_snapshot(*args, **kwargs):
+        if not entered_snapshot.is_set():
+            entered_snapshot.set()
+            if not continue_snapshot.wait(timeout=15):
+                raise TimeoutError("snapshot test pause timed out")
+        return write_snapshot_namespace(*args, **kwargs)
+
+    monkeypatch.setattr(cache_migration, "_write_snapshot_namespace", pause_snapshot)
+    started = cache_migration.start_cache_migration({"backend": "memory_disk",
+                                                     "check_id": checked["check_id"]})
+    assert started["code"] == 0, started
+    worker = cache_migration._WORKERS.get(started["job_id"])
+    assert worker is not None
+    try:
+        assert entered_snapshot.wait(timeout=10)
+        assert jobs.maintenance_gate("cache")["job_id"] == started["job_id"]
+        source_store.clear("recognition_tmdb")
+    finally:
+        continue_snapshot.set()
+    worker.join(timeout=30)
+
+    assert jobs.get(started["job_id"])["status"] == "RESTART_PENDING"
+    source_store.close()
+    target_store = CacheStore(path=str(tmp_path / "cache"),
+                              settings=dict(config.config["cache"]))
+    stores.append(target_store)
+    monkeypatch.setattr(cache_migration, "STORE", target_store)
+    monkeypatch.setattr(cache_backend, "STORE", target_store)
+    cache_migration.verify_cache_startup()
+
+    assert jobs.get(started["job_id"])["status"] == "SUCCEEDED"
+    assert target_store.get("recognition_tmdb", "source-data")[1] == {"title": "keep"}
+    assert restart_calls == ["scheduled"]
