@@ -1,8 +1,14 @@
 import os
+import multiprocessing
 import signal
 import sys
 import time
 import warnings
+
+# PyInstaller 子进程（例如 multiprocessing 资源跟踪器）必须先处理冻结启动参数，
+# 否则会重新执行完整应用入口并递归创建子进程。
+if getattr(sys, 'frozen', False):
+    multiprocessing.freeze_support()
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer

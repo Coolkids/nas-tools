@@ -227,7 +227,7 @@ database:
 - [x] 使用 SQLAlchemy `URL.create()` 构建连接串，正确处理密码中的特殊字符；日志和 API 只输出脱敏连接信息。
 - [x] `pyproject.toml` 显式声明 SQLAlchemy，新增 PostgreSQL 与 MySQL/MariaDB 驱动并更新 `uv.lock`。
   - [x] 在项目 Python 3.14.4 环境验证依赖和测试可用性；PyInstaller 6.22.2 命令可用。
-  - [ ] PyInstaller 实际产物构建及隔离运行验收。
+  - [x] PyInstaller 6.22.2 Linux x86_64 onedir 产物在隔离配置目录启动，`/index` 健康检查和 SIGTERM 退出通过；冻结入口增加 `freeze_support()`，Windows 可执行文件仍未构建。
 - [x] PostgreSQL 采用 `postgresql+psycopg` 同步驱动，符合当前同步业务模型。[SQLAlchemy PostgreSQL 驱动说明](https://docs.sqlalchemy.org/en/20/dialects/postgresql.html#module-sqlalchemy.dialects.postgresql.psycopg)
 - [x] MySQL 采用 `mysql+pymysql`，MariaDB 采用 `mariadb+pymysql`，设置 `utf8mb4`，并由后端分别识别服务端产品。[SQLAlchemy MariaDB 连接方式](https://docs.sqlalchemy.org/en/20/dialects/mysql.html#mariadb-only-mode)
   - [x] 分别连接真实 MySQL 与 MariaDB 服务执行隔离契约和空库 schema 初始化验收（见第 8 节）；完整业务迁移/恢复矩阵仍待验收。

@@ -80,7 +80,7 @@ SQLite 的文件名和目录由后端固定生成，不能在设置页或 API �
 
 完整后台备份/恢复仍未完成端到端验收。本次已对隔离远程库实际生成归档并运行低层导入，但未通过上传、检查、维护锁、恢复任务、原子发布和受控重启全链路恢复。暂不记录端到端恢复耗时；正式启用恢复前仍需在隔离副本完成任务生命周期、损坏包和中断回滚验收。
 
-直接运行 smoke test 使用临时配置目录和 SQLite，验证 `/index`、登录以及 SIGINT 停止。PyInstaller 6.22.2 命令已安装，但未构建可执行产物。`docker compose -f docker/compose.yml config --quiet` 静态检查通过；Docker CLI 可用，但当前执行用户无法访问 daemon socket，镜像构建、Supervisor 容器启动和容器内受控重启均未验证。前端 `npm run type-check` 与 `npm run build` 已通过；浏览器空状态布局已按上文验证，真实 API、可访问性和迁移/恢复交互仍待验收。
+直接运行 smoke test 使用临时配置目录和 SQLite，验证 `/index`、登录以及 SIGINT 停止。PyInstaller 6.22.2 Linux x86_64 onedir 产物在另一临时配置目录启动，数据库升级/初始化、`/index` 健康检查及 SIGTERM 退出通过；冻结入口通过 `multiprocessing.freeze_support()` 避免资源跟踪器递归启动。Windows 可执行文件未构建。`docker compose -f docker/compose.yml config --quiet` 静态检查通过；Docker CLI 可用，但当前执行用户无法访问 daemon socket，镜像构建、Supervisor 容器启动和容器内受控重启均未验证。前端 `npm run type-check` 与 `npm run build` 已通过；浏览器空状态布局已按上文验证，真实 API、可访问性和迁移/恢复交互仍待验收。
 
 运行本地测试：
 
