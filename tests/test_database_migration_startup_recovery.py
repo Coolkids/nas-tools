@@ -57,7 +57,7 @@ class DatabaseMigrationStartupRecoveryTest(TestCase):
         jobs = Mock()
         with patch("app.db.migration.STORAGE_JOBS", jobs), \
                 patch("app.db.manager.DATABASE._engine", None), \
-                patch("app.utils.cache_migration._schedule_restart") as schedule:
+                patch("app.db.migration.schedule_restart") as schedule:
             pending = {
                 "job_id": self.job_id,
                 "payload": {"source_fingerprint": source_fingerprint},
@@ -84,7 +84,7 @@ class DatabaseMigrationStartupRecoveryTest(TestCase):
             yaml.dump({"app": {"debug": True}, "database": changed}, stream)
         with patch("app.db.manager.DATABASE._engine", None), \
                 patch("app.db.migration.STORAGE_JOBS"), \
-                patch("app.utils.cache_migration._schedule_restart") as schedule:
+                patch("app.db.migration.schedule_restart") as schedule:
             pending = {
                 "job_id": self.job_id,
                 "payload": {"source_fingerprint": source_fingerprint},

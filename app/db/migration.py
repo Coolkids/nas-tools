@@ -9,10 +9,8 @@ import json
 import os
 import re
 import shutil
-import signal
 import socket
 import sqlite3
-import sys
 import threading
 import time
 import uuid
@@ -27,7 +25,7 @@ from app.db.backends import create_backend
 from app.db.manager import DATABASE
 from app.db.models import Base, DATABASEMIGRATIONMARKER
 from app.db.schema import current_schema_revision
-from app.utils.storage_jobs import STORAGE_JOBS
+from app.utils.storage_jobs import STORAGE_JOBS, schedule_restart
 
 
 _BATCH_SIZE = 500
@@ -1340,8 +1338,7 @@ def _restore_source_database_config_before_startup(job, error):
                         message="新数据库启动验证失败；已恢复原数据库配置，准备受控重启")
     STORAGE_JOBS.clear_maintenance_gate("database", job["job_id"])
     _remove_source_config_backup(job["job_id"])
-    from app.utils.cache_migration import _schedule_restart
-    _schedule_restart()
+    schedule_restart()
     return True
 
 
@@ -1539,8 +1536,7 @@ def _run_migration(job_id, candidate, source_fingerprint, target_fingerprint,
                                 result={**(STORAGE_JOBS.get(job_id).get("result") or {}),
                                         "target_fingerprint": target_fingerprint},
                                 message="数据库配置已保存，等待受控重启", progress=0.99)
-            from app.utils.cache_migration import _schedule_restart
-            _schedule_restart()
+            schedule_restart()
     except Exception as error:
         current = STORAGE_JOBS.get(job_id) or {}
         try:
@@ -1689,8 +1685,7 @@ def retry_database_restart(job_id):
             return retry_database_restore_restart(job_id)
         except Exception:
             return False
-    from app.utils.cache_migration import _schedule_restart
-    _schedule_restart()
+    schedule_restart()
     return True
 
 

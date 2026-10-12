@@ -8,7 +8,6 @@ import logging
 import os
 import pickle
 import shutil
-import signal
 import sqlite3
 import sys
 import threading
@@ -17,7 +16,7 @@ import time
 from app.utils.cache_backend import (
     CACHE_NAMESPACE_REGISTRY, DEFAULT_SETTINGS, CacheStore, STORE, _SQLiteCache, validate_settings,
 )
-from app.utils.storage_jobs import STORAGE_JOBS, TERMINAL_STATES
+from app.utils.storage_jobs import STORAGE_JOBS, TERMINAL_STATES, schedule_restart
 
 logger = logging.getLogger(__name__)
 
@@ -865,19 +864,13 @@ def _run_migration(job_id, candidate):
 
 
 def _schedule_restart():
-    threading.Timer(1.5, _restart_process).start()
+    return schedule_restart()
 
 
 def _restart_process():
-    executable_name = os.path.basename(sys.argv[0]).lower()
-    if "gunicorn" in executable_name:
-        os.kill(os.getppid(), signal.SIGHUP)
-        return
-    elif os.path.basename(sys.argv[0]) in {"run.py", "run"}:
-        os.execv(sys.executable, [sys.executable, *sys.argv])
-    elif getattr(sys, "frozen", False):
-        os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
-    os.kill(os.getpid(), signal.SIGTERM)
+    from app.utils.storage_jobs import restart_process
+
+    return restart_process()
 
 
 def get_cache_job(job_id):
@@ -1071,6 +1064,8 @@ def verify_cache_startup():
                 for namespace in CACHE_NAMESPACE_REGISTRY:
                     batch = []
                     for key, value, expires in _snapshot_records(snapshot_path, namespace):
+                        if expires is not None and expires <= time.time():
+                            continue
                         batch.append((key, value, expires))
                         if len(batch) == 500:
                             STORE.put_many(namespace, batch)

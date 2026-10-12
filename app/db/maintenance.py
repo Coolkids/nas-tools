@@ -20,7 +20,7 @@ from sqlalchemy import func, inspect, or_, select, text, update
 from app.db.manager import DATABASE
 from app.db.models import Base, MEDIASYNCSYNCJOB
 from app.db.schema import LOGICAL_DOMAIN_TABLES, current_schema_revision
-from app.utils.storage_jobs import STORAGE_JOBS
+from app.utils.storage_jobs import STORAGE_JOBS, schedule_restart
 
 
 _RECLAIM_KIND = "database_space_reclaim"
@@ -1755,8 +1755,7 @@ def retry_database_restore_restart(job_id):
         STORAGE_JOBS.update(job_id, status="RESTART_PENDING", stage="RESTART_PENDING",
                             result=result, error=None,
                             message="恢复数据已重新校验，等待受控重启", progress=0.98)
-    from app.utils.cache_migration import _schedule_restart
-    _schedule_restart()
+    schedule_restart()
     return True
 
 
@@ -2003,8 +2002,7 @@ def _run_database_restore(job_id, settings, fingerprint, upload_path):
             STORAGE_JOBS.update(job_id, status="RESTART_PENDING", stage="RESTART_PENDING",
                                 result=final_result, message="数据库恢复和校验完成，等待受控重启",
                                 progress=0.98)
-            from app.utils.cache_migration import _schedule_restart
-            _schedule_restart()
+            schedule_restart()
     except InterruptedError as error:
         if sqlite_quiesced and not published:
             try:

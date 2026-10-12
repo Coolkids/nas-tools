@@ -3,6 +3,8 @@
 import json
 import os
 import sqlite3
+import signal
+import sys
 import threading
 import time
 import uuid
@@ -377,3 +379,25 @@ class StorageJobStore:
 
 
 STORAGE_JOBS = StorageJobStore()
+
+
+def restart_process():
+    """Restart the current deployment through its existing process supervisor."""
+    executable_name = os.path.basename(sys.argv[0]).lower()
+    if "gunicorn" in executable_name:
+        os.kill(os.getppid(), signal.SIGHUP)
+        return
+    if os.path.basename(sys.argv[0]) in {"run.py", "run"}:
+        os.execv(sys.executable, [sys.executable, *sys.argv])
+        return
+    if getattr(sys, "frozen", False):
+        os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
+        return
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def schedule_restart(delay=1.5):
+    """Schedule one controlled restart after the caller can persist and respond."""
+    timer = threading.Timer(delay, restart_process)
+    timer.start()
+    return timer
