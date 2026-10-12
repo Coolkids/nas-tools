@@ -1475,15 +1475,34 @@ def get_database_job(job_id):
 
 def cancel_database_job(job_id):
     job = get_database_job(job_id)
-    if not job or job.get("kind") not in {_JOB_KIND, _PREPARE_KIND}:
+    if not job or job.get("kind") not in {
+            _JOB_KIND, _PREPARE_KIND, "database_space_reclaim", "database_backup",
+            "database_backup_check", "database_restore"}:
         return False
+    if job.get("kind") == "database_backup_check" and job.get("status") == "READY":
+        return bool(STORAGE_JOBS.update(
+            job_id, status="CANCELLED", stage="CANCELLED",
+            message="已取消备份检查凭证，不能再使用该检查结果恢复数据库"))
     return STORAGE_JOBS.request_cancel(job_id)
 
 
 def retry_database_restart(job_id):
     job = get_database_job(job_id)
-    if not job or job.get("kind") != _JOB_KIND or job.get("status") != "RESTART_PENDING":
+    if (not job or job.get("kind") not in {_JOB_KIND, "database_restore"}
+            or job.get("status") != "RESTART_PENDING"):
+        if job and job.get("kind") == "database_restore":
+            from app.db.maintenance import retry_database_restore_restart
+            try:
+                return retry_database_restore_restart(job_id)
+            except Exception:
+                return False
         return False
+    if job.get("kind") == "database_restore":
+        from app.db.maintenance import retry_database_restore_restart
+        try:
+            return retry_database_restore_restart(job_id)
+        except Exception:
+            return False
     from app.utils.cache_migration import _schedule_restart
     _schedule_restart()
     return True
@@ -1492,6 +1511,8 @@ def retry_database_restart(job_id):
 def verify_database_startup():
     """在启动业务任务之前校验已提交的切换并恢复维护闸门。"""
     with STORAGE_JOBS.maintenance_lock(exclusive=True):
+        from app.db.maintenance import cleanup_database_artifacts
+        cleanup_database_artifacts()
         for preparation in STORAGE_JOBS.active(_PREPARE_KIND):
             if preparation.get("status") not in {
                     "PREPARING_TARGET", "TARGET_BACKED_UP", "RETIRING_SQLITE",
@@ -1505,6 +1526,22 @@ def verify_database_startup():
                     stage="RECOVERY_REQUIRED", error=_safe_error(error),
                     message="目标准备中断且无法安全自动恢复；远程活动数据库配置保持不变")
         gate = STORAGE_JOBS.maintenance_gate("database")
+        maintenance_kinds = {
+            "database_space_reclaim", "database_backup", "database_backup_check",
+            "database_restore",
+        }
+        if gate:
+            gated_job = STORAGE_JOBS.get(gate.get("job_id")) if gate.get("job_id") else None
+            if gated_job and gated_job.get("kind") in maintenance_kinds:
+                from app.db.maintenance import verify_database_maintenance_startup
+                verify_database_maintenance_startup(gated_job)
+                gate = STORAGE_JOBS.maintenance_gate("database")
+        if not gate:
+            from app.db.maintenance import verify_database_maintenance_startup
+            for orphan in STORAGE_JOBS.active():
+                if orphan.get("kind") in maintenance_kinds:
+                    verify_database_maintenance_startup(orphan)
+            gate = STORAGE_JOBS.maintenance_gate("database")
         jobs = STORAGE_JOBS.active(_JOB_KIND)
         pending = next((job for job in jobs if job.get("status") in {
             "SAVING_CONFIG", "RESTART_PENDING", "VERIFYING_STARTUP", "RECOVERY_REQUIRED"}), None)

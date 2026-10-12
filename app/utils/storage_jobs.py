@@ -23,7 +23,10 @@ ACTIVE_STATES = {"CHECKING", "READY", "QUIESCING", "SNAPSHOTTING", "MIGRATING",
                  "VALIDATING", "VALIDATED", "SAVING_CONFIG", "RESTART_PENDING",
                  "VERIFYING_STARTUP", "RECOVERY_REQUIRED", "PREPARING_TARGET",
                  "TARGET_BACKED_UP", "RETIRING_SQLITE", "OLD_SQLITE_REMOVED",
-                 "EMPTY_TARGET_READY", "PUBLISHING"}
+                 "EMPTY_TARGET_READY", "PUBLISHING", "VACUUMING", "EXPORTING",
+                 "CHECKING_BACKUP", "BACKING_UP_CURRENT", "BUILDING_STAGE",
+                 "RESTORING", "PUBLISHING_RESTORE", "CALIBRATING",
+                 "VERIFYING_RESTORE"}
 TERMINAL_STATES = {"SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"}
 
 
@@ -326,7 +329,10 @@ class StorageJobStore:
             if row is None or row["status"] in TERMINAL_STATES | {"SAVING_CONFIG", "RESTART_PENDING",
                                                                   "VERIFYING_STARTUP", "RECOVERY_REQUIRED",
                                                                   "RETIRING_SQLITE", "OLD_SQLITE_REMOVED",
-                                                                  "EMPTY_TARGET_READY", "PUBLISHING"}:
+                                                                  "EMPTY_TARGET_READY", "PUBLISHING",
+                                                                  "VACUUMING", "RESTORING",
+                                                                  "PUBLISHING_RESTORE", "CALIBRATING",
+                                                                  "VERIFYING_RESTORE"}:
                 connection.rollback()
                 return False
             connection.execute("UPDATE storage_jobs SET cancel_requested=1, updated_at=? WHERE job_id=?",

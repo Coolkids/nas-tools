@@ -5,13 +5,13 @@ import io
 import os.path
 import re
 import secrets
-import shutil
-import sqlite3
+import stat
 import time
 import traceback
 import urllib
 import uuid
 import xml.dom.minidom
+import zipfile
 from functools import wraps
 from math import floor
 from pathlib import Path
@@ -44,6 +44,7 @@ from web.security import require_auth
 
 # 配置文件锁
 ConfigLock = Lock()
+DATABASE_BACKUP_UPLOAD_LIMIT = 100 * 1024 * 1024 * 1024
 
 
 def get_session_secret_key():
@@ -87,6 +88,8 @@ def get_session_secret_key():
 # Flask App
 App = Flask(__name__)
 App.config['JSON_AS_ASCII'] = False
+# Database archives stream to disk and have their own 100 GiB application limit.
+App.config['MAX_CONTENT_LENGTH'] = DATABASE_BACKUP_UPLOAD_LIMIT + 1024 * 1024
 # The session cookie must remain verifiable after the service restarts.
 App.secret_key = get_session_secret_key()
 App.permanent_session_lifetime = datetime.timedelta(days=30)
@@ -248,6 +251,50 @@ def _is_same_origin_request():
         return supplied.hostname.lower() == (expected.hostname or "").lower()
     except ValueError:
         return False
+
+
+@App.route('/api/v1/database/backups/upload', methods=['POST'])
+@login_required
+def upload_database_backup():
+    if str(current_user.get_id()) != "0":
+        return {"code": 403, "msg": "仅管理员可以上传数据库备份"}, 403
+    if not _is_same_origin_request():
+        return {"code": 403, "msg": "数据库管理请求缺少有效的同源来源信息"}, 403
+    if request.content_length and request.content_length > DATABASE_BACKUP_UPLOAD_LIMIT + 1024 * 1024:
+        return {"code": 1, "msg": "上传备份超过服务器允许大小"}, 413
+    uploaded = request.files.get('file')
+    if not uploaded or not uploaded.filename:
+        return {"code": 1, "msg": "请选择 ZIP 数据库备份"}, 400
+    if os.path.splitext(uploaded.filename)[1].lower() != ".zip":
+        return {"code": 1, "msg": "数据库备份必须是 ZIP 文件"}, 400
+    from app.db.maintenance import upload_database_backup as save_database_backup
+    result = save_database_backup(uploaded.stream)
+    return (result, 201) if result.get("code") == 0 else (result, 400)
+
+
+@App.route('/api/v1/database/backups/<backup_id>/download', methods=['GET'])
+@login_required
+def download_database_backup(backup_id):
+    if str(current_user.get_id()) != "0":
+        return {"code": 403, "msg": "仅管理员可以下载数据库备份"}, 403
+    from app.db.maintenance import database_backup_path
+    from app.utils.storage_jobs import STORAGE_JOBS
+
+    lock = STORAGE_JOBS.maintenance_lock(exclusive=False)
+    lock.__enter__()
+    try:
+        artifact = database_backup_path(backup_id)
+        if not artifact:
+            lock.__exit__(None, None, None)
+            return {"code": 404, "msg": "完整数据库备份不存在或已过期"}, 404
+        path, filename = artifact
+        response = send_file(path, as_attachment=True, download_name=filename,
+                             mimetype='application/zip', conditional=True)
+        response.call_on_close(lambda: lock.__exit__(None, None, None))
+        return response
+    except Exception:
+        lock.__exit__(None, None, None)
+        raise
 
 
 # 目录事件响应
@@ -743,71 +790,73 @@ def subscribe():
 @App.route('/backup', methods=['POST'])
 @login_required
 def backup():
-    """
-    备份用户设置文件
-    :return: 备份文件.zip_file
-    """
+    """旧端点只导出设置；完整业务数据库必须使用 /api/v1/database/backups。"""
+    if str(current_user.get_id()) != "0":
+        return make_response("仅管理员可以备份设置", 403)
+    if not _is_same_origin_request():
+        return make_response("备份请求缺少有效的同源来源信息", 403)
     try:
-        # 创建备份文件夹
         config_path = Path(Config().get_config_path())
-        backup_file = f"bk_{time.strftime('%Y%m%d%H%M%S')}"
-        backup_path = config_path / "backup_file" / backup_file
-        backup_path.mkdir(parents=True)
-        # 把现有的相关文件进行copy备份
-        shutil.copy(f'{config_path}/config.yaml', backup_path)
-        shutil.copy(f'{config_path}/default-category.yaml', backup_path)
-        # 使用 sqlite3.backup() API 创建一致性快照,避免 WAL 模式下的数据丢失
-        src_db = str(config_path / 'user.db')
-        dest_db = str(backup_path / 'user.db')
-        src_conn = sqlite3.connect(src_db)
-        dest_conn = sqlite3.connect(dest_db)
-        src_conn.backup(dest_conn, pages=0)
-        dest_conn.close()
-        src_conn.close()
-        conn = sqlite3.connect(dest_db)
-        cursor = conn.cursor()
-        # 执行操作删除不需要备份的表
-        table_list = [
-            'SEARCH_RESULT_INFO',
-            'RSS_TORRENTS',
-            'DOUBAN_MEDIAS',
-            'TRANSFER_HISTORY',
-            'TRANSFER_UNKNOWN',
-            'TRANSFER_BLACKLIST',
-            'SYNC_HISTORY',
-            'DOWNLOAD_HISTORY',
-            'alembic_version'
-        ]
-        for table in table_list:
-            cursor.execute(f"""DROP TABLE IF EXISTS {table};""")
-        conn.commit()
-        cursor.close()
-        conn.close()
-        zip_file = str(backup_path) + '.zip'
-        if os.path.exists(zip_file):
-            zip_file = str(backup_path) + '.zip'
-        shutil.make_archive(str(backup_path), 'zip', str(backup_path))
-        shutil.rmtree(str(backup_path))
+        archive_data = io.BytesIO()
+        with zipfile.ZipFile(archive_data, mode='w', compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.write(config_path / 'config.yaml', 'config.yaml')
+            category_path = config_path / 'default-category.yaml'
+            if category_path.is_file():
+                archive.write(category_path, 'default-category.yaml')
+            archive.writestr('backup-format.json', json.dumps({
+                'format': 'nastools-settings-only', 'format_version': 1,
+                'database_included': False,
+            }, ensure_ascii=False, sort_keys=True))
+        archive_data.seek(0)
     except Exception as e:
         ExceptionUtils.exception_traceback(e)
         return make_response("创建备份失败", 400)
-    return send_file(zip_file)
+    return send_file(archive_data, mimetype='application/zip', as_attachment=True,
+                     download_name=f"nastools-settings-{time.strftime('%Y%m%d%H%M%S')}.zip")
 
 
 # 上传文件到服务器
 @App.route('/upload', methods=['POST'])
 @login_required
 def upload():
+    file_path = None
     try:
-        files = request.files['file']
-        temp_path = Config().get_temp_path()
-        if not os.path.exists(temp_path):
-            os.makedirs(temp_path)
-        file_path = Path(temp_path) / files.filename
-        files.save(str(file_path))
+        files = request.files.get('file')
+        if not files or not files.filename:
+            return {"code": 1, "msg": "请选择文件", "filepath": ""}, 400
+        filename = files.filename
+        if (filename != os.path.basename(filename) or filename in {".", ".."}
+                or any(char in filename for char in ("/", "\\", "\x00"))):
+            return {"code": 1, "msg": "文件名无效", "filepath": ""}, 400
+        if request.content_length and request.content_length > 100 * 1024 * 1024:
+            return {"code": 1, "msg": "上传文件不能超过 100 MiB", "filepath": ""}, 413
+        temp_path = Path(Config().get_temp_path())
+        temp_path.mkdir(parents=True, exist_ok=True)
+        file_path = temp_path / filename
+        if os.path.lexists(file_path):
+            if not stat.S_ISREG(os.lstat(file_path).st_mode):
+                return {"code": 1, "msg": "目标文件已存在且不是普通文件", "filepath": ""}, 400
+            os.unlink(file_path)
+        size = 0
+        with file_path.open('xb') as destination:
+            while True:
+                chunk = files.stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > 100 * 1024 * 1024:
+                    raise ValueError("上传文件不能超过 100 MiB")
+                destination.write(chunk)
+            destination.flush()
+            os.fsync(destination.fileno())
         return {"code": 0, "filepath": str(file_path)}
     except Exception as e:
         ExceptionUtils.exception_traceback(e)
+        if file_path is not None:
+            try:
+                os.unlink(file_path)
+            except OSError:
+                pass
         return {"code": 1, "msg": str(e), "filepath": ""}
 
 

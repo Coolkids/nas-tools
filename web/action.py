@@ -6,6 +6,7 @@ import json
 import os.path
 import re
 import shutil
+import stat
 import tempfile
 import uuid
 import zipfile
@@ -54,12 +55,30 @@ from web.backend.web_utils import WebUtils
 from version import APP_VERSION
 
 
+def _sanitize_database_job(job):
+    if not job:
+        return job
+
+    def strip_paths(value):
+        if isinstance(value, dict):
+            return {key: strip_paths(item) for key, item in value.items()
+                    if "path" not in str(key).lower()}
+        if isinstance(value, list):
+            return [strip_paths(item) for item in value]
+        return value
+
+    return strip_paths(job)
+
+
 class WebAction:
     dbhelper = None
     _actions = {}
     _database_admin_actions = frozenset({
         "check_database", "prepare_sqlite_migration_target", "start_database_migration",
         "get_database_job", "cancel_database_job", "retry_database_restart",
+        "get_database_info", "start_database_space_reclaim", "start_database_backup",
+        "check_database_backup", "start_database_restore",
+        "restory_backup",
     })
     TvTypes = ['TV', '电视剧']
     # Excel 导入任务保留在内存中。任务不依赖 WebAction 实例，轮询请求可读取同一份状态。
@@ -234,6 +253,11 @@ class WebAction:
             "get_database_job": self.__get_database_job,
             "cancel_database_job": self.__cancel_database_job,
             "retry_database_restart": self.__retry_database_restart,
+            "get_database_info": self.__get_database_info,
+            "start_database_space_reclaim": self.__start_database_space_reclaim,
+            "start_database_backup": self.__start_database_backup,
+            "check_database_backup": self.__check_database_backup,
+            "start_database_restore": self.__start_database_restore,
             "get_recognition_records": self.__get_recognition_records,
             "get_recognition_record_detail": self.__get_recognition_record_detail,
             "version": self.__version
@@ -2985,25 +3009,96 @@ class WebAction:
 
     @staticmethod
     def __restory_backup(data):
-        """
-        解压恢复备份文件
-        """
-        filename = data.get("file_name")
-        if filename:
-            config_path = Config().get_config_path()
-            temp_path = Config().get_temp_path()
-            file_path = os.path.join(temp_path, filename)
-            try:
-                shutil.unpack_archive(file_path, config_path, format='zip')
-                return {"code": 0, "msg": ""}
-            except Exception as e:
-                ExceptionUtils.exception_traceback(e)
-                return {"code": 1, "msg": str(e)}
-            finally:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
+        """兼容旧设置包；只恢复 YAML 设置，绝不解包数据库文件。"""
+        filename = (data or {}).get("file_name")
+        if not isinstance(filename, str) or not filename or "\x00" in filename:
+            return {"code": 1, "msg": "备份文件名无效"}
+        config_path = os.path.realpath(Config().get_config_path())
+        temp_path = os.path.realpath(Config().get_temp_path())
+        supplied_path = filename if os.path.isabs(filename) else os.path.join(temp_path, filename)
+        file_path = os.path.realpath(supplied_path)
+        try:
+            within_temp = os.path.commonpath((temp_path, file_path)) == temp_path
+        except ValueError:
+            within_temp = False
+        if not within_temp or not os.path.isfile(file_path):
+            return {"code": 1, "msg": "文件不存在"}
+        try:
+            max_total = 32 * 1024 * 1024
+            allowed = {"config.yaml", "default-category.yaml", "backup-format.json", "user.db"}
+            contents = {}
+            saw_legacy_database = False
+            with zipfile.ZipFile(file_path, "r") as archive:
+                infos = archive.infolist()
+                if len(infos) > 8 or len({entry.filename for entry in infos}) != len(infos):
+                    raise ValueError("设置备份条目数量无效")
+                total = 0
+                for entry in infos:
+                    name = entry.filename
+                    mode = entry.external_attr >> 16
+                    if (name not in allowed or entry.is_dir() or stat.S_ISLNK(mode)
+                            or entry.file_size < 0):
+                        raise ValueError("旧备份包含不允许的文件")
+                    if name == "user.db":
+                        saw_legacy_database = True
+                        continue
+                    if entry.file_size > max_total:
+                        raise ValueError("设置备份文件超过允许大小")
+                    total += entry.file_size
+                    if total > max_total:
+                        raise ValueError("设置备份超过允许大小")
+                    contents[name] = archive.read(entry)
+            if "config.yaml" not in contents:
+                raise ValueError("设置备份缺少 config.yaml")
+            import ruamel.yaml
+            incoming = ruamel.yaml.YAML(typ="safe").load(contents["config.yaml"].decode("utf-8"))
+            if not isinstance(incoming, dict):
+                raise ValueError("config.yaml 内容必须是对象")
+            if "default-category.yaml" in contents:
+                category_config = ruamel.yaml.YAML(typ="safe").load(
+                    contents["default-category.yaml"].decode("utf-8"))
+                if not isinstance(category_config, dict):
+                    raise ValueError("default-category.yaml 内容必须是对象")
+            manager = Config()
+            current = deepcopy(manager.get_config() or {})
+            incoming["database"] = deepcopy(current.get("database", {"type": "sqlite"}))
+            incoming["cache"] = deepcopy(current.get("cache", {}))
 
-        return {"code": 1, "msg": "文件不存在"}
+            category_temp = None
+            category_path = os.path.join(config_path, "default-category.yaml")
+            category_bytes = contents.get("default-category.yaml")
+            if category_bytes is not None:
+                descriptor, category_temp = tempfile.mkstemp(
+                    prefix=".default-category.", suffix=".tmp", dir=config_path)
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(category_bytes)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            from config import CONFIG_LOCK
+            try:
+                with CONFIG_LOCK:
+                    manager.save_config(incoming)
+                    if category_temp:
+                        os.replace(category_temp, category_path)
+                        directory_fd = os.open(config_path, os.O_RDONLY)
+                        try:
+                            os.fsync(directory_fd)
+                        finally:
+                            os.close(directory_fd)
+            finally:
+                if category_temp and os.path.exists(category_temp):
+                    os.unlink(category_temp)
+            message = "设置已恢复；为保护当前数据，旧备份中的 user.db 未导入" \
+                if saw_legacy_database else "设置已恢复；当前数据库和缓存连接配置保持不变"
+            return {"code": 0, "msg": message, "database_restored": False}
+        except Exception as error:
+            ExceptionUtils.exception_traceback(error)
+            return {"code": 1, "msg": str(error)[:1000]}
+        finally:
+            try:
+                os.unlink(file_path)
+            except OSError:
+                pass
 
     @staticmethod
     def __start_mediasync(data):
@@ -4929,7 +5024,9 @@ class WebAction:
         from app.db.migration import get_database_job
 
         job = get_database_job((data or {}).get("job_id"))
-        return {"code": 0, "job": job} if job else {"code": 1, "msg": "数据库任务不存在"}
+        if not job:
+            return {"code": 1, "msg": "数据库任务不存在"}
+        return {"code": 0, "job": _sanitize_database_job(job)}
 
     @staticmethod
     def __cancel_database_job(data=None):
@@ -4946,6 +5043,49 @@ class WebAction:
         if retry_database_restart((data or {}).get("job_id")):
             return {"code": 0}
         return {"code": 1, "msg": "没有可重试的数据库重启任务"}
+
+    @staticmethod
+    def __get_database_info(data=None):
+        from app.db.maintenance import get_database_info
+
+        result = get_database_info()
+        database = result.get("database") or {}
+        for key in ("active", "configured"):
+            database[key] = _sanitize_database_job(database.get(key))
+        for key in ("current_job", "pending_database_job"):
+            database[key] = _sanitize_database_job(database.get(key))
+        database["maintenance_jobs"] = {
+            kind: _sanitize_database_job(job)
+            for kind, job in (database.get("maintenance_jobs") or {}).items()
+        }
+        sqlite_info = database.get("sqlite")
+        if isinstance(sqlite_info, dict):
+            sqlite_info.pop("path", None)
+        return result
+
+    @staticmethod
+    def __start_database_space_reclaim(data=None):
+        from app.db.maintenance import start_database_space_reclaim
+
+        return start_database_space_reclaim(data or {})
+
+    @staticmethod
+    def __start_database_backup(data=None):
+        from app.db.maintenance import start_database_backup
+
+        return start_database_backup(data or {})
+
+    @staticmethod
+    def __check_database_backup(data=None):
+        from app.db.maintenance import check_database_backup
+
+        return check_database_backup(data or {})
+
+    @staticmethod
+    def __start_database_restore(data=None):
+        from app.db.maintenance import start_database_restore
+
+        return start_database_restore(data or {})
 
     @staticmethod
     def __clear_system_cache(data=None):
