@@ -76,9 +76,7 @@ class _DiskCache(FileSystemCache):
                 with open(filename, "rb") as stream:
                     expires = struct.unpack("I", stream.read(4))[0]
                     record = self.serializer.load(stream)
-                if expires and expires <= time.time():
-                    os.unlink(filename)
-                elif isinstance(record, tuple) and len(record) == 3:
+                if isinstance(record, tuple) and len(record) == 3:
                     yield record
                 elif strict:
                     raise ValueError("旧文件缓存包含不支持的条目")
@@ -88,7 +86,7 @@ class _DiskCache(FileSystemCache):
                 logger.warning("忽略损坏的缓存文件")
 
     def _prune(self):
-        # 文件缓存不参与容量淘汰；过期文件由读取和 records() 清理。
+        # 文件缓存不参与容量淘汰；旧来源在安全退休前保持不变。
         return None
 
 
@@ -700,6 +698,10 @@ class CacheStore:
                     return
 
                 imports.update(completed_imports)
+                state["legacy_namespace_states"] = {
+                    namespace: imports.get(namespace, "pending")
+                    for namespace in CACHE_NAMESPACE_REGISTRY
+                }
                 self._write_layout_state(state_path, state)
                 if current_sqlite and os.path.exists(path):
                     self._archive_current_database(path)
@@ -902,6 +904,9 @@ class CacheStore:
                 disk.set_many(batch)
             if mark_imported:
                 imports[namespace] = "imported" if record_count else "empty"
+                state["legacy_namespace_states"] = {
+                    name: imports.get(name, "pending") for name in CACHE_NAMESPACE_REGISTRY
+                }
                 self._write_layout_state(state_path, state)
         finally:
             conflict_connection.close()
@@ -985,6 +990,38 @@ class CacheStore:
             records.append({"path": os.path.relpath(absolute, root),
                             "identity": identity, "status": "pending"})
         return records
+
+    def _record_legacy_layout(self):
+        """持久记录转换前可识别的来源身份和每个命名空间的导入状态。"""
+        state_path = self._layout_state_path()
+        state = self._read_layout_state(state_path)
+        if state.get("legacy_sources") == "retired":
+            return
+        imports = state.get("imports") if isinstance(state.get("imports"), dict) else {}
+        inventory = state.get("legacy_source_inventory")
+        if not isinstance(inventory, list):
+            inventory = []
+        known = {record.get("path"): record for record in inventory
+                 if isinstance(record, dict) and isinstance(record.get("path"), str)}
+        for record in self._legacy_retirement_records():
+            previous = known.get(record["path"])
+            if previous is None:
+                inventory.append(record)
+                known[record["path"]] = record
+            elif previous.get("identity") != record.get("identity"):
+                changes = state.setdefault("legacy_source_changes", [])
+                changes.append({"path": record["path"],
+                                "previous": previous.get("identity"),
+                                "observed": record.get("identity"),
+                                "detected_at": time.time()})
+        if not state.get("legacy_sources_detected_at"):
+            state["legacy_sources_detected_at"] = time.time()
+        state["legacy_source_inventory"] = inventory
+        state["legacy_namespace_states"] = {
+            name: imports.get(name, "pending") for name in CACHE_NAMESPACE_REGISTRY
+        }
+        state["layout_version"] = max(2, int(state.get("layout_version") or 0))
+        self._write_layout_state(state_path, state)
 
     def _cleanup_retired_legacy_sources(self, now=None):
         state_path = self._layout_state_path()
@@ -1196,6 +1233,7 @@ class CacheStore:
             if not self._valid_sqlite_file(root_snapshot):
                 raise sqlite3.DatabaseError("根目录旧缓存 SQLite 快照完整性检查失败")
             self._legacy_sqlite_paths.append(root_snapshot)
+        self._record_legacy_layout()
         self._storage_ready = True
 
     @staticmethod
