@@ -58,8 +58,20 @@ def _normalize_candidate(values):
         "ssl": copy.deepcopy(values.get("ssl") or {}),
     })
     active = DATABASE._read_settings()
-    if (not settings["password"] and active.get("type") == kind
-            and all(settings.get(key) == active.get(key) for key in ("host", "name", "username"))
+    active_type = str(active.get("type") or "sqlite").strip().lower()
+    active_host = str(active.get("host") or "").strip().rstrip(".").casefold()
+    candidate_host = settings["host"].rstrip(".").casefold()
+    same_remote_target = (
+        active_type == kind
+        and active_host == candidate_host
+        and int(active.get("port") or (5432 if kind == "postgresql" else 3306))
+        == settings["port"]
+        and str(active.get("name") or "") == settings["name"]
+    )
+    if same_remote_target and not settings["username"]:
+        settings["username"] = str(active.get("username") or "")
+    if (same_remote_target and not settings["password"]
+            and settings["username"] == str(active.get("username") or "")
             and active.get("password")):
         settings["password"] = active["password"]
     DATABASE._validate(settings)
