@@ -15,9 +15,6 @@ _INITIALIZATION_SQL_FILES = frozenset({
     "init_filter.sql", "init_userrss_v3.sql", "update_subscribe.sql",
     "update_userpris.sql", "update_userrss.sql", "reset_db_version.sql",
 })
-_db_metrics = {
-    "retries": 0,
-}
 
 
 def _split_sql_script(script):
@@ -202,7 +199,7 @@ class DbPersist(object):
                         ExceptionUtils.exception_traceback(e)
                         self.db.rollback()
                         return False
-                    _db_metrics["retries"] += 1
+                    DATABASE.record_retry()
                     self.db.rollback()
                     if attempt < self.retries - 1:
                         time.sleep(0.5 * (2 ** attempt))
@@ -216,6 +213,4 @@ class DbPersist(object):
 
 def get_db_metrics():
     """返回用于性能日志和诊断的指标快照。"""
-    metrics = DATABASE.metrics()
-    metrics["retries"] = _db_metrics["retries"]
-    return metrics
+    return DATABASE.metrics()

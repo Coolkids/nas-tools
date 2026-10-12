@@ -34,6 +34,7 @@ class DatabaseManager:
             "sql_max_seconds": 0.0,
             "unknown_rowcount": 0,
             "sql_errors": 0,
+            "retries": 0,
             "transaction_count": 0,
             "transaction_seconds": 0.0,
             "transaction_max_seconds": 0.0,
@@ -357,6 +358,10 @@ class DatabaseManager:
     def record_commit(self):
         """Count explicit batch commits performed through a compatibility facade."""
         self._commit_count += 1
+
+    def record_retry(self):
+        """Count safe retry attempts in the same metric snapshot as SQL timings."""
+        self._record_metric("retries")
 
     def upsert_many(self, model, rows, conflict_columns, update_columns=None):
         return self.backend.upsert_many(

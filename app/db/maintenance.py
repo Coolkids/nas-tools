@@ -1223,10 +1223,19 @@ def _run_database_backup(job_id, settings, fingerprint):
     snapshot_path = None
     backup_path = os.path.join(_backup_root(), f"{job_id}.zip")
     gate_set = False
+    recognition_quiesced = False
     try:
         from app.db.migration import (_current_settings, _ensure_other_jobs_idle,
                                       _fingerprint, _snapshot_source, _validate_source_shape)
+        from app.media.recognition.records import (quiesce_recognition,
+                                                   replay_recognition_spool,
+                                                   resume_recognition)
 
+        quiesce_recognition(timeout=120)
+        recognition_quiesced = True
+        spool_result = replay_recognition_spool()
+        if spool_result.get("pending"):
+            raise RuntimeError("识别暂存记录未能全部写入当前数据库，已中止备份快照")
         with STORAGE_JOBS.maintenance_lock(exclusive=True):
             if not hmac_compare(_fingerprint(_current_settings()), fingerprint):
                 raise RuntimeError("活动数据库配置已变化，无法建立备份快照")
@@ -1246,6 +1255,8 @@ def _run_database_backup(job_id, settings, fingerprint):
             STORAGE_JOBS.update(job_id, status="EXPORTING", stage="EXPORTING",
                                 message="一致性快照已固定，正在流式压缩备份",
                                 progress=0.05)
+        resume_recognition()
+        recognition_quiesced = False
 
         manifest = _export_backup(source_connection, backup_path, job_id, settings["type"])
         if STORAGE_JOBS.cancel_requested(job_id):
@@ -1277,6 +1288,9 @@ def _run_database_backup(job_id, settings, fingerprint):
                             error=_safe_database_error(error, settings),
                             message="完整数据库备份失败；活动数据库保持不变")
     finally:
+        if recognition_quiesced:
+            from app.media.recognition.records import resume_recognition
+            resume_recognition()
         if source_transaction is not None:
             try:
                 source_transaction.rollback()
@@ -1759,7 +1773,7 @@ def retry_database_restore_restart(job_id):
     return True
 
 
-def _run_database_restore(job_id, settings, fingerprint, upload_path):
+def _run_database_restore_impl(job_id, settings, fingerprint, upload_path):
     from app.db.migration import (_calibrate_sequences, _current_settings,
                                   _ensure_other_jobs_idle, _fingerprint,
                                   _new_engine, _snapshot_source, _sqlite_integrity,
@@ -2110,3 +2124,29 @@ def _run_database_restore(job_id, settings, fingerprint, upload_path):
             shutil.rmtree(stage_dir, ignore_errors=True)
         with _WORKERS_LOCK:
             _WORKERS.pop(job_id, None)
+
+
+def _run_database_restore(job_id, settings, fingerprint, upload_path):
+    from app.media.recognition.records import (quiesce_recognition,
+                                               replay_recognition_spool,
+                                               resume_recognition)
+    quiesced = False
+    try:
+        quiesce_recognition(timeout=120)
+        quiesced = True
+        spool_result = replay_recognition_spool()
+        if spool_result.get("pending"):
+            raise RuntimeError("识别暂存记录未能全部写入当前数据库，已中止恢复")
+        _run_database_restore_impl(job_id, settings, fingerprint, upload_path)
+    except Exception as error:
+        current = STORAGE_JOBS.get(job_id) or {}
+        if current.get("status") not in {
+                "RESTART_PENDING", "VERIFYING_RESTORE", "SUCCEEDED", "RECOVERY_REQUIRED",
+                "FAILED", "CANCELLED"}:
+            STORAGE_JOBS.update(job_id, status="FAILED", stage="FAILED",
+                                error=_safe_database_error(error, settings),
+                                message="数据库恢复在快照前失败；活动数据库保持不变")
+    finally:
+        current = STORAGE_JOBS.get(job_id) or {}
+        if quiesced and current.get("status") not in {"RESTART_PENDING", "RECOVERY_REQUIRED"}:
+            resume_recognition()

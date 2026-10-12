@@ -32,6 +32,42 @@ ACTIVE_STATES = {"CHECKING", "READY", "QUIESCING", "SNAPSHOTTING", "MIGRATING",
 TERMINAL_STATES = {"SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"}
 
 
+def _stable_error_code(message):
+    """Map implementation-specific failures to a stable public task category."""
+    value = str(message or "").lower()
+    if not value:
+        return None
+    if any(token in value for token in ("cancel", "已取消", "取消")):
+        return "CANCELLED"
+    if any(token in value for token in ("permission", "access denied", "权限不足", "无权")):
+        return "PERMISSION_DENIED"
+    if any(token in value for token in ("authentication", "password", "access denied for user",
+                                        "认证", "口令", "密码")):
+        return "AUTHENTICATION_FAILED"
+    if any(token in value for token in ("disk full", "no space", "insufficient space",
+                                        "空间不足", "磁盘已满")):
+        return "INSUFFICIENT_SPACE"
+    if any(token in value for token in ("lock", "busy", "deadlock", "锁冲突", "锁定")):
+        return "LOCK_CONFLICT"
+    if any(token in value for token in ("not supported", "unsupported", "不支持")):
+        return "UNSUPPORTED"
+    if any(token in value for token in ("connection", "connect", "timeout", "dns", "refused",
+                                        "连接", "超时", "解析失败")):
+        return "CONNECTION_FAILED"
+    if any(token in value for token in ("checksum", "digest", "integrity", "校验", "摘要",
+                                        "不一致", "损坏")):
+        return "VALIDATION_FAILED"
+    if any(token in value for token in ("zip", "manifest", "archive", "备份文件", "压缩包")):
+        return "INVALID_BACKUP"
+    if any(token in value for token in ("non-empty", "not empty", "already exists",
+                                        "target conflict", "非空", "已存在", "冲突对象")):
+        return "TARGET_CONFLICT"
+    if any(token in value for token in ("configuration", "fingerprint", "config changed",
+                                        "配置已变化", "配置已更改", "检查已过期")):
+        return "CONFIG_CHANGED"
+    return "OPERATION_FAILED"
+
+
 class StorageJobStore:
     """在配置目录的独立 SQLite 中保存任务进度，不依赖业务数据库或缓存后端。"""
 
@@ -221,10 +257,20 @@ class StorageJobStore:
                 payload TEXT NOT NULL,
                 result TEXT,
                 error TEXT,
+                error_code TEXT,
                 cancel_requested INTEGER NOT NULL DEFAULT 0,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL
             )""")
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(storage_jobs)")}
+            if "error_code" not in columns:
+                try:
+                    connection.execute("ALTER TABLE storage_jobs ADD COLUMN error_code TEXT")
+                except sqlite3.OperationalError:
+                    columns = {row[1] for row in connection.execute(
+                        "PRAGMA table_info(storage_jobs)")}
+                    if "error_code" not in columns:
+                        raise
             connection.execute("CREATE INDEX IF NOT EXISTS idx_storage_jobs_status "
                                "ON storage_jobs(status, updated_at)")
             connection.execute("""CREATE TABLE IF NOT EXISTS storage_job_events (
@@ -306,7 +352,7 @@ class StorageJobStore:
             return self._decode(connection.execute(query, values).fetchone())
 
     def update(self, job_id, status=None, stage=None, payload=None, result=None,
-               error=None, progress=None, message=None, expected_status=None):
+               error=None, error_code=None, progress=None, message=None, expected_status=None):
         now = time.time()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -318,14 +364,15 @@ class StorageJobStore:
                 connection.rollback()
                 return None
             next_stage = stage or row["stage"]
+            next_error_code = error_code or (_stable_error_code(error) if error else None)
             connection.execute("""UPDATE storage_jobs SET status=?, stage=?, payload=?, result=?,
-                error=?, updated_at=? WHERE job_id=?""",
+                error=?, error_code=?, updated_at=? WHERE job_id=?""",
                                (status or row["status"], next_stage,
                                 json.dumps(payload, ensure_ascii=False, sort_keys=True)
                                 if payload is not None else row["payload"],
                                 json.dumps(result, ensure_ascii=False, sort_keys=True)
                                 if result is not None else row["result"],
-                                error, now, job_id))
+                                error, next_error_code, now, job_id))
             if message is not None:
                 connection.execute("""INSERT INTO storage_job_events
                     (job_id, created_at, stage, message, progress) VALUES (?, ?, ?, ?, ?)""",

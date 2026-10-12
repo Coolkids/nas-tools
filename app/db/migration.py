@@ -1354,8 +1354,8 @@ def _restore_source_database_config_before_startup(job, error):
     return True
 
 
-def _run_migration(job_id, candidate, source_fingerprint, target_fingerprint,
-                   target_identity, check_id):
+def _run_migration_impl(job_id, candidate, source_fingerprint, target_fingerprint,
+                        target_identity, check_id):
     published = None
     source_engine = source_connection = source_transaction = None
     target_engine = None
@@ -1606,6 +1606,34 @@ def _run_migration(job_id, candidate, source_fingerprint, target_fingerprint,
             _WORKERS.pop(job_id, None)
 
 
+def _run_migration(job_id, candidate, source_fingerprint, target_fingerprint,
+                   target_identity, check_id):
+    from app.media.recognition.records import (quiesce_recognition,
+                                               replay_recognition_spool,
+                                               resume_recognition)
+    quiesced = False
+    try:
+        quiesce_recognition(timeout=120)
+        quiesced = True
+        spool_result = replay_recognition_spool()
+        if spool_result.get("pending"):
+            raise RuntimeError("识别暂存记录未能全部写入当前数据库，已中止迁移快照")
+        _run_migration_impl(job_id, candidate, source_fingerprint,
+                            target_fingerprint, target_identity, check_id)
+    except Exception as error:
+        current = STORAGE_JOBS.get(job_id) or {}
+        if current.get("status") not in {
+                "RESTART_PENDING", "VERIFYING_STARTUP", "SUCCEEDED", "RECOVERY_REQUIRED",
+                "FAILED", "CANCELLED"}:
+            STORAGE_JOBS.update(job_id, status="FAILED", stage="FAILED",
+                                error=_safe_error(error, candidate),
+                                message="数据库迁移在快照前失败；活动数据库配置保持原值")
+    finally:
+        current = STORAGE_JOBS.get(job_id) or {}
+        if quiesced and current.get("status") not in {"RESTART_PENDING", "RECOVERY_REQUIRED"}:
+            resume_recognition()
+
+
 def _ensure_other_jobs_idle(except_job_id):
     for job in STORAGE_JOBS.active():
         if job["job_id"] == except_job_id or job.get("status") in {"CHECKING", "READY"}:
@@ -1632,6 +1660,9 @@ def start_database_migration(values):
                                 message="已取消的检查凭证不能启动迁移")
             raise ValueError("数据库目标检查已取消")
         candidate = _normalize_candidate(values)
+        if (candidate["type"] != "sqlite"
+                and values.get("confirm_target_exclusive") is not True):
+            raise ValueError("远程迁移必须确认目标专用且迁移期间没有其他写入方")
         payload = check.get("payload") or {}
         report = check.get("result") or {}
         if report.get("target_preparation_required"):

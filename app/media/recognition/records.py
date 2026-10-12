@@ -11,13 +11,102 @@ import uuid
 import requests.exceptions
 from functools import wraps
 from enum import Enum
-from threading import Lock
+from threading import Condition, Lock
 from app.media.recognition.settings import provider_enabled, profile_tmdb_allowed
 
 
 _current = contextvars.ContextVar("media_recognition_recorder", default=None)
 _spool_lock = Lock()
 _active_spool_paths = set()
+_recognition_condition = Condition()
+_recognition_paused = False
+_active_recognitions = 0
+
+
+def quiesce_recognition(timeout=120):
+    """暂停新识别请求并等待在途请求完成，供数据库快照和切换使用。"""
+    global _recognition_paused
+    deadline = time.monotonic() + max(0, timeout)
+    with _recognition_condition:
+        if _recognition_paused:
+            raise RuntimeError("识别请求已处于维护暂停状态")
+        _recognition_paused = True
+        while _active_recognitions:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _recognition_paused = False
+                _recognition_condition.notify_all()
+                raise TimeoutError("等待在途识别请求结束超时，数据库维护已中止")
+            _recognition_condition.wait(remaining)
+
+
+def resume_recognition():
+    """解除数据库维护期间的识别请求暂停。"""
+    global _recognition_paused
+    with _recognition_condition:
+        _recognition_paused = False
+        _recognition_condition.notify_all()
+
+
+def _recognition_generation():
+    """按本进程实际连接配置标记 spool，避免跨数据库切换回放旧记录。"""
+    try:
+        from app.db.manager import DATABASE
+        settings = DATABASE._settings
+        if settings is None:
+            from app.db.migration import _current_settings
+            settings = _current_settings()
+        from app.db.migration import _fingerprint
+        return _fingerprint(settings)
+    except Exception:
+        return None
+
+
+def _retire_mismatched_spool(path, generation):
+    from config import Config
+    directory = os.path.join(Config().get_config_path(), ".maintenance",
+                             "recognition-spool-retired", str(generation or "unknown"))
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        pass
+    target = os.path.join(directory, os.path.basename(path))
+    if os.path.exists(target):
+        target = os.path.join(directory, f"{uuid.uuid4().hex}-{os.path.basename(path)}")
+    os.replace(path, target)
+    return target
+
+
+def _acquire_recognition_lease(timeout=120):
+    """Hold a shared cross-process maintenance lease for the full request."""
+    from app.utils.storage_jobs import STORAGE_JOBS
+
+    deadline = time.monotonic() + timeout
+    while True:
+        with _recognition_condition:
+            while _recognition_paused:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("数据库维护期间等待识别请求恢复超时")
+                _recognition_condition.wait(min(remaining, 1.0))
+        lock = STORAGE_JOBS.maintenance_lock(exclusive=False, timeout=1)
+        try:
+            lock.__enter__()
+        except TimeoutError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("等待数据库维护任务结束超时")
+            continue
+
+        with _recognition_condition:
+            paused = _recognition_paused
+        if paused or STORAGE_JOBS.maintenance_gate("database"):
+            lock.__exit__(None, None, None)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("数据库维护期间等待识别请求恢复超时")
+            time.sleep(0.25)
+            continue
+        return lock
 
 
 def _spool_directory():
@@ -67,6 +156,8 @@ def replay_recognition_spool():
 
         replayed = 0
         invalid = 0
+        retired = 0
+        active_generation = _recognition_generation()
         for path in sorted(paths):
             try:
                 with open(path, "r", encoding="utf-8") as spool_file:
@@ -75,6 +166,12 @@ def replay_recognition_spool():
                     invalid += 1
                     import log
                     log.error(f"【Recognition】识别暂存记录格式无效，保留文件供排查：{path}")
+                    continue
+                spool_generation = payload.get("database_generation")
+                if (spool_generation and active_generation
+                        and spool_generation != active_generation):
+                    _retire_mismatched_spool(path, spool_generation)
+                    retired += 1
                     continue
                 overall = payload.get("overall_result")
                 actions = payload.get("actions")
@@ -120,14 +217,15 @@ def replay_recognition_spool():
                     log.error(f"【Recognition】回放识别记录失败 {os.path.basename(path)}：{error}")
                 except Exception:
                     pass
-        pending = len(paths) - replayed
+        pending = len(paths) - replayed - retired
         if pending:
             try:
                 import log
                 log.warn(f"【Recognition】识别暂存恢复完成：成功 {replayed} 条，待处理 {pending} 条，无效 {invalid} 条；查看 recognition_spool 目录日志")
             except Exception:
                 pass
-        return {"replayed": replayed, "pending": pending, "invalid": invalid}
+        return {"replayed": replayed, "pending": pending, "invalid": invalid,
+                "retired": retired}
 
 
 def json_safe(value):
@@ -236,6 +334,8 @@ class RecognitionRecorder:
         self._tmdb_timeout_count = 0
         self._tmdb_timeout_reason = None
         self._tmdb_failure_events = []
+        self._registered = False
+        self._maintenance_lock = None
 
     def __enter__(self):
         parent = _current.get()
@@ -244,6 +344,11 @@ class RecognitionRecorder:
             # 嵌套 get_media_info() 替换。
             self._delegate = parent
             return parent
+        global _active_recognitions
+        self._maintenance_lock = _acquire_recognition_lease()
+        with _recognition_condition:
+            _active_recognitions += 1
+            self._registered = True
         self._runtime_config = _runtime_config_snapshot()
         config_version, config_snapshot = _recognition_config_snapshot()
         if self._runtime_config is not None:
@@ -327,11 +432,20 @@ class RecognitionRecorder:
                     except Exception:
                         pass
         finally:
+            if self._maintenance_lock is not None:
+                self._maintenance_lock.__exit__(None, None, None)
+                self._maintenance_lock = None
             if self._spool_path:
                 with _spool_lock:
                     _active_spool_paths.discard(self._spool_path)
             if self._token is not None:
                 _current.reset(self._token)
+            if self._registered:
+                global _active_recognitions
+                with _recognition_condition:
+                    _active_recognitions = max(0, _active_recognitions - 1)
+                    self._registered = False
+                    _recognition_condition.notify_all()
         return False
 
     def action(self, action_type, status="success", input=None, output=None,
@@ -422,6 +536,7 @@ class RecognitionRecorder:
             "original_name": self.original_name,
             "source": self.source,
             "stage": self.stage,
+            "database_generation": _recognition_generation(),
             "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
             "context": public_context,
             "actions": self.actions,
