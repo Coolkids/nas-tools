@@ -524,21 +524,23 @@ class MediaDb:
                 and_(MEDIASYNCSTATISTIC.SERVER.is_(None),
                      MEDIASYNCITEMS.GENERATION_ID == MEDIA_SYNC_LEGACY_GENERATION),
                 MEDIASYNCITEMS.GENERATION_ID == MEDIASYNCSTATISTIC.ACTIVE_GENERATION))
-        if tmdbid:
-            match = active_items.filter(
-                MEDIASYNCITEMS.TMDBID == str(tmdbid)).first()
-            if match:
-                return True
-        query = active_items.filter(
+        title_match = and_(
             MEDIASYNCITEMS.SERVER == server_type,
-            MEDIASYNCITEMS.TITLE == title)
+            MEDIASYNCITEMS.TITLE == title,
+        )
         if year:
-            query = query.filter(MEDIASYNCITEMS.YEAR == str(year))
+            title_match = and_(title_match, MEDIASYNCITEMS.YEAR == str(year))
         if tmdbid:
-            query = query.filter(or_(MEDIASYNCITEMS.TMDBID.is_(None),
-                                     MEDIASYNCITEMS.TMDBID == "",
-                                     MEDIASYNCITEMS.TMDBID == str(tmdbid)))
-        return query.limit(1).first() is not None
+            tmdb_id = str(tmdbid)
+            title_match = and_(title_match, or_(
+                MEDIASYNCITEMS.TMDBID.is_(None),
+                MEDIASYNCITEMS.TMDBID == "",
+                MEDIASYNCITEMS.TMDBID == tmdb_id,
+            ))
+            match_condition = or_(MEDIASYNCITEMS.TMDBID == tmdb_id, title_match)
+        else:
+            match_condition = title_match
+        return active_items.filter(match_condition).limit(1).first() is not None
 
     def get_statistics(self, server_type):
         if not server_type:

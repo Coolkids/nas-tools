@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.exc import IntegrityError
 
 from app.db.manager import DATABASE
@@ -119,6 +119,36 @@ class MediaSyncGenerationPublishTest(TestCase):
         self.media_db.publish_sync_generation(lease, movie_count=1, series_count=0)
         self.assertFalse(self.media_db.exists("emby", "旧片", None, None))
         self.assertTrue(self.media_db.exists("emby", "新片", None, None))
+
+    def test_exists_preserves_cross_server_tmdb_semantics_in_one_query(self):
+        self.assertTrue(self.media_db.insert("emby", {
+            "id": "global", "type": "Movie", "title": "其他标题", "tmdbid": "603"}))
+        self.assertTrue(self.media_db.insert("plex", {
+            "id": "local", "type": "Movie", "title": "本地影片",
+            "year": 2000, "tmdbid": None}))
+        self.assertTrue(self.media_db.insert("plex", {
+            "id": "wrong", "type": "Movie", "title": "错误影片",
+            "year": 2000, "tmdbid": "999"}))
+
+        selects = []
+
+        def record_select(connection, cursor, statement, parameters, context, executemany):
+            is_select = statement.lstrip().upper().startswith("SELECT")
+            reads_media = "MEDIASYNC_ITEMS" in statement.upper()
+            if is_select and reads_media:
+                selects.append(statement)
+
+        event.listen(DATABASE.engine, "before_cursor_execute", record_select)
+        try:
+            self.assertTrue(self.media_db.exists("plex", "别名", None, "603"))
+            self.assertTrue(self.media_db.exists("plex", "本地影片", 2000, "42"))
+            self.assertFalse(self.media_db.exists("plex", "错误影片", None, "42"))
+            self.assertTrue(self.media_db.exists("plex", "本地影片", 2000, None))
+            self.assertFalse(self.media_db.exists("plex", "本地影片", 2001, None))
+        finally:
+            event.remove(DATABASE.engine, "before_cursor_execute", record_select)
+
+        self.assertEqual(5, len(selects))
 
     def test_sync_batch_waits_for_database_maintenance_gate(self):
         lease = self.media_db.acquire_sync_lease("emby")
