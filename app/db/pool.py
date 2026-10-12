@@ -8,8 +8,8 @@ from sqlalchemy.pool import QueuePool
 class MeasuredQueuePool(QueuePool):
     """QueuePool that reports total time spent acquiring a connection.
 
-    SQLAlchemy exposes checkout events after acquisition, so measuring the
-    queue wait requires timing QueuePool's acquisition hook. The callback is
+    SQLAlchemy exposes checkout events after acquisition, so time the public
+    ``connect`` call that waits for a pooled connection. The callback is
     optional and only receives an elapsed duration; it never sees SQL or data.
     """
 
@@ -20,10 +20,10 @@ class MeasuredQueuePool(QueuePool):
     def set_wait_observer(self, observer):
         self._wait_observer = observer
 
-    def _do_get(self):
+    def connect(self):
         started_at = time.perf_counter()
         try:
-            return super()._do_get()
+            return super().connect()
         finally:
             observer = self._wait_observer
             if observer is not None:

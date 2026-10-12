@@ -42,9 +42,9 @@ class DatabaseManager:
             "exclusive_maintenance_seconds": 0.0,
             "connection_checkouts": 0,
             "connection_checkins": 0,
-            "pool_wait_count": 0,
-            "pool_wait_seconds": 0.0,
-            "pool_wait_max_seconds": 0.0,
+            "pool_acquisition_count": 0,
+            "pool_acquisition_seconds": 0.0,
+            "pool_acquisition_max_seconds": 0.0,
             "reported_rowcount": 0,
             "sqlite_busy_errors": 0,
             "lock_conflict_errors": 0,
@@ -92,7 +92,7 @@ class DatabaseManager:
             engine = backend.create_engine(settings)
             set_wait_observer = getattr(engine.pool, "set_wait_observer", None)
             if set_wait_observer:
-                set_wait_observer(self._record_pool_wait)
+                set_wait_observer(self._record_pool_acquisition)
             event.listen(engine, "connect",
                          lambda connection, record: backend.configure_connection(connection))
             event.listen(engine, "before_cursor_execute", self._before_cursor_execute)
@@ -205,12 +205,12 @@ class DatabaseManager:
         with self._metrics_lock:
             self._metrics[key] = self._metrics.get(key, 0) + value
 
-    def _record_pool_wait(self, elapsed):
+    def _record_pool_acquisition(self, elapsed):
         with self._metrics_lock:
-            self._metrics["pool_wait_count"] += 1
-            self._metrics["pool_wait_seconds"] += elapsed
-            self._metrics["pool_wait_max_seconds"] = max(
-                self._metrics["pool_wait_max_seconds"], elapsed)
+            self._metrics["pool_acquisition_count"] += 1
+            self._metrics["pool_acquisition_seconds"] += elapsed
+            self._metrics["pool_acquisition_max_seconds"] = max(
+                self._metrics["pool_acquisition_max_seconds"], elapsed)
 
     def record_exclusive_maintenance(self, elapsed):
         self._record_metric("exclusive_maintenance_seconds", max(0.0, elapsed))
