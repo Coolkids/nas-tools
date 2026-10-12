@@ -3,6 +3,7 @@
 import os
 
 from sqlalchemy import URL, create_engine, text
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.pool import QueuePool
 
 from app.db.contracts import DatabaseBackend
@@ -56,3 +57,20 @@ class SQLiteBackend(DatabaseBackend):
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         finally:
             connection.close()
+
+    def upsert_many(self, session, model, rows, conflict_columns, update_columns=None):
+        if not rows:
+            return 0
+        rows, conflict_columns = self._portable_rows(
+            session, model, rows, conflict_columns)
+        statement = sqlite_insert(model.__table__).values(rows)
+        if update_columns:
+            statement = statement.on_conflict_do_update(
+                index_elements=list(conflict_columns),
+                set_={column: getattr(statement.excluded, column)
+                      for column in update_columns})
+        else:
+            statement = statement.on_conflict_do_nothing(
+                index_elements=list(conflict_columns))
+        session.execute(statement)
+        return len(rows)

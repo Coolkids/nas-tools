@@ -3,16 +3,12 @@
 import copy
 from threading import RLock
 
-from sqlalchemy import event, select, text
-from sqlalchemy.dialects.mysql import insert as mysql_insert
-from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import event, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, scoped_session, sessionmaker
 
 from app.db.backends import create_backend
 from app.db.contracts import DatabaseStatus
-from app.db.models import portable_key_digest
 from app.utils.storage_jobs import STORAGE_JOBS
 
 
@@ -176,75 +172,8 @@ class DatabaseManager:
         return self.session.begin()
 
     def upsert_many(self, model, rows, conflict_columns, update_columns=None):
-        if not rows:
-            return 0
-        table = model.__table__
-        original_conflict = tuple(conflict_columns)
-        portable_keys = getattr(model, "__portable_unique_keys__", {})
-        digest_column_name = portable_keys.get(original_conflict)
-        if digest_column_name:
-            digest_column = table.c[digest_column_name]
-            values_by_digest = {}
-            rows = [dict(row) for row in rows]
-            for row in rows:
-                key_values = tuple(row.get(column) for column in original_conflict)
-                digest = portable_key_digest(key_values)
-                row[digest_column_name] = digest
-                if digest is not None:
-                    prior = values_by_digest.setdefault(digest, key_values)
-                    if prior != key_values:
-                        raise ValueError("摘要唯一键冲突，拒绝覆盖不同的原始值")
-            # 在写入前比对摘要对应的原文；即使摘要碰撞也只会明确失败。
-            digest_values = list(values_by_digest)
-            original_columns = [table.c[column] for column in original_conflict]
-            for offset in range(0, len(digest_values), 500):
-                batch = digest_values[offset:offset + 500]
-                statement = select(digest_column, *original_columns).where(
-                    digest_column.in_(batch))
-                for existing in self.session.execute(statement):
-                    digest = existing[0]
-                    existing_values = tuple(existing[1:])
-                    if values_by_digest[digest] != existing_values:
-                        raise ValueError("数据库中发现摘要唯一键冲突，拒绝覆盖不同记录")
-            conflict_columns = (digest_column_name,)
-
-        dialect = self.engine.dialect.name
-        if dialect == "sqlite":
-            statement = sqlite_insert(table).values(rows)
-        elif dialect == "postgresql":
-            statement = postgresql_insert(table).values(rows)
-        elif dialect in {"mysql", "mariadb"}:
-            statement = mysql_insert(table).values(rows)
-            # MySQL 没有可指定冲突键的 on-conflict 子句，拒绝有其他唯一键
-            # 的歧义表，避免把非目标唯一键冲突当成成功。
-            expected = {tuple(conflict_columns)}
-            unique_sets = {tuple(column.name for column in constraint.columns)
-                           for constraint in table.constraints
-                           if getattr(constraint, "unique", False)}
-            unique_sets.update(tuple(index.columns.keys()) for index in table.indexes if index.unique)
-            if unique_sets - expected:
-                raise ValueError(f"{table.name} 存在无法安全区分的其他唯一键")
-            if not update_columns:
-                primary_key = next(iter(table.primary_key.columns)).name
-                statement = statement.on_duplicate_key_update(
-                    **{primary_key: table.c[primary_key]})
-                self.session.execute(statement)
-                return len(rows)
-            statement = statement.on_duplicate_key_update(
-                **{column: getattr(statement.inserted, column) for column in update_columns})
-            self.session.execute(statement)
-            return len(rows)
-        else:
-            raise ValueError(f"不支持的数据库方言：{dialect}")
-
-        if update_columns:
-            statement = statement.on_conflict_do_update(
-                index_elements=list(conflict_columns),
-                set_={column: getattr(statement.excluded, column) for column in update_columns})
-        else:
-            statement = statement.on_conflict_do_nothing(index_elements=list(conflict_columns))
-        self.session.execute(statement)
-        return len(rows)
+        return self.backend.upsert_many(
+            self.session, model, rows, conflict_columns, update_columns)
 
     def reclaim_space(self):
         if not self.supports_space_reclaim:
