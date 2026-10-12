@@ -3,12 +3,13 @@
 import itertools
 import os
 import shutil
+import sqlite3
 import time
 
 import pytest
 
 from app.utils import cache_backend, cache_migration
-from app.utils.cache_backend import CacheStore, DEFAULT_SETTINGS
+from app.utils.cache_backend import CacheStore, DEFAULT_SETTINGS, _SQLiteCache
 from app.utils.storage_jobs import StorageJobStore
 from tests.test_cache_backends import TemporaryValkey
 
@@ -213,4 +214,80 @@ def test_remote_migration_to_a_second_instance_uses_a_new_isolated_generation(
     target_keys = target_server.client().keys("nastool:cache:v2:*")
     assert target_keys
     assert all(job_id.encode() in key for key in target_keys)
+    assert restart_calls == ["scheduled"]
+
+
+def test_migration_reports_entries_expiring_after_snapshot_and_keeps_large_ai_payload(
+        tmp_path, monkeypatch, request, cache_migration_environment):
+    config, jobs, restart_calls = cache_migration_environment
+    source_settings = {**DEFAULT_SETTINGS, "backend": "memory"}
+    config.config["cache"] = dict(source_settings)
+    source_store = CacheStore(path=str(tmp_path / "cache"), settings=source_settings)
+    stores = [source_store]
+    request.addfinalizer(lambda: [store.close() for store in stores])
+    monkeypatch.setattr(cache_migration, "STORE", source_store)
+    monkeypatch.setattr(cache_backend, "STORE", source_store)
+    source_store.initialize()
+
+    expiring_key = "expires-after-snapshot"
+    source_store.put("recognition_tmdb", expiring_key, {"title": "temporary"},
+                     time.time() + 3600)
+    large_response = bytes(1024 * 1024 + 1)
+    source_store.put("recognition_parse", "large-ai-response", {"response": large_response})
+
+    original_manifest = cache_migration._write_snapshot_manifest
+
+    def expire_snapshot_entry(job_id, snapshot_path, source_status):
+        connection = sqlite3.connect(snapshot_path)
+        try:
+            row = connection.execute(
+                "SELECT payload FROM cache_entries_v2 WHERE namespace=? AND cache_key=?",
+                ("recognition_tmdb", CacheStore._key(expiring_key))).fetchone()
+            assert row
+            record = _SQLiteCache._decode(row[0])
+            expired = (record[0], record[1], time.time() - 1)
+            connection.execute(
+                "UPDATE cache_entries_v2 SET payload=?, expires=? "
+                "WHERE namespace=? AND cache_key=?",
+                (_SQLiteCache._encode(expired), expired[2], "recognition_tmdb",
+                 CacheStore._key(expiring_key)))
+            connection.commit()
+        finally:
+            connection.close()
+        return original_manifest(job_id, snapshot_path, source_status)
+
+    monkeypatch.setattr(cache_migration, "_write_snapshot_manifest", expire_snapshot_entry)
+    request = cache_migration.check_cache_storage({"backend": "memory_disk"})
+    assert "code" not in request, request
+    started = cache_migration.start_cache_migration({"backend": "memory_disk",
+                                                     "check_id": request["check_id"]})
+    assert started["code"] == 0, started
+    job_id = started["job_id"]
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        job = jobs.get(job_id)
+        if job["status"] in {"RESTART_PENDING", "FAILED", "RECOVERY_REQUIRED"}:
+            break
+        time.sleep(0.02)
+    worker = cache_migration._WORKERS.get(job_id)
+    if worker:
+        worker.join(timeout=5)
+    job = jobs.get(job_id)
+    assert job["status"] == "RESTART_PENDING", job
+    assert job["result"]["expired_during_migration"] == 1
+    assert job["result"]["expected"]["recognition_tmdb"][0] == 0
+    assert job["result"]["expected"]["recognition_parse"][0] == 1
+    assert config.saved_states == [("SAVING_CONFIG", "memory_disk")]
+
+    source_store.close()
+    target_store = CacheStore(path=str(tmp_path / "cache"),
+                              settings=dict(config.config["cache"]))
+    stores.append(target_store)
+    monkeypatch.setattr(cache_migration, "STORE", target_store)
+    monkeypatch.setattr(cache_backend, "STORE", target_store)
+    cache_migration.verify_cache_startup()
+    assert target_store.get("recognition_tmdb", expiring_key) is None
+    restored_ai = target_store.get("recognition_parse", "large-ai-response")
+    assert restored_ai == ("large-ai-response", {"response": large_response}, None)
+    assert jobs.get(job_id)["status"] == "SUCCEEDED"
     assert restart_calls == ["scheduled"]
