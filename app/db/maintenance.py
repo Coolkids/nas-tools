@@ -9,6 +9,7 @@ import shutil
 import sqlite3
 import stat
 import threading
+import tempfile
 import time
 import uuid
 import zipfile
@@ -422,6 +423,36 @@ def _check_checkpoint(result, stage):
         raise RuntimeError(f"{stage} WAL checkpoint 未完整写入：{result}")
 
 
+def _probe_sqlite_write(connection, stage):
+    """确认数据库卷可写；探针表在事务回滚前创建并删除。"""
+    table = f"__nastools_write_probe_{uuid.uuid4().hex}"
+    quoted = '"' + table + '"'
+    probe_path = None
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(f"CREATE TABLE {quoted} (id INTEGER)")
+        connection.execute(f"DROP TABLE {quoted}")
+        database_path = connection.execute("PRAGMA database_list").fetchone()[2]
+        if database_path:
+            descriptor, probe_path = tempfile.mkstemp(
+                prefix=".nastools-write-probe-",
+                dir=os.path.dirname(os.path.abspath(database_path)))
+            os.close(descriptor)
+            os.unlink(probe_path)
+            probe_path = None
+        connection.rollback()
+    except Exception as error:
+        if connection.in_transaction:
+            connection.rollback()
+        raise RuntimeError(f"{stage} SQLite 数据库不可写，拒绝恢复业务访问") from error
+    finally:
+        if probe_path:
+            try:
+                os.unlink(probe_path)
+            except OSError:
+                pass
+
+
 def start_database_space_reclaim(values=None):
     values = dict(values or {})
     if any(key in values for key in ("path", "table", "domain", "sql")):
@@ -475,6 +506,7 @@ def _run_space_reclaim(job_id, fingerprint):
 
             connection = sqlite3.connect(database_path, timeout=60, isolation_level=None)
             try:
+                _probe_sqlite_write(connection, "空间回收")
                 checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
                 _check_checkpoint(checkpoint, "VACUUM 前")
                 before = _sqlite_stats(database_path)
@@ -549,6 +581,12 @@ def _run_space_reclaim(job_id, fingerprint):
                 DATABASE.engine
             with DATABASE.engine.connect() as connection:
                 connection.execute(text("SELECT 1")).scalar_one()
+            probe_connection = sqlite3.connect(_sqlite_path(), timeout=30,
+                                               isolation_level=None)
+            try:
+                _probe_sqlite_write(probe_connection, "回收失败后的健康检查")
+            finally:
+                probe_connection.close()
             healthy = _sqlite_stats(_sqlite_path())["integrity"] == "ok"
         except Exception:
             pass
@@ -1112,11 +1150,12 @@ def _extract_legacy_sqlite_member(archive, info, path, job_id):
 
 def _convert_legacy_dual_backup(path, upload_id, job_id):
     """Upgrade an old complete SQLite pair into the current portable backup format."""
-    from app.db.migration import _new_engine, _write_schema_revision
+    from app.db.migration import _new_engine, _sqlite_integrity, _write_schema_revision
     from app.db.schema import MEDIA_TABLES
     from app.db.sqlite_files import (_MEDIA_UPGRADE_BASE, _backfill_recognition_search,
                                      _copy_domain, _copy_snapshot,
-                                     _upgrade_legacy_media_snapshot, _upgrade_snapshot,
+                                     _fsync_directory, _upgrade_legacy_media_snapshot,
+                                     _upgrade_snapshot,
                                      cleanup_legacy_startup_data)
 
     config_path = _config().get_config_path()
@@ -1160,12 +1199,20 @@ def _convert_legacy_dual_backup(path, upload_id, job_id):
         target_engine = _new_engine({"type": "sqlite"}, sqlite_path=staged_database)
         Base.metadata.create_all(target_engine)
         expected_tables = set(Base.metadata.tables)
-        with target_engine.begin() as connection:
-            _copy_domain(connection, user_snapshot, "main", expected_tables)
-            _copy_domain(connection, media_snapshot, "media", expected_tables,
-                         excluded_tables={"MEDIASYNC_SYNC_JOBS"})
-            cleanup_legacy_startup_data(connection)
-            _backfill_recognition_search(connection)
+        with target_engine.connect() as connection:
+            attached_sources = []
+            try:
+                with connection.begin():
+                    _copy_domain(connection, user_snapshot, "main", expected_tables,
+                                 attached_sources=attached_sources)
+                    _copy_domain(connection, media_snapshot, "media", expected_tables,
+                                 excluded_tables={"MEDIASYNC_SYNC_JOBS"},
+                                 attached_sources=attached_sources)
+                    cleanup_legacy_startup_data(connection)
+                    _backfill_recognition_search(connection)
+            finally:
+                for alias in reversed(attached_sources):
+                    connection.exec_driver_sql(f"DETACH DATABASE \"{alias}\"")
         _write_schema_revision(target_engine)
         _verify_revision(target_engine)
         target_engine.dispose()
