@@ -73,6 +73,11 @@ def _sanitize_database_job(job):
 class WebAction:
     dbhelper = None
     _actions = {}
+    _cache_admin_actions = frozenset({
+        "get_system_cache_info", "clear_system_cache", "check_cache_storage",
+        "start_cache_migration", "get_cache_job", "cancel_cache_job",
+        "retry_cache_restart", "recover_cache_migration",
+    })
     _database_admin_actions = frozenset({
         "check_database", "prepare_sqlite_migration_target", "start_database_migration",
         "get_database_job", "cancel_database_job", "retry_database_restart",
@@ -81,6 +86,7 @@ class WebAction:
         "check_database_backup", "start_database_restore",
         "restory_backup",
     })
+    _storage_admin_actions = _cache_admin_actions | _database_admin_actions
     TvTypes = ['TV', '电视剧']
     # Excel 导入任务保留在内存中。任务不依赖 WebAction 实例，轮询请求可读取同一份状态。
     _rss_import_jobs = {}
@@ -266,9 +272,10 @@ class WebAction:
         }
 
     def action(self, cmd, data=None):
-        if cmd in self._database_admin_actions:
+        if cmd in self._storage_admin_actions:
             if not current_user.is_authenticated or str(current_user.get_id()) != "0":
-                return {"code": 403, "msg": "仅管理员可以管理数据库"}
+                storage = "缓存" if cmd in self._cache_admin_actions else "数据库"
+                return {"code": 403, "msg": f"仅管理员可以管理{storage}"}
         func = self._actions.get(cmd)
         if not func:
             return {"code": -1, "msg": "非授权访问！"}

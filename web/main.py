@@ -222,8 +222,8 @@ def do():
     except Exception as e:
         ExceptionUtils.exception_traceback(e)
         return {"code": -1, "msg": str(e)}
-    if cmd in WebAction._database_admin_actions and not _is_same_origin_request():
-        return {"code": 403, "msg": "数据库管理请求缺少有效的同源来源信息"}
+    if cmd in WebAction._storage_admin_actions and not _is_same_origin_request():
+        return {"code": 403, "msg": "存储管理请求缺少有效的同源来源信息"}
     if data:
         data = json.loads(data)
     return WebAction().action(cmd, data)
