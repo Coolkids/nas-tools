@@ -402,3 +402,103 @@ def test_cancellation_before_snapshot_preserves_source_and_releases_maintenance_
     assert not source_store.status()["maintenance"]
     assert not (tmp_path / "cache" / "system.sqlite3").exists()
     assert restart_calls == []
+
+
+def test_target_outage_after_check_fails_without_saving_or_fallback_success(
+        tmp_path, monkeypatch, request, cache_valkey, cache_migration_environment):
+    config, jobs, restart_calls = cache_migration_environment
+    source_settings = {**DEFAULT_SETTINGS, "backend": "memory"}
+    config.config["cache"] = dict(source_settings)
+    source_store = CacheStore(path=str(tmp_path / "cache"), settings=source_settings)
+    request.addfinalizer(source_store.close)
+    monkeypatch.setattr(cache_migration, "STORE", source_store)
+    monkeypatch.setattr(cache_backend, "STORE", source_store)
+    source_store.initialize()
+    source_store.put("recognition_tmdb", "source-data", {"title": "keep"})
+
+    submitted = _remote_settings("valkey", cache_valkey)
+    checked = cache_migration.check_cache_storage(submitted)
+    assert "code" not in checked, checked
+    cache_valkey.stop()
+    started = cache_migration.start_cache_migration({**submitted,
+                                                     "check_id": checked["check_id"]})
+    assert started["code"] == 0, started
+    worker = cache_migration._WORKERS.get(started["job_id"])
+    assert worker is not None
+    worker.join(timeout=30)
+
+    job = jobs.get(started["job_id"])
+    assert job["status"] == "FAILED", job
+    assert config.config["cache"]["backend"] == "memory"
+    assert source_store.get("recognition_tmdb", "source-data")[1] == {"title": "keep"}
+    assert jobs.maintenance_gate("cache") is None
+    assert not source_store.status()["maintenance"]
+    assert restart_calls == []
+
+
+def test_source_outage_after_check_fails_without_committing_fallback_memory(
+        tmp_path, monkeypatch, request, cache_valkey, cache_migration_environment):
+    config, jobs, restart_calls = cache_migration_environment
+    source_settings = {**DEFAULT_SETTINGS, **_remote_settings("valkey", cache_valkey),
+                       "storage_generation": "source-generation"}
+    config.config["cache"] = dict(source_settings)
+    source_store = CacheStore(path=str(tmp_path / "cache"), settings=source_settings)
+    request.addfinalizer(source_store.close)
+    monkeypatch.setattr(cache_migration, "STORE", source_store)
+    monkeypatch.setattr(cache_backend, "STORE", source_store)
+    source_store.initialize()
+    source_store.put("recognition_tmdb", "remote-data", {"title": "keep"})
+
+    checked = cache_migration.check_cache_storage({"backend": "memory"})
+    assert "code" not in checked, checked
+    cache_valkey.stop()
+    started = cache_migration.start_cache_migration({"backend": "memory",
+                                                     "check_id": checked["check_id"]})
+    assert started["code"] == 0, started
+    worker = cache_migration._WORKERS.get(started["job_id"])
+    assert worker is not None
+    worker.join(timeout=30)
+
+    job = jobs.get(started["job_id"])
+    assert job["status"] == "FAILED", job
+    assert config.config["cache"]["backend"] == "valkey"
+    assert source_store.status()["fallback"]
+    assert jobs.maintenance_gate("cache") is None
+    assert restart_calls == []
+
+
+def test_snapshot_disk_full_failure_keeps_memory_source_available(
+        tmp_path, monkeypatch, request, cache_migration_environment):
+    config, jobs, restart_calls = cache_migration_environment
+    source_settings = {**DEFAULT_SETTINGS, "backend": "memory"}
+    config.config["cache"] = dict(source_settings)
+    source_store = CacheStore(path=str(tmp_path / "cache"), settings=source_settings)
+    request.addfinalizer(source_store.close)
+    monkeypatch.setattr(cache_migration, "STORE", source_store)
+    monkeypatch.setattr(cache_backend, "STORE", source_store)
+    source_store.initialize()
+    source_store.put("recognition_tmdb", "source-data", {"title": "keep"})
+
+    checked = cache_migration.check_cache_storage({"backend": "memory_disk"})
+    assert "code" not in checked, checked
+
+    def fail_snapshot(*_args, **_kwargs):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(cache_migration, "_write_snapshot_namespace", fail_snapshot)
+    started = cache_migration.start_cache_migration({"backend": "memory_disk",
+                                                     "check_id": checked["check_id"]})
+    assert started["code"] == 0, started
+    worker = cache_migration._WORKERS.get(started["job_id"])
+    assert worker is not None
+    worker.join(timeout=30)
+
+    job = jobs.get(started["job_id"])
+    assert job["status"] == "FAILED", job
+    assert "No space left" in job["error"]
+    assert config.config["cache"]["backend"] == "memory"
+    assert source_store.get("recognition_tmdb", "source-data")[1] == {"title": "keep"}
+    assert jobs.maintenance_gate("cache") is None
+    assert not source_store.status()["maintenance"]
+    assert not (tmp_path / "cache" / "system.sqlite3").exists()
+    assert restart_calls == []
