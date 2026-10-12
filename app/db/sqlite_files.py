@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import time
 import uuid
+import logging
 
 from alembic import command
 from alembic.config import Config as AlembicConfig
@@ -23,6 +24,8 @@ _RETIRED_TABLES = {
     "SITE_FAVICON", "CONFIG_SITE", "SITE_BRUSH_TASK", "SITE_BRUSH_TORRENTS",
 }
 _VERSION_TABLES = {"alembic_version", "alembic_version_media"}
+_LEGACY_ARCHIVE_RETENTION_SECONDS = 30 * 24 * 60 * 60
+logger = logging.getLogger(__name__)
 
 
 def database_path(config_path=None):
@@ -495,7 +498,79 @@ def finalize_sqlite_migration():
     if _database_type() != "sqlite":
         return
     with STORAGE_JOBS.maintenance_lock(exclusive=True):
+        cleanup_legacy_archives()
         _finalize_sqlite_migration()
+
+
+def cleanup_legacy_archives(now=None):
+    """过保留期后仅清理本应用已知布局的旧双库归档。"""
+    archive_root = os.path.join(os.path.dirname(database_path()), ".legacy-archive")
+    if not os.path.isdir(archive_root) or os.path.islink(archive_root):
+        return 0
+    current_time = time.time() if now is None else float(now)
+    cutoff = current_time - _LEGACY_ARCHIVE_RETENTION_SECONDS
+    known_file = re.compile(r"^(?:user|media)\.db(?:-(?:wal|shm))?$")
+    archive_name = re.compile(r"^legacy-merge-[0-9a-f]{32}$")
+    removed = 0
+    try:
+        archives = list(os.scandir(archive_root))
+    except OSError as error:
+        logger.warning("无法枚举旧数据库归档目录 %s：%s", archive_root, error)
+        return 0
+    for archive in archives:
+        if (not archive_name.fullmatch(archive.name)
+                or not archive.is_dir(follow_symlinks=False)):
+            logger.warning("保留未知数据库归档内容：%s", archive.path)
+            continue
+        try:
+            files = list(os.scandir(archive.path))
+        except OSError as error:
+            logger.warning("旧数据库归档清理待重试：%s：%s", archive.path, error)
+            continue
+        manifest_entry = next((entry for entry in files if entry.name == ".retired.json"), None)
+        if manifest_entry:
+            if not manifest_entry.is_file(follow_symlinks=False):
+                logger.warning("旧数据库归档标记不是普通文件，保留目录：%s", archive.path)
+                continue
+            try:
+                with open(manifest_entry.path, "r", encoding="utf-8") as stream:
+                    manifest = json.load(stream)
+                retired_at = float(manifest.get("retired_at") or 0)
+                if manifest.get("job_id") != archive.name.removeprefix("legacy-merge-"):
+                    raise ValueError("归档任务标记不匹配")
+            except (OSError, TypeError, ValueError) as error:
+                logger.warning("旧数据库归档标记无效，保留目录 %s：%s", archive.path, error)
+                continue
+        else:
+            try:
+                retired_at = archive.stat(follow_symlinks=False).st_mtime
+            except OSError as error:
+                logger.warning("无法读取旧数据库归档时间：%s：%s", archive.path, error)
+                continue
+        if retired_at >= cutoff:
+            continue
+        if any(not entry.is_file(follow_symlinks=False)
+               or (entry.name != ".retired.json" and not known_file.fullmatch(entry.name))
+               for entry in files):
+            logger.warning("旧数据库归档含未知内容，保留目录：%s", archive.path)
+            continue
+        try:
+            for entry in files:
+                if entry.name == ".retired.json":
+                    continue
+                os.unlink(entry.path)
+                removed += 1
+            if manifest_entry:
+                os.unlink(manifest_entry.path)
+            os.rmdir(archive.path)
+        except OSError as error:
+            logger.warning("旧数据库归档清理未完成，将在后续启动重试：%s：%s",
+                           archive.path, error)
+    try:
+        os.rmdir(archive_root)
+    except OSError:
+        pass
+    return removed
 
 
 def _finalize_sqlite_migration():
@@ -511,13 +586,36 @@ def _finalize_sqlite_migration():
     if source:
         _validate_completed_sources(target_path, source)
     archive_root = os.path.join(os.path.dirname(target_path), ".legacy-archive")
+    if os.path.islink(archive_root):
+        raise RuntimeError("旧数据库归档路径不能是符号链接")
     os.makedirs(archive_root, exist_ok=True)
     target = os.path.join(archive_root, f"legacy-merge-{job_id}")
+    if os.path.lexists(target) and (os.path.islink(target) or not os.path.isdir(target)):
+        raise RuntimeError("旧数据库归档目标已被非目录内容占用")
     os.makedirs(target, exist_ok=True)
     if not source:
+        try:
+            if not os.listdir(target):
+                os.rmdir(target)
+        except OSError as error:
+            logger.warning("空数据库归档目录清理待重试：%s：%s", target, error)
         shutil.rmtree(os.path.join(os.path.dirname(target_path), ".staging",
                                    f"legacy-merge-{job_id}"), ignore_errors=True)
+        try:
+            os.rmdir(archive_root)
+        except OSError:
+            pass
         return
+    manifest_path = os.path.join(target, ".retired.json")
+    if not os.path.exists(manifest_path):
+        temporary_manifest = manifest_path + ".tmp"
+        with open(temporary_manifest, "w", encoding="utf-8") as stream:
+            json.dump({"job_id": job_id, "retired_at": time.time()}, stream,
+                      ensure_ascii=False, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_manifest, manifest_path)
+        _fsync_directory(target)
     moved = []
     try:
         for path in (source.get("user"), source.get("media")):
