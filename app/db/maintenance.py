@@ -1024,6 +1024,179 @@ def _export_backup(source_connection, backup_path, job_id, source_type,
     return manifest
 
 
+def _legacy_dual_backup_entries(archive):
+    """Recognize only complete, unambiguous legacy SQLite pairs."""
+    infos = archive.infolist()
+    names = [info.filename for info in infos]
+    if len(infos) > 8 or len(names) != len(set(names)):
+        raise ValueError("旧备份条目数量无效或包含重复文件")
+    allowed = {"user.db", "media.db", "db/user.db", "db/media.db",
+               "config.yaml", "default-category.yaml", "backup-format.json"}
+    allowed_directories = {"db/"}
+    total_size = 0
+    by_name = {}
+    for info in infos:
+        name = info.filename
+        mode = info.external_attr >> 16
+        if info.is_dir():
+            if name not in allowed_directories or stat.S_ISLNK(mode):
+                raise ValueError("旧备份包含不允许的目录")
+            continue
+        if (name not in allowed or stat.S_ISLNK(mode)
+                or info.file_size < 0 or info.compress_size < 0):
+            raise ValueError("旧备份包含不允许的文件")
+        total_size += info.file_size
+        if total_size > _MAX_ARCHIVE_BYTES:
+            raise ValueError("旧备份解压后超过服务器允许大小")
+        if info.file_size and info.compress_size == 0:
+            raise ValueError("旧备份压缩信息无效")
+        if info.compress_size and info.file_size / info.compress_size > 10000:
+            raise ValueError("旧备份压缩比异常，拒绝解压")
+        by_name[name] = info
+
+    if "backup-format.json" in by_name:
+        info = by_name["backup-format.json"]
+        if info.file_size > _MAX_MANIFEST_BYTES:
+            raise ValueError("旧备份格式说明超过允许大小")
+        try:
+            marker = json.loads(archive.read(info).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ValueError("旧备份格式说明无效") from None
+        if not isinstance(marker, dict):
+            raise ValueError("旧备份格式说明无效")
+        if marker.get("database_included") is False:
+            raise ValueError("这是设置备份，不包含完整数据库，不能用于数据库恢复")
+
+    root_pair = {"user.db", "media.db"}
+    db_pair = {"db/user.db", "db/media.db"}
+    present = set(by_name)
+    root_present = root_pair.intersection(present)
+    db_present = db_pair.intersection(present)
+    if root_present == root_pair and not db_present:
+        return {"user.db": by_name["user.db"], "media.db": by_name["media.db"]}
+    if db_present == db_pair and not root_present:
+        return {"user.db": by_name["db/user.db"], "media.db": by_name["db/media.db"]}
+    if root_present and db_present:
+        raise ValueError("旧备份同时包含根目录和 db/ 数据库，来源冲突")
+    if root_present or db_present:
+        if "user.db" in root_present or "db/user.db" in db_present:
+            raise ValueError("旧备份缺少 media.db，属于不完整设置备份，不能恢复为完整数据库")
+        if "media.db" in root_present or "db/media.db" in db_present:
+            raise ValueError("旧备份缺少 user.db，不能恢复为完整数据库")
+        raise ValueError("旧备份中的 user.db / media.db 布局不完整或来源冲突")
+    raise ValueError("该 ZIP 不是完整数据库备份")
+
+
+def _extract_legacy_sqlite_member(archive, info, path, job_id):
+    written = 0
+    header = bytearray()
+    with archive.open(info, "r") as source, open(path, "xb") as target:
+        while True:
+            if STORAGE_JOBS.cancel_requested(job_id):
+                raise InterruptedError("已取消旧双库备份转换")
+            block = source.read(1024 * 1024)
+            if not block:
+                break
+            written += len(block)
+            if written > info.file_size or written > _MAX_ARCHIVE_BYTES:
+                raise ValueError("旧备份数据库文件大小与 ZIP 清单不符")
+            if len(header) < 16:
+                header.extend(block[:16 - len(header)])
+            target.write(block)
+        target.flush()
+        os.fsync(target.fileno())
+    if written != info.file_size or bytes(header) != b"SQLite format 3\x00":
+        raise ValueError("旧备份中的 SQLite 文件不完整或格式无效")
+    _secure_file(path)
+
+
+def _convert_legacy_dual_backup(path, upload_id, job_id):
+    """Upgrade an old complete SQLite pair into the current portable backup format."""
+    from app.db.migration import _new_engine, _write_schema_revision
+    from app.db.schema import MEDIA_TABLES
+    from app.db.sqlite_files import (_MEDIA_UPGRADE_BASE, _backfill_recognition_search,
+                                     _copy_domain, _copy_snapshot,
+                                     _upgrade_legacy_media_snapshot, _upgrade_snapshot,
+                                     cleanup_legacy_startup_data)
+
+    config_path = _config().get_config_path()
+    staging_dir = os.path.join(config_path, "db", ".staging",
+                               f"legacy-backup-{job_id}")
+    os.makedirs(os.path.dirname(staging_dir), mode=0o700, exist_ok=True)
+    os.makedirs(staging_dir, mode=0o700, exist_ok=False)
+    try:
+        os.chmod(staging_dir, 0o700)
+    except OSError:
+        pass
+    source_user = os.path.join(staging_dir, "user.extracted.sqlite3")
+    source_media = os.path.join(staging_dir, "media.extracted.sqlite3")
+    user_snapshot = os.path.join(staging_dir, "user.snapshot.sqlite3")
+    media_snapshot = os.path.join(staging_dir, "media.snapshot.sqlite3")
+    staged_database = os.path.join(staging_dir, "nastools.staged.sqlite3")
+    canonical_path = os.path.join(_upload_root(), f".{upload_id}.{job_id}.canonical.zip")
+    target_engine = None
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            entries = _legacy_dual_backup_entries(archive)
+            _extract_legacy_sqlite_member(archive, entries["user.db"], source_user, job_id)
+            _extract_legacy_sqlite_member(archive, entries["media.db"], source_media, job_id)
+
+        _copy_snapshot(source_user, user_snapshot)
+        _copy_snapshot(source_media, media_snapshot)
+        source = sqlite3.connect(f"file:{os.path.abspath(user_snapshot)}?mode=ro",
+                                 uri=True, timeout=30)
+        try:
+            user_tables = {str(row[0]).upper() for row in source.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+        finally:
+            source.close()
+        if user_tables & {name.upper() for name in MEDIA_TABLES}:
+            raise ValueError("旧 user.db 已包含媒体表，不能与 media.db 合并")
+
+        STORAGE_JOBS.update(job_id, status="BUILDING_STAGE", stage="BUILDING_STAGE",
+                            message="正在升级旧主库和媒体库快照", progress=0.05)
+        _upgrade_snapshot(user_snapshot, config_path, target_revision=_MEDIA_UPGRADE_BASE)
+        _upgrade_legacy_media_snapshot(media_snapshot, config_path)
+        target_engine = _new_engine({"type": "sqlite"}, sqlite_path=staged_database)
+        Base.metadata.create_all(target_engine)
+        expected_tables = set(Base.metadata.tables)
+        with target_engine.begin() as connection:
+            _copy_domain(connection, user_snapshot, "main", expected_tables)
+            _copy_domain(connection, media_snapshot, "media", expected_tables,
+                         excluded_tables={"MEDIASYNC_SYNC_JOBS"})
+            cleanup_legacy_startup_data(connection)
+            _backfill_recognition_search(connection)
+        _write_schema_revision(target_engine)
+        _verify_revision(target_engine)
+        target_engine.dispose()
+        target_engine = None
+        _sqlite_integrity(staged_database)
+
+        target_engine = _new_engine({"type": "sqlite"}, sqlite_path=staged_database)
+        with target_engine.connect() as connection:
+            _export_backup(connection, canonical_path, job_id, "sqlite",
+                           job_status="BUILDING_STAGE", stage="BUILDING_STAGE")
+        target_engine.dispose()
+        target_engine = None
+        if _file_size(canonical_path) > _MAX_UPLOAD_BYTES:
+            raise ValueError("转换后的完整数据库备份超过服务器允许大小")
+        checked = _validate_backup_archive(canonical_path, job_id=job_id)
+        if STORAGE_JOBS.cancel_requested(job_id):
+            raise InterruptedError("已取消旧双库备份转换")
+        os.replace(canonical_path, path)
+        _fsync_directory(os.path.dirname(path))
+        checked["legacy_converted"] = True
+        return checked
+    finally:
+        if target_engine is not None:
+            target_engine.dispose()
+        try:
+            os.unlink(canonical_path)
+        except FileNotFoundError:
+            pass
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+
 def start_database_backup(values=None):
     values = dict(values or {})
     if any(key in values for key in ("path", "database_path", "config_path")):
@@ -1420,7 +1593,11 @@ def _run_backup_check(job_id, upload_id, path):
     try:
         STORAGE_JOBS.update(job_id, status="CHECKING_BACKUP", stage="CHECKING_BACKUP",
                             message="正在校验备份文件、结构和逐表数据摘要")
-        result = _validate_backup_archive(path, job_id=job_id)
+        with zipfile.ZipFile(path, "r") as archive:
+            is_current_format = "manifest.json" in archive.namelist()
+        result = (_validate_backup_archive(path, job_id=job_id)
+                  if is_current_format else
+                  _convert_legacy_dual_backup(path, upload_id, job_id))
         manifest = result["manifest"]
         summary = {"upload_id": upload_id, "source_database_type": manifest["source_database_type"],
                    "application_version": manifest.get("application_version"),
@@ -1432,9 +1609,12 @@ def _run_backup_check(job_id, upload_id, path):
                    "size_bytes": result["size_bytes"],
                    "manifest_sha256": result["manifest_sha256"],
                    "archive_sha256": result["archive_sha256"],
+                   "legacy_converted": bool(result.get("legacy_converted")),
                    "full_database": True}
         STORAGE_JOBS.update(job_id, status="READY", stage="READY", result=summary,
-                            message="完整备份与所有表数据校验通过，可进入恢复确认", progress=1)
+                            message=("旧完整双库备份已转换并完成逐表校验，可进入恢复确认"
+                                     if result.get("legacy_converted") else
+                                     "完整备份与所有表数据校验通过，可进入恢复确认"), progress=1)
     except InterruptedError as error:
         STORAGE_JOBS.update(job_id, status="CANCELLED", stage="CANCELLED",
                             message=str(error))
