@@ -957,6 +957,13 @@ def _copy_table(source_connection, target_engine, table):
 
     for source_batch in source_backend.read_batches(source_connection, table):
         for mapping in source_batch:
+            for column in table.columns:
+                value = mapping.get(column.name)
+                limit = getattr(column.type, "length", None)
+                if (value is not None and limit is not None
+                        and isinstance(value, str) and len(value) > limit):
+                    raise RuntimeError(
+                        f"表 {table.name}.{column.name} 有超过 {limit} 个字符的记录，拒绝截断")
             row_bytes = 64
             for value in mapping.values():
                 if value is None:

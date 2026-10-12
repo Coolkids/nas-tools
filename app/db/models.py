@@ -657,7 +657,7 @@ class MEDIASYNCSTATISTIC(BaseMedia):
     __table_args__ = (Index('UN_INDX_MEDIASYNC_STATISTICS_SERVER', 'SERVER', unique=True),)
 
     ID = Column(Integer, primary_key=True)
-    SERVER = Column(Text)
+    SERVER = Column(String(128))
     ACTIVE_GENERATION = Column(String(64), nullable=False, default=MEDIA_SYNC_LEGACY_GENERATION,
                                server_default=MEDIA_SYNC_LEGACY_GENERATION)
     TOTAL_COUNT = Column(Text)

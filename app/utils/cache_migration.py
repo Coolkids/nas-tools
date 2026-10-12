@@ -160,6 +160,7 @@ def _snapshot_namespace_digest(path, namespace):
         cursor = connection.execute(
             "SELECT cache_key, payload, expires FROM cache_entries_v2 "
             "WHERE namespace=? ORDER BY cache_key", (namespace,))
+
         def records():
             while True:
                 rows = cursor.fetchmany(500)
@@ -185,6 +186,11 @@ def _write_snapshot_manifest(job_id, snapshot_path, source_status):
             os.unlink(snapshot_path + suffix)
         except FileNotFoundError:
             pass
+    descriptor = os.open(snapshot_path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
     try:
         os.chmod(snapshot_path, 0o600)
     except OSError:
