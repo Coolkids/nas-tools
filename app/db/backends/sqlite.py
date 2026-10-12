@@ -27,8 +27,11 @@ class SQLiteBackend(DatabaseBackend):
             echo=False,
             poolclass=MeasuredQueuePool,
             pool_pre_ping=True,
-            pool_size=5,
-            max_overflow=5,
+            # SQLite still has a single concurrent writer. Keep two connections
+            # for overlapping reads/work while preventing a burst of workers
+            # from opening a ten-connection pool against the same WAL file.
+            pool_size=2,
+            max_overflow=0,
             pool_recycle=1800,
             pool_timeout=60,
             connect_args={"timeout": 60, "check_same_thread": False,

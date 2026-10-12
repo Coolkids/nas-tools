@@ -19,6 +19,8 @@ def test_sqlite_settings_apply_to_pooled_and_recreated_connections(tmp_path, mon
 
     try:
         engine = manager.engine
+        assert engine.pool.size() == 2
+        assert engine.pool._max_overflow == 0
         with engine.connect() as first, engine.connect() as second:
             assert _read_settings(first) == {
                 "busy_timeout": 60000,

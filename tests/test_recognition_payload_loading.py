@@ -11,7 +11,8 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import RECOGNITIONATTEMPT, RECOGNITIONREQUEST
+from app.db.models import (RECOGNITIONATTEMPT, RECOGNITIONREQUEST,
+                           RECOGNITIONREQUESTACTION)
 from app.helper.db_helper import DbHelper
 from web.action import WebAction
 
@@ -28,6 +29,7 @@ class RecognitionPayloadLoadingTest(unittest.TestCase):
         engine = sa.create_engine("sqlite:///:memory:")
         RECOGNITIONREQUEST.__table__.create(engine)
         RECOGNITIONATTEMPT.__table__.create(engine)
+        RECOGNITIONREQUESTACTION.__table__.create(engine)
         session = sessionmaker(bind=engine)()
 
         class TestDb:
@@ -42,18 +44,26 @@ class RecognitionPayloadLoadingTest(unittest.TestCase):
                 self.commit_count += 1
                 session.commit()
 
+            @staticmethod
+            def transaction():
+                return session.begin()
+
         previous_db = DbHelper._db
         test_db = TestDb()
         DbHelper._db = test_db
         try:
             session.add_all([
                 RECOGNITIONREQUEST(REQUEST_ID="old-1", CREATED_AT="2026-08-01 10:00:00",
+                                   STATUS_SUMMARY="success",
                                    OVERALL_RESULT='{"status":"success"}'),
                 RECOGNITIONREQUEST(REQUEST_ID="old-2", CREATED_AT="2026-08-02 10:00:00",
+                                   STATUS_SUMMARY="failed",
                                    OVERALL_RESULT='{"status":"failed"}'),
                 RECOGNITIONREQUEST(REQUEST_ID="running", CREATED_AT="2026-08-01 10:00:00",
+                                   STATUS_SUMMARY="running",
                                    OVERALL_RESULT='{"status":"running"}'),
                 RECOGNITIONREQUEST(REQUEST_ID="recent", CREATED_AT="2026-09-20 10:00:00",
+                                   STATUS_SUMMARY="success",
                                    OVERALL_RESULT='{"status":"success"}'),
             ])
             session.add_all([
@@ -81,6 +91,7 @@ class RecognitionPayloadLoadingTest(unittest.TestCase):
         engine = sa.create_engine("sqlite:///:memory:")
         RECOGNITIONREQUEST.__table__.create(engine)
         RECOGNITIONATTEMPT.__table__.create(engine)
+        RECOGNITIONREQUESTACTION.__table__.create(engine)
         session = sessionmaker(bind=engine)()
 
         class TestDb:
@@ -155,6 +166,7 @@ class RecognitionPayloadLoadingTest(unittest.TestCase):
         engine = sa.create_engine("sqlite:///:memory:")
         RECOGNITIONREQUEST.__table__.create(engine)
         RECOGNITIONATTEMPT.__table__.create(engine)
+        RECOGNITIONREQUESTACTION.__table__.create(engine)
         session = sessionmaker(bind=engine)()
 
         class TestDb:
@@ -169,6 +181,10 @@ class RecognitionPayloadLoadingTest(unittest.TestCase):
             @staticmethod
             def rollback():
                 session.rollback()
+
+            @staticmethod
+            def transaction():
+                return session.begin()
 
         previous_db = DbHelper._db
         DbHelper._db = TestDb()

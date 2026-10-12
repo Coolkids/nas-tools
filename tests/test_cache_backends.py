@@ -42,6 +42,28 @@ def test_disk_mode_uses_sqlite_and_other_process_changes_invalidate_memory(tmp_p
     assert first.get("test", "a") is None
 
 
+def test_wallpaper_namespace_keeps_only_one_entry_after_restart(tmp_path):
+    path = str(tmp_path / "cache")
+    first = CacheStore(path, settings={"backend": "memory_disk"})
+    try:
+        first.put("wallpaper", "first", "old", time.time() + 60)
+        first.put("wallpaper", "second", "new", time.time() + 120)
+        first.put("tmdb_supply", "first", "keep-1", time.time() + 60)
+        first.put("tmdb_supply", "second", "keep-2", time.time() + 60)
+        assert [(key, value) for key, value, _ in first.load("wallpaper")] == [
+            ("second", "new")]
+    finally:
+        first.close()
+
+    restored = CacheStore(path, settings={"backend": "memory_disk"})
+    try:
+        assert [(key, value) for key, value, _ in restored.load("wallpaper")] == [
+            ("second", "new")]
+        assert {key for key, _, _ in restored.load("tmdb_supply")} == {"first", "second"}
+    finally:
+        restored.close()
+
+
 def test_configuration_changes_wait_for_controlled_restart(tmp_path):
     settings = {"backend": "memory"}
     store = CacheStore(str(tmp_path / "cache"), settings=settings)

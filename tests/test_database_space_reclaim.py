@@ -62,7 +62,9 @@ class DatabaseSpaceReclaimTest(TestCase):
         self.directory.cleanup()
 
     def test_reclaim_compacts_fixed_database_and_preserves_rows(self):
-        before_size = os.path.getsize(self.database_path)
+        before_size = sum(os.path.getsize(self.database_path + suffix)
+                          for suffix in ("", "-wal", "-shm")
+                          if os.path.exists(self.database_path + suffix))
         with sqlite3.connect(self.database_path) as connection:
             before = connection.execute(
                 "SELECT ID, ITEM_ID, TITLE, length(JSON) FROM MEDIASYNC_ITEMS ORDER BY ID"
@@ -84,7 +86,10 @@ class DatabaseSpaceReclaimTest(TestCase):
         self.assertEqual("SUCCEEDED", job["status"], job.get("error"))
         self.assertTrue(job["result"]["vacuum_completed"])
         self.assertGreater(job["result"]["before"]["freelist_count"], 0)
-        self.assertLess(os.path.getsize(self.database_path), before_size)
+        after_size = sum(os.path.getsize(self.database_path + suffix)
+                         for suffix in ("", "-wal", "-shm")
+                         if os.path.exists(self.database_path + suffix))
+        self.assertLess(after_size, before_size)
         with sqlite3.connect(self.database_path) as connection:
             after = connection.execute(
                 "SELECT ID, ITEM_ID, TITLE, length(JSON) FROM MEDIASYNC_ITEMS ORDER BY ID"

@@ -715,7 +715,9 @@ for _table in Base.metadata.tables.values():
         _text_columns = [column for column in _index.columns
                          if isinstance(column.type, Text)]
         if _text_columns and not _index.unique:
-            _index.dialect_options["mysql"]["length"] = {
+            text_prefixes = {
                 column.name: 191 for column in _text_columns
             }
+            _index.dialect_options["mysql"]["length"] = text_prefixes
+            _index.dialect_options["mariadb"]["length"] = text_prefixes
             _index.ddl_if(dialect=("sqlite", "mysql", "mariadb"))

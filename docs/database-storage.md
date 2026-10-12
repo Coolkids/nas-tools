@@ -53,11 +53,28 @@ SQLite 的文件名和目录由后端固定生成，不能在设置页或 API �
 
 ## 测试环境记录
 
-本节记录真实部署验收结果。尚未填写的版本和耗时不代表已验证或承诺支持；测试时使用隔离数据库，先检查实例状态，不要清空正在使用的数据库。
+验证日期：2026-10-13。测试使用 Python 3.14.4、SQLAlchemy 2.1.4、临时 SQLite，以及三个专用且运行前确认为空的远程测试库。远程契约用例结束后再次确认三个测试库均无遗留表。驱动和服务版本仅代表本次验收环境，不构成对其他版本的兼容承诺。
 
-| 后端 | 服务端版本 | 驱动版本 | 启动/重启方式 | 迁移与备份恢复耗时 | 验收日期 |
+| 后端 | 服务端版本 | 驱动版本 | 启动/重启方式 | 空库 schema 初始化耗时 | 验收日期 |
 | --- | --- | --- | --- | --- | --- |
-| SQLite | 待验收 | Python `sqlite3`（随 Python 提供） | 待验收 | 待验收 | 待验收 |
-| PostgreSQL | 待验收 | `psycopg`，以锁文件为准 | 待验收 | 待验收 | 待验收 |
-| MySQL | 待验收 | `PyMySQL`，以锁文件为准 | 待验收 | 待验收 | 待验收 |
-| MariaDB | 待验收 | `PyMySQL`，以锁文件为准 | 待验收 | 待验收 | 待验收 |
+| SQLite | Python `sqlite3`（随 Python 3.14.4 提供） | Python 标准库 | 隔离临时配置目录直接运行 `run.py`；健康接口、登录、SQLite 业务库/缓存文件创建和 SIGINT 退出通过 | 应用启动 smoke test 通过；未单独计时 | 2026-10-13 |
+| PostgreSQL | 18.6 (Ubuntu build) | `psycopg` 3.3.6 | 应用级 SQLAlchemy 契约及 `app_database.update_db()` schema bootstrap；应用进程重启未在该远程配置下测试 | 0.152 秒，34 张应用表 | 2026-10-13 |
+| MySQL | 8.4.11 Community | `PyMySQL` 1.2.3 | 应用级 SQLAlchemy 契约及 `app_database.update_db()` schema bootstrap；应用进程重启未在该远程配置下测试 | 4.527 秒，34 张应用表 | 2026-10-13 |
+| MariaDB | 11.8.9-MariaDB-ubu2404 | `PyMySQL` 1.2.3 | 应用级 SQLAlchemy 契约及 `app_database.update_db()` schema bootstrap；应用进程重启未在该远程配置下测试 | 4.831 秒，34 张应用表 | 2026-10-13 |
+
+`tests/test_database_engine_contract.py` 的隔离远程运行结果为 9 passed。该结果验证 CRUD、事务回滚、批量插入/upsert、唯一约束、分页、自增、非连续主键、会话归还，以及四种后端的空库 metadata 初始化。它不代表执行了跨数据库业务数据迁移，也不代表备份恢复矩阵通过。计时只包括新空库的应用 schema 初始化，不包括跨库导入、备份、恢复或进程重启。
+
+2026-10-13 最终本地回归：后端 `319 passed, 10 skipped, 83 subtests passed`；隔离缓存容量压力 `2 passed`；前端 `npm run type-check` 和 `npm run build` 均通过。跳过项中包含远程环境和压力门控用例；远程契约及压力用例另行运行并记录在上文。
+
+备份/恢复仍未完成实库验收。本次没有生成或导入数据库备份，因此不记录耗时，也不把任何未测试平台标为已验证。部署操作仍按上文的“完整数据库备份与恢复”流程执行；正式启用恢复前应先在隔离副本完成目标数据库组合、损坏包和中断回滚验收。
+
+直接运行 smoke test 使用临时配置目录和 SQLite，验证 `/index`、登录以及 SIGINT 停止。Docker CLI 可用，但当前执行用户无法访问 Docker daemon socket，因此镜像构建、Supervisor 容器启动和容器内受控重启均未验证。前端 `npm run type-check` 与 `npm run build` 已通过；浏览器多视口/主题人工验收仍待执行。
+
+运行本地测试：
+
+```bash
+.venv/bin/python -m pytest -q
+NASTOOLS_RUN_CACHE_PRESSURE=1 .venv/bin/python -m pytest tests/test_cache_unbounded_pressure.py -q
+```
+
+远程契约测试只应对独立空测试库执行。通过 `NASTOOLS_TEST_DATABASE_SETTINGS` 提供 PostgreSQL、MySQL、MariaDB 的 JSON 连接配置；完整 schema bootstrap 用例会拒绝非空数据库，并在完成后删除本次创建的应用表。不要将真实业务数据库配置用于该测试。

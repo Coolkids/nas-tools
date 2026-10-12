@@ -8,7 +8,8 @@ import unittest
 import sqlalchemy as sa
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import RECOGNITIONATTEMPT, RECOGNITIONREQUEST
+from app.db.models import (RECOGNITIONATTEMPT, RECOGNITIONREQUEST,
+                           RECOGNITIONREQUESTACTION, portable_key_digest)
 from app.helper.db_helper import DbHelper
 from web.action import WebAction
 
@@ -18,6 +19,7 @@ class RecognitionExportPaginationTest(unittest.TestCase):
         engine = sa.create_engine("sqlite:///:memory:")
         RECOGNITIONREQUEST.__table__.create(engine)
         RECOGNITIONATTEMPT.__table__.create(engine)
+        RECOGNITIONREQUESTACTION.__table__.create(engine)
         session = sessionmaker(bind=engine)()
         reader_session = session
 
@@ -112,6 +114,7 @@ class RecognitionExportPaginationTest(unittest.TestCase):
         engine = sa.create_engine("sqlite:///:memory:")
         RECOGNITIONREQUEST.__table__.create(engine)
         RECOGNITIONATTEMPT.__table__.create(engine)
+        RECOGNITIONREQUESTACTION.__table__.create(engine)
         session = sessionmaker(bind=engine)()
 
         class TestDb:
@@ -127,24 +130,32 @@ class RecognitionExportPaginationTest(unittest.TestCase):
                     REQUEST_ID="match-b", ORIGINAL_NAME="Example Movie 2024", SOURCE="rss",
                     STAGE="resolve", CREATED_AT="2026-10-02 23:59:59.999999",
                     CONTEXT="{}", ACTIONS='[{"action_type": "tmdb_query"}]',
+                    STATUS_SUMMARY="failed", REASON_SUMMARY="no_tmdb_match",
+                    REASON_HASH=portable_key_digest(("no_tmdb_match",)),
                     PROVIDER_RESULTS="[]", OVERALL_RESULT=(
                         '{"status": "failed", "reason": "no_tmdb_match"}'), TMDB_RESULTS="[]"),
                 RECOGNITIONREQUEST(
                     REQUEST_ID="match-a", ORIGINAL_NAME="Example Movie 2024", SOURCE="rss",
                     STAGE="resolve", CREATED_AT="2026-10-02 00:00:00.000000",
                     CONTEXT="{}", ACTIONS='[{"action_type": "tmdb_query"}]',
+                    STATUS_SUMMARY="failed", REASON_SUMMARY="no_tmdb_match",
+                    REASON_HASH=portable_key_digest(("no_tmdb_match",)),
                     PROVIDER_RESULTS="[]", OVERALL_RESULT=(
                         '{"status": "failed", "reason": "no_tmdb_match"}'), TMDB_RESULTS="[]"),
                 RECOGNITIONREQUEST(
                     REQUEST_ID="wrong-source", ORIGINAL_NAME="Example Movie 2024", SOURCE="web",
                     STAGE="resolve", CREATED_AT="2026-10-02 12:00:00.000000",
                     CONTEXT="{}", ACTIONS='[{"action_type": "tmdb_query"}]',
+                    STATUS_SUMMARY="failed", REASON_SUMMARY="no_tmdb_match",
+                    REASON_HASH=portable_key_digest(("no_tmdb_match",)),
                     PROVIDER_RESULTS="[]", OVERALL_RESULT=(
                         '{"status": "failed", "reason": "no_tmdb_match"}'), TMDB_RESULTS="[]"),
                 RECOGNITIONREQUEST(
                     REQUEST_ID="after-range", ORIGINAL_NAME="Example Movie 2024", SOURCE="rss",
                     STAGE="resolve", CREATED_AT="2026-10-03 00:00:00.000000",
                     CONTEXT="{}", ACTIONS='[{"action_type": "tmdb_query"}]',
+                    STATUS_SUMMARY="failed", REASON_SUMMARY="no_tmdb_match",
+                    REASON_HASH=portable_key_digest(("no_tmdb_match",)),
                     PROVIDER_RESULTS="[]", OVERALL_RESULT=(
                         '{"status": "failed", "reason": "no_tmdb_match"}'), TMDB_RESULTS="[]"),
             ])
@@ -153,6 +164,14 @@ class RecognitionExportPaginationTest(unittest.TestCase):
                     REQUEST_ID=request_id, ATTEMPT_ID=f"attempt-{request_id}",
                     PROVIDER_ID="fixture_third", STATUS="success", INPUT="{}",
                     RAW_RESULT="{}", NORMALIZED_RESULT="{}", TMDB_RESULTS="[]")
+                for request_id in ("match-a", "match-b", "wrong-source", "after-range")
+            ])
+            session.add_all([
+                RECOGNITIONREQUESTACTION(
+                    ID=portable_key_digest((request_id, "tmdb_query")),
+                    REQUEST_ID=request_id,
+                    ACTION_TYPE="tmdb_query",
+                    ACTION_HASH=portable_key_digest(("tmdb_query",)))
                 for request_id in ("match-a", "match-b", "wrong-source", "after-range")
             ])
             session.commit()

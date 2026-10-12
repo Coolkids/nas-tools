@@ -1,14 +1,21 @@
 import unittest
-from types import SimpleNamespace
-from unittest.mock import patch
+import importlib.util
+from pathlib import Path
 
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from sqlalchemy import create_engine, inspect, text
 
-import app.db.main_db as main_db
+
+MIGRATION_PATH = Path(__file__).resolve().parents[1] / "db_scripts" / "versions" / \
+    "f5a6b7c8d9e0_move_legacy_startup_cleanup.py"
+SPEC = importlib.util.spec_from_file_location("legacy_site_cleanup_migration", MIGRATION_PATH)
+MIGRATION = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MIGRATION)
 
 
 class SiteAccountStatisticsRemovalTest(unittest.TestCase):
-    def test_startup_drops_legacy_site_account_data_and_credentials(self):
+    def test_migration_drops_legacy_site_account_data_and_credentials(self):
         engine = create_engine("sqlite:///:memory:")
         legacy_tables = (
             "SITE_STATISTICS_HISTORY", "SITE_USER_INFO_STATS",
@@ -24,9 +31,9 @@ class SiteAccountStatisticsRemovalTest(unittest.TestCase):
                 "('SystemConfig', 'CookieUserInfo', '{\"username\":\"old\"}')"))
 
         try:
-            with patch.object(main_db, "DATABASE", SimpleNamespace(engine=engine)), \
-                    patch.object(main_db.MainDb, "wal_checkpoint"):
-                main_db.MainDb.init_db()
+            with engine.begin() as conn:
+                with Operations.context(MigrationContext.configure(conn)):
+                    MIGRATION.upgrade()
 
             table_names = set(inspect(engine).get_table_names())
             self.assertTrue(set(legacy_tables).isdisjoint(table_names))

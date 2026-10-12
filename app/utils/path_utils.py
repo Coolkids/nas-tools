@@ -59,7 +59,8 @@ class PathUtils:
         with os.scandir(in_path) as entries:
             for entry in entries:
                 if entry.is_file():
-                    if not exts or os.path.splitext(entry.name)[-1].lower() in exts:
+                    extension = os.path.splitext(entry.name)[-1].lower()
+                    if not exts or (extension and extension in exts):
                         ret_list.append(entry.path)
         return ret_list
 

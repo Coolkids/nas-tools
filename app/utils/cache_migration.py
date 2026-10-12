@@ -239,7 +239,8 @@ def _validate_snapshot_manifest(job_id, snapshot_path, expected_source=None):
     _validate_snapshot_database(snapshot_path)
     for namespace in CACHE_NAMESPACE_REGISTRY:
         actual = _snapshot_namespace_digest(snapshot_path, namespace)
-        if actual != manifest["namespaces"].get(namespace):
+        expected = manifest["namespaces"].get(namespace)
+        if not isinstance(expected, (list, tuple)) or tuple(expected) != actual:
             raise ValueError(f"缓存快照命名空间 {namespace} 不完整")
     return manifest
 

@@ -85,7 +85,8 @@ DbHelper.release_session()
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
             self.assertEqual(0, recovered.returncode, recovered.stderr)
             result = json.loads(recovered.stdout.strip().splitlines()[-1])
-            self.assertEqual({"replayed": 1, "pending": 0, "invalid": 0}, result["recovery"])
+            self.assertEqual({"replayed": 1, "pending": 0, "invalid": 0, "retired": 0},
+                             result["recovery"])
             self.assertEqual("failed", result["status"])
             self.assertEqual("process_interrupted", result["reason"])
             self.assertEqual("interrupted", result["lifecycle"])
@@ -119,7 +120,7 @@ DbHelper.release_session()
             with patch("app.helper.db_helper.DbHelper", return_value=db):
                 result = replay_recognition_spool()
 
-            self.assertEqual({"replayed": 1, "pending": 1, "invalid": 0}, result)
+            self.assertEqual({"replayed": 1, "pending": 1, "invalid": 0, "retired": 0}, result)
             self.assertEqual(["pending.json"], os.listdir(os.path.join(directory, "recognition_spool")))
 
     def test_replay_is_idempotent_for_a_request_already_in_the_database(self):

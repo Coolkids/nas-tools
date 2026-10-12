@@ -42,7 +42,12 @@ class FakeEngine:
 
 def test_passive_checkpoint_reports_incomplete_progress(caplog):
     engine = FakeEngine((0, 12, 5))
-    database = SimpleNamespace(backend=SimpleNamespace(name="sqlite"), engine=engine)
+    database = SimpleNamespace(
+        backend=SimpleNamespace(name="sqlite"), engine=engine,
+        checkpoint=lambda mode: {
+            "busy": engine.result[0], "log_frames": engine.result[1],
+            "checkpointed_frames": engine.result[2],
+        })
     with patch("app.db.main_db.DATABASE", database), \
             patch("app.utils.storage_jobs.STORAGE_JOBS", FakeStorageJobs()):
         with caplog.at_level(logging.INFO, logger="app.db.main_db"):
