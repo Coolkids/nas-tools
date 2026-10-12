@@ -646,7 +646,7 @@ flowchart TD
   - [x] `npm run type-check`、`npm run build` 通过，修正后的 `npm run preview` 可提供构建页面。
 - [x] `tests/test_cache_migration_matrix.py` 覆盖四种保存方式之间全部 12 个有向切换和 Redis/Valkey 同类型换实例；验证迁移校验后才保存配置、进入待重启状态后才调度重启，纯内存迁入/迁出经受限暂存恢复，认证令牌与配置加载缓存列为排除项。
 - [ ] 本地缓存新安装/升级/切换后唯一活动文件为 `cache/system.sqlite3`；覆盖根目录旧 SQLite、缓存目录旧 SQLite、当前 `cache/files/`、`tmdb.dat`、WAL、重复启动、损坏记录、同名新旧格式冲突及多进程迁移。
-- [ ] 验证旧迁移标记被接管后 `cache/migrations/` 删除且不再生成；尤其覆盖“已导入后清空 → 升级 → 重启”，不能复活旧数据。清理中断可继续，不影响 `db_scripts/` 或第三方迁移目录。
+- [x] `tests/test_cache_legacy_migration.py` 验证旧 CacheLib 数据与迁移标记接管、标记清理中断后重试，以及“导入 → 清空 → 重启”不复活；`cache/migrations/` 被删除，`db_scripts/` 中的第三方迁移文件保留。
 - [ ] 验证 TTL 不被延长、迁移中到期单独统计、AI 大字段不截断、远程任务前缀隔离且不清空其他应用；降级期删除/清空不被远程旧值覆盖。
 - [ ] 缓存迁移各阶段注入断网、磁盘不足、源不可达、校验失败、配置失败、取消、重启失败及杀进程；目标不能静默降级后报成功，与数据库切换及缓存清理的维护锁正确互斥。
 
