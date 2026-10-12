@@ -251,15 +251,22 @@ class DbHelper:
         self._db.insert(record)
         return record
 
-    def get_ai_recognition_records(self, title=None, page=1, page_size=20):
+    def get_ai_recognition_records(self, title=None, page=1, page_size=20,
+                                   before_id=None, snapshot_id=None,
+                                   include_total=True):
         """按标题分页查询 AI 识别核对记录。"""
         page = max(int(page or 1), 1)
         page_size = min(max(int(page_size or 20), 1), 100)
         query = self._db.query(AIRECOGNITIONRECORD)
         if title:
             query = query.filter(AIRECOGNITIONRECORD.TITLE.contains(title))
-        total = query.count()
-        records = query.order_by(AIRECOGNITIONRECORD.ID.desc()).offset((page - 1) * page_size).limit(page_size).all()
+        if snapshot_id is not None:
+            query = query.filter(AIRECOGNITIONRECORD.ID <= int(snapshot_id))
+        if before_id is not None:
+            query = query.filter(AIRECOGNITIONRECORD.ID < int(before_id))
+        total = query.count() if include_total else None
+        records = query.order_by(AIRECOGNITIONRECORD.ID.desc()).offset(
+            (page - 1) * page_size if before_id is None else 0).limit(page_size).all()
         return total, records
 
     @DbPersist(_db)

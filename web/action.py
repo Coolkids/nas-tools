@@ -5250,15 +5250,9 @@ class WebAction:
     def get_ai_recognition_xlsx(cls, title=None):
         """导出 AI 识别核对记录为 Excel。"""
         title = (title or "").strip()
-        total, records = DbHelper().get_ai_recognition_records(title=title, page=1, page_size=100)
-        all_records = list(records)
-        page = 2
-        while len(all_records) < total:
-            _, records = DbHelper().get_ai_recognition_records(title=title, page=page, page_size=100)
-            if not records:
-                break
-            all_records.extend(records)
-            page += 1
+        helper = DbHelper()
+        _, records = helper.get_ai_recognition_records(
+            title=title, page=1, page_size=100, include_total=False)
 
         def compact(value):
             if not value:
@@ -5270,12 +5264,17 @@ class WebAction:
             return value[:32767]
 
         rows = [["ID", "标题", "状态", "时间", "本地解析结果", "AI解析结果", "本地TMDB结果", "AI TMDB结果"]]
-        rows.extend([
-            [record.ID, record.TITLE, record.STATUS, record.ADD_TIME,
-             compact(record.ANITOPY_RESULT), compact(record.AI_RESULT),
-             compact(record.ANITOPY_TMDB), compact(record.AI_TMDB)]
-            for record in all_records
-        ])
+        while records:
+            rows.extend([
+                [record.ID, record.TITLE, record.STATUS, record.ADD_TIME,
+                 compact(record.ANITOPY_RESULT), compact(record.AI_RESULT),
+                 compact(record.ANITOPY_TMDB), compact(record.AI_TMDB)]
+                for record in records
+            ])
+            before_id = records[-1].ID
+            _, records = helper.get_ai_recognition_records(
+                title=title, page=1, page_size=100, before_id=before_id,
+                include_total=False)
         return cls._make_rss_import_xlsx(rows)
 
     @classmethod
