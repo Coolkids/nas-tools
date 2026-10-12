@@ -30,7 +30,10 @@ class MediaDb:
 
     @staticmethod
     def wal_checkpoint():
-        return DATABASE.checkpoint("PASSIVE")
+        with STORAGE_JOBS.maintenance_lock(exclusive=False):
+            if STORAGE_JOBS.maintenance_gate("database"):
+                return
+            return DATABASE.checkpoint("PASSIVE")
 
     def insert(self, server_type, iteminfo):
         if not server_type or not iteminfo:

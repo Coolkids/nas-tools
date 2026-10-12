@@ -50,11 +50,10 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """Use the connection owned by the application database manager.
+    """使用应用数据库管理器持有的活动连接执行升级。
 
-    Creating an engine here would bypass the shared pool, connection hooks and
-    maintenance gate, and could silently upgrade a different database from the
-    one used by the running application.
+    在此处另建引擎会绕过共享连接池、连接初始化钩子和维护闸门，
+    也可能升级到与运行中应用不同的数据库。
     """
     def run_with_connection(connection):
         context.configure(

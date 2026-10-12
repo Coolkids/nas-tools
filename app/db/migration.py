@@ -4,10 +4,12 @@ import base64
 import copy
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import shutil
 import signal
+import socket
 import sqlite3
 import sys
 import threading
@@ -136,9 +138,33 @@ def _same_database(left, right):
         return os.path.realpath(database_path()) == os.path.realpath(database_path())
     host_left = str(left.get("host") or "").strip().rstrip(".").lower()
     host_right = str(right.get("host") or "").strip().rstrip(".").lower()
-    return (host_left == host_right
-            and int(left.get("port") or 0) == int(right.get("port") or 0)
-            and str(left.get("name") or "") == str(right.get("name") or ""))
+    if (int(left.get("port") or 0) != int(right.get("port") or 0)
+            or str(left.get("name") or "").casefold()
+            != str(right.get("name") or "").casefold()):
+        return False
+    if host_left == host_right:
+        return True
+
+    def resolved_addresses(host):
+        try:
+            results = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        except (OSError, socket.gaierror):
+            return set()
+        addresses = set()
+        for result in results:
+            raw_address = str(result[4][0]).split("%", 1)[0]
+            try:
+                address = ipaddress.ip_address(raw_address)
+                if getattr(address, "ipv4_mapped", None):
+                    address = address.ipv4_mapped
+                addresses.add(address.compressed)
+            except ValueError:
+                addresses.add(raw_address.casefold())
+        return addresses
+
+    left_addresses = resolved_addresses(host_left)
+    right_addresses = resolved_addresses(host_right)
+    return bool(left_addresses and right_addresses and left_addresses & right_addresses)
 
 
 def _new_engine(settings, sqlite_path=None):
