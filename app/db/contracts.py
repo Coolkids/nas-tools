@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 import re
 
-from sqlalchemy import select
+from sqlalchemy import LargeBinary, String, func, insert, inspect, select
 
 from app.db.models import portable_key_digest
 
@@ -32,6 +32,93 @@ class DatabaseBackend:
     def adapt_seed_sql(self, sql, metadata):
         """将受控内置种子脚本转换为当前后端可执行的语句。"""
         return _adapt_seed_sql(sql, metadata, self.name)
+
+    def capabilities(self, engine):
+        with engine.connect() as connection:
+            connection.execute(select(1)).scalar_one()
+            version = engine.dialect.server_version_info
+        return {"product": self.name, "version": str(version) if version else None}
+
+    def validate_product(self, capabilities):
+        expected = {"sqlite": "SQLite", "postgresql": "PostgreSQL",
+                    "mysql": "MySQL", "mariadb": "MariaDB"}.get(self.name)
+        if expected and capabilities.get("product") != expected:
+            raise RuntimeError(
+                f"配置选择 {expected}，但检测到 {capabilities.get('product') or '未知数据库产品'}")
+
+    def inspect_schema(self, engine):
+        inspector = inspect(engine)
+        return {name: inspector.get_columns(name) for name in inspector.get_table_names()}
+
+    def table_counts(self, engine, metadata):
+        inspector = inspect(engine)
+        available = {name.upper() for name in inspector.get_table_names()}
+        missing = {name.upper() for name in metadata.tables} - available
+        if missing:
+            raise RuntimeError(f"数据库缺少应用表：{', '.join(sorted(missing))}")
+        with engine.connect() as connection:
+            return {table.name: int(connection.execute(
+                select(func.count()).select_from(table)).scalar_one())
+                    for table in metadata.sorted_tables}
+
+    def estimated_table_counts(self, engine, metadata):
+        reason = "数据库未提供该表的记录数估算；可异步刷新精确记录数"
+        return ({table.name: None for table in metadata.sorted_tables},
+                {table.name: reason for table in metadata.sorted_tables})
+
+    def storage_usage(self, engine, metadata):
+        return {"application_data_bytes": None, "application_index_bytes": None,
+                "database_size_bytes": None,
+                "measurement_reason": "当前数据库后端不提供空间统计"}
+
+    def ordered_select(self, table):
+        primary_keys = list(table.primary_key.columns)
+        if not primary_keys:
+            raise RuntimeError(f"表 {table.name} 缺少稳定主键，无法读取批次")
+        order_by = []
+        for column in primary_keys:
+            if (isinstance(column.type, (String, LargeBinary))
+                or getattr(column.type, "python_type", None) is str):
+                if self.name == "postgresql":
+                    order_by.append(func.convert_to(column.cast(String), "UTF8"))
+                elif self.name in {"mysql", "mariadb"}:
+                    order_by.append(func.binary(column))
+                elif self.name == "sqlite":
+                    order_by.append(column.cast(LargeBinary))
+                else:
+                    order_by.append(column)
+            else:
+                order_by.append(column)
+        return select(*table.columns).order_by(*order_by)
+
+    def read_batches(self, connection, table, batch_size=500):
+        result = connection.execute(
+            self.ordered_select(table).execution_options(stream_results=True))
+        try:
+            while True:
+                rows = result.fetchmany(max(1, int(batch_size)))
+                if not rows:
+                    break
+                yield [dict(row._mapping) for row in rows]
+        finally:
+            result.close()
+
+    @staticmethod
+    def insert_many(connection, table, rows):
+        if rows:
+            connection.execute(insert(table), rows)
+        return len(rows)
+
+    def calibrate_sequences(self, engine, metadata):
+        """Backends without independent sequences need no explicit calibration."""
+        return None
+
+    def max_payload_bytes(self, engine):
+        return None
+
+    @staticmethod
+    def release(engine):
+        engine.dispose()
 
     def reclaim_space(self, engine):
         raise NotImplementedError(f"{self.name} 不支持空间回收")

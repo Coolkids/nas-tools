@@ -4,7 +4,7 @@ import copy
 from contextlib import contextmanager
 from threading import RLock
 
-from sqlalchemy import event, text
+from sqlalchemy import event
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, scoped_session, sessionmaker
 
@@ -72,14 +72,7 @@ class DatabaseManager:
                 initialize = getattr(backend, "initialize", None)
                 if initialize:
                     initialize(engine)
-                if settings["type"] in {"mysql", "mariadb"}:
-                    with engine.connect() as connection:
-                        version = str(connection.execute(text("SELECT VERSION()")).scalar_one())
-                    is_mariadb = "mariadb" in version.lower()
-                    if settings["type"] == "mariadb" and not is_mariadb:
-                        raise RuntimeError("配置选择 MariaDB，但服务端产品不是 MariaDB")
-                    if settings["type"] == "mysql" and is_mariadb:
-                        raise RuntimeError("配置选择 MySQL，但检测到 MariaDB 服务端")
+                backend.validate_product(backend.capabilities(engine))
             except Exception:
                 engine.dispose()
                 raise
@@ -118,7 +111,10 @@ class DatabaseManager:
             if self._session is not None:
                 self._session.remove()
             if self._engine is not None:
-                self._engine.dispose()
+                if self._backend is not None:
+                    self._backend.release(self._engine)
+                else:
+                    self._engine.dispose()
             self._engine = self._backend = self._settings = self._session = None
             self._session_class = None
 
@@ -172,6 +168,44 @@ class DatabaseManager:
 
     def create_schema(self, metadata):
         metadata.create_all(self.engine)
+
+    def insert_many(self, model, rows):
+        return self.backend.insert_many(self.session, model.__table__, rows)
+
+    def read_batches(self, connection, table, batch_size=500):
+        from app.db.backends import create_backend
+        return create_backend(connection.dialect.name).read_batches(
+            connection, table, batch_size=batch_size)
+
+    def inspect_schema(self, engine=None):
+        engine = engine or self.engine
+        from app.db.backends import create_backend
+        return create_backend(engine.dialect.name).inspect_schema(engine)
+
+    def table_counts(self, metadata, engine=None):
+        engine = engine or self.engine
+        from app.db.backends import create_backend
+        return create_backend(engine.dialect.name).table_counts(engine, metadata)
+
+    def estimated_table_counts(self, metadata, engine=None):
+        engine = engine or self.engine
+        from app.db.backends import create_backend
+        return create_backend(engine.dialect.name).estimated_table_counts(engine, metadata)
+
+    def storage_usage(self, metadata, engine=None):
+        engine = engine or self.engine
+        from app.db.backends import create_backend
+        return create_backend(engine.dialect.name).storage_usage(engine, metadata)
+
+    def calibrate_sequences(self, metadata, engine=None):
+        engine = engine or self.engine
+        from app.db.backends import create_backend
+        return create_backend(engine.dialect.name).calibrate_sequences(engine, metadata)
+
+    def release(self, engine=None):
+        engine = engine or self.engine
+        from app.db.backends import create_backend
+        return create_backend(engine.dialect.name).release(engine)
 
     def transaction(self):
         """Own one commit for the outermost unit of work on this scoped session."""

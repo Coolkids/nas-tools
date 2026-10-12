@@ -170,7 +170,7 @@ class MainDb:
         if all(isinstance(row, model) for row in rows):
             self.session.add_all(rows)
         else:
-            self.session.bulk_insert_mappings(model, rows)
+            return DATABASE.insert_many(model, rows)
         return len(rows)
 
     def upsert_many(self, model, rows, conflict_columns, update_columns=None):

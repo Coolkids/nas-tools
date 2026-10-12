@@ -274,7 +274,7 @@ class MediaDb:
                     MEDIASYNCSYNCJOB.SERVER == lease["server"]).with_for_update().one()
                 job.STATUS = "WRITING"
                 job.UPDATED_AT = time.time()
-                session.bulk_insert_mappings(MEDIASYNCITEMS, rows)
+                DATABASE.insert_many(MEDIASYNCITEMS, rows)
         finally:
             sync_metrics = lease.setdefault("_sync_metrics", {})
             sync_metrics["batch_count"] = sync_metrics.get("batch_count", 0) + 1
@@ -445,7 +445,7 @@ class MediaDb:
             "IMDBID": item.get("imdbid"),
             "PATH": item.get("path")
         } for item in items if item and item.get("id")]
-        self.session.bulk_insert_mappings(MEDIASYNCITEMS, rows)
+        DATABASE.insert_many(MEDIASYNCITEMS, rows)
         return len(rows)
 
     def replace(self, server_type, items):

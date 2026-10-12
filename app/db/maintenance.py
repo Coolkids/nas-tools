@@ -175,63 +175,16 @@ def _sqlite_stats(path, checkpoint=False):
 
 
 def _table_counts(engine):
-    inspector = inspect(engine)
-    available = {name.upper() for name in inspector.get_table_names()}
-    required = {name.upper() for name in Base.metadata.tables}
-    missing = required - available
-    if missing:
-        raise RuntimeError(f"数据库缺少应用表：{', '.join(sorted(missing))}")
-    with engine.connect() as connection:
-        return {table.name: int(connection.execute(
-            select(func.count()).select_from(table)).scalar_one())
-                for table in Base.metadata.sorted_tables}
+    return DATABASE.table_counts(Base.metadata, engine=engine)
 
 
 def _estimated_table_counts(engine):
-    """Read planner/catalog estimates without scanning application tables."""
-    table_names = [table.name for table in Base.metadata.sorted_tables]
-    estimates = {}
-    reasons = {}
+    """Read planner/catalog estimates through the active backend adapter."""
     try:
-        with engine.connect() as connection:
-            if engine.dialect.name == "sqlite":
-                has_stats = connection.exec_driver_sql(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_stat1'").first()
-                if has_stats:
-                    for table_name, statistic in connection.exec_driver_sql(
-                            "SELECT tbl, stat FROM sqlite_stat1").all():
-                        try:
-                            rows = int(str(statistic).split()[0])
-                        except (TypeError, ValueError, IndexError):
-                            continue
-                        key = str(table_name).upper()
-                        estimates[key] = max(estimates.get(key, 0), rows)
-                else:
-                    reasons["_all"] = "尚无 SQLite 查询规划统计；可异步刷新精确记录数"
-            elif engine.dialect.name == "postgresql":
-                for table_name in table_names:
-                    row = connection.execute(text("""
-                        SELECT reltuples::bigint FROM pg_class
-                        WHERE relname=:table_name AND relkind IN ('r', 'p')
-                        ORDER BY (relnamespace = current_schema()::regnamespace) DESC LIMIT 1
-                    """), {"table_name": table_name}).first()
-                    if row is not None and int(row[0]) >= 0:
-                        estimates[table_name.upper()] = int(row[0])
-            elif engine.dialect.name in {"mysql", "mariadb"}:
-                for table_name in table_names:
-                    row = connection.execute(text("""
-                        SELECT TABLE_ROWS FROM information_schema.TABLES
-                        WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=:table_name
-                    """), {"table_name": table_name}).first()
-                    if row is not None and row[0] is not None and int(row[0]) >= 0:
-                        estimates[table_name.upper()] = int(row[0])
+        return DATABASE.estimated_table_counts(Base.metadata, engine=engine)
     except Exception as error:
-        reasons["_all"] = _safe_database_error(error)[:500]
-    for table_name in table_names:
-        if table_name.upper() not in estimates:
-            reasons[table_name] = reasons.get(
-                "_all", "数据库未提供该表的记录数估算；可异步刷新精确记录数")
-    return ({name: estimates.get(name.upper()) for name in table_names}, reasons)
+        reason = _safe_database_error(error)[:500]
+        return ({table.name: None for table in Base.metadata.sorted_tables}, {"_all": reason})
 
 
 def _count_tables_with_progress(engine, job_id):
@@ -308,71 +261,6 @@ def start_database_statistics_refresh(values=None):
         return {"code": 1, "msg": _safe_database_error(error)}
 
 
-def _sqlite_object_sizes(path):
-    connection = sqlite3.connect(path, timeout=10)
-    try:
-        rows = connection.execute("""SELECT objects.type, SUM(pages.bytes)
-            FROM sqlite_master AS objects
-            JOIN (SELECT name, SUM(pgsize) AS bytes FROM dbstat GROUP BY name) AS pages
-              ON pages.name=objects.name
-            WHERE objects.name NOT LIKE 'sqlite_%' AND objects.type IN ('table', 'index')
-            GROUP BY objects.type""").fetchall()
-        values = {kind: int(size or 0) for kind, size in rows}
-        return {"application_data_bytes": values.get("table", 0),
-                "application_index_bytes": values.get("index", 0),
-                "measurement_reason": None}
-    except sqlite3.Error as error:
-        return {"application_data_bytes": None, "application_index_bytes": None,
-                "measurement_reason": f"SQLite dbstat 不可用：{str(error)[:300]}"}
-    finally:
-        connection.close()
-
-
-def _remote_database_sizes(engine):
-    data_bytes = index_bytes = 0
-    database_bytes = None
-    try:
-        with engine.connect() as connection:
-            if engine.dialect.name == "postgresql":
-                database_bytes = int(connection.execute(
-                    text("SELECT pg_database_size(current_database())")).scalar_one())
-                for table in Base.metadata.sorted_tables:
-                    table_name = f'"{table.name}"'
-                    data_size, index_size = connection.execute(text("""
-                        SELECT pg_total_relation_size(CAST(:table_name AS regclass))
-                               - pg_indexes_size(CAST(:table_name AS regclass)),
-                               pg_indexes_size(CAST(:table_name AS regclass))
-                    """), {"table_name": table_name}).one()
-                    data_bytes += int(data_size or 0)
-                    index_bytes += int(index_size or 0)
-            elif engine.dialect.name in {"mysql", "mariadb"}:
-                database_bytes = int(connection.execute(text("""
-                    SELECT COALESCE(SUM(DATA_LENGTH + INDEX_LENGTH), 0)
-                    FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()
-                """)).scalar_one())
-                for table in Base.metadata.sorted_tables:
-                    row = connection.execute(text("""
-                        SELECT DATA_LENGTH, INDEX_LENGTH FROM information_schema.TABLES
-                        WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=:table_name
-                    """), {"table_name": table.name}).one_or_none()
-                    if row is None:
-                        raise RuntimeError(f"缺少表 {table.name} 的空间统计")
-                    data_bytes += int(row[0] or 0)
-                    index_bytes += int(row[1] or 0)
-            else:
-                return {"application_data_bytes": None, "application_index_bytes": None,
-                        "database_size_bytes": None,
-                        "measurement_reason": "当前数据库驱动不提供空间统计"}
-        return {"application_data_bytes": data_bytes,
-                "application_index_bytes": index_bytes,
-                "database_size_bytes": database_bytes,
-                "measurement_reason": None}
-    except Exception as error:
-        return {"application_data_bytes": None, "application_index_bytes": None,
-                "database_size_bytes": None,
-                "measurement_reason": _safe_database_error(error)[:500]}
-
-
 def get_database_info():
     """返回活动连接、统一结构、表记录数及物理空间统计。"""
     from app.db.migration import _current_settings, _safe_settings
@@ -416,11 +304,7 @@ def get_database_info():
                     tables = exact_result.get("tables") or tables
                     table_count_mode = "exact"
                     exact_statistics_at = exact_result.get("statistics_at")
-            if engine.dialect.name == "sqlite":
-                object_sizes = _sqlite_object_sizes(_sqlite_path())
-                object_sizes["database_size_bytes"] = _file_size(_sqlite_path())
-            else:
-                object_sizes = _remote_database_sizes(engine)
+            object_sizes = DATABASE.storage_usage(Base.metadata, engine=engine)
     except Exception as exception:
         error = _safe_database_error(exception, configured)
 

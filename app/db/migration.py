@@ -16,7 +16,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import (Column, Index, Integer, LargeBinary, MetaData, String, Table, create_engine,
+from sqlalchemy import (Column, Index, Integer, MetaData, String, Table, create_engine,
                         func, inspect, insert, select, text, update)
 from sqlalchemy.engine import URL
 
@@ -156,16 +156,11 @@ def _new_engine(settings, sqlite_path=None):
     initialize = getattr(backend, "initialize", None)
     if initialize and sqlite_path is None:
         initialize(engine)
-    if settings["type"] in {"mysql", "mariadb"}:
-        with engine.connect() as connection:
-            version = str(connection.execute(text("SELECT VERSION()")).scalar_one())
-        is_mariadb = "mariadb" in version.lower()
-        if settings["type"] == "mariadb" and not is_mariadb:
-            engine.dispose()
-            raise RuntimeError("配置选择 MariaDB，但服务端产品不是 MariaDB")
-        if settings["type"] == "mysql" and is_mariadb:
-            engine.dispose()
-            raise RuntimeError("配置选择 MySQL，但检测到 MariaDB 服务端")
+    try:
+        backend.validate_product(backend.capabilities(engine))
+    except Exception:
+        backend.release(engine)
+        raise
     return engine
 
 
@@ -261,31 +256,7 @@ def _probe_engine(engine):
 
 
 def _server_capabilities(engine):
-    dialect = engine.dialect.name
-    with engine.connect() as connection:
-        if dialect == "postgresql":
-            version = connection.execute(text("SHOW server_version")).scalar_one()
-            version_num = connection.execute(text(
-                "SHOW server_version_num")).scalar_one()
-            return {"product": "PostgreSQL", "version": str(version),
-                    "version_num": str(version_num),
-                    "database": connection.execute(text("SELECT current_database()")).scalar_one(),
-                    "schema": connection.execute(text("SELECT current_schema()")).scalar_one()}
-        if dialect in {"mysql", "mariadb"}:
-            version = connection.execute(text("SELECT VERSION()")).scalar_one()
-            charset = connection.execute(text("SELECT @@character_set_database")).scalar_one()
-            collation = connection.execute(text("SELECT @@collation_database")).scalar_one()
-            sql_mode = connection.execute(text("SELECT @@sql_mode")).scalar_one()
-            packet = connection.execute(text("SELECT @@max_allowed_packet")).scalar_one()
-            storage_engine = connection.execute(text("SELECT @@default_storage_engine")).scalar_one()
-            if str(charset).lower() != "utf8mb4":
-                raise RuntimeError("MySQL/MariaDB 目标数据库默认字符集必须为 utf8mb4")
-            return {"product": "MariaDB" if "mariadb" in str(version).lower() else "MySQL",
-                    "version": str(version), "character_set": str(charset),
-                    "collation": str(collation), "sql_mode": str(sql_mode or ""),
-                    "max_allowed_packet": int(packet),
-                    "default_storage_engine": str(storage_engine)}
-    return {"product": "SQLite", "version": sqlite3.sqlite_version}
+    return create_backend(engine.dialect.name).capabilities(engine)
 
 
 def _probe_candidate(settings):
@@ -828,56 +799,33 @@ def _normalize_value(value):
 
 
 def _ordered_table_select(connection, table):
-    primary_keys = list(table.primary_key.columns)
-    if not primary_keys:
-        raise RuntimeError(f"表 {table.name} 缺少稳定主键，无法迁移校验")
-    order_by = []
-    dialect = connection.dialect.name
-    for column in primary_keys:
-        if isinstance(column.type, (String, LargeBinary)) or getattr(column.type, "python_type", None) is str:
-            if dialect == "postgresql":
-                order_by.append(func.convert_to(column.cast(String), "UTF8"))
-            elif dialect in {"mysql", "mariadb"}:
-                order_by.append(func.binary(column))
-            elif dialect == "sqlite":
-                order_by.append(column.cast(LargeBinary))
-            else:
-                order_by.append(column)
-        else:
-            order_by.append(column)
-    return select(*table.columns).order_by(*order_by)
+    return create_backend(connection.dialect.name).ordered_select(table)
 
 
 def _table_digest(connection, table):
-    statement = _ordered_table_select(connection, table).execution_options(stream_results=True)
-    result = connection.execute(statement)
     digest = hashlib.sha256()
     count = 0
-    while True:
-        row = result.fetchone()
-        if row is None:
-            break
-        encoded = json.dumps([_normalize_value(value) for value in row],
-                             ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        digest.update(encoded.encode("utf-8", "surrogatepass"))
-        digest.update(b"\n")
-        count += 1
-    result.close()
+    backend = create_backend(connection.dialect.name)
+    for batch in backend.read_batches(connection, table):
+        for row in batch:
+            encoded = json.dumps(
+                [_normalize_value(row[column.name]) for column in table.columns],
+                ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            digest.update(encoded.encode("utf-8", "surrogatepass"))
+            digest.update(b"\n")
+            count += 1
     return count, digest.hexdigest()
 
 
 def _copy_table(source_connection, target_engine, table):
-    source_result = source_connection.execute(
-        _ordered_table_select(source_connection, table).execution_options(stream_results=True))
+    source_backend = create_backend(source_connection.dialect.name)
+    target_backend = create_backend(target_engine.dialect.name)
     copied = 0
     batch = []
     batch_bytes = 0
-    max_packet = None
+    max_packet = target_backend.max_payload_bytes(target_engine)
     byte_budget = _BATCH_BYTES
-    if target_engine.dialect.name in {"mysql", "mariadb"}:
-        with target_engine.connect() as connection:
-            max_packet = int(connection.execute(
-                text("SELECT @@max_allowed_packet")).scalar_one())
+    if max_packet is not None:
         byte_budget = max(64 * 1024, int(max_packet * 0.5))
 
     def flush():
@@ -885,34 +833,30 @@ def _copy_table(source_connection, target_engine, table):
         if not batch:
             return
         with target_engine.begin() as target_connection:
-            target_connection.execute(insert(table), batch)
+            target_backend.insert_many(target_connection, table, batch)
         copied += len(batch)
         batch = []
         batch_bytes = 0
 
-    while True:
-        row = source_result.fetchone()
-        if row is None:
-            break
-        mapping = dict(row._mapping)
-        row_bytes = 64
-        for value in mapping.values():
-            if value is None:
-                row_bytes += 4
-            elif isinstance(value, (bytes, bytearray, memoryview)):
-                row_bytes += len(value)
-            elif isinstance(value, str):
-                row_bytes += len(value.encode("utf-8", "surrogatepass"))
-            else:
-                row_bytes += len(str(value).encode("utf-8", "surrogatepass"))
-        if max_packet is not None and row_bytes > max_packet * 0.9:
-            raise RuntimeError(f"表 {table.name} 存在超过目标 max_allowed_packet 的单行记录")
-        if batch and (len(batch) >= _BATCH_SIZE or batch_bytes + row_bytes > byte_budget):
-            flush()
-        batch.append(mapping)
-        batch_bytes += row_bytes
+    for source_batch in source_backend.read_batches(source_connection, table):
+        for mapping in source_batch:
+            row_bytes = 64
+            for value in mapping.values():
+                if value is None:
+                    row_bytes += 4
+                elif isinstance(value, (bytes, bytearray, memoryview)):
+                    row_bytes += len(value)
+                elif isinstance(value, str):
+                    row_bytes += len(value.encode("utf-8", "surrogatepass"))
+                else:
+                    row_bytes += len(str(value).encode("utf-8", "surrogatepass"))
+            if max_packet is not None and row_bytes > max_packet * 0.9:
+                raise RuntimeError(f"表 {table.name} 存在超过目标 max_allowed_packet 的单行记录")
+            if batch and (len(batch) >= _BATCH_SIZE or batch_bytes + row_bytes > byte_budget):
+                flush()
+            batch.append(mapping)
+            batch_bytes += row_bytes
     flush()
-    source_result.close()
     return copied
 
 
@@ -1038,41 +982,7 @@ def _snapshot_source(settings, job_id):
 
 
 def _calibrate_sequences(engine):
-    if engine.dialect.name in {"mysql", "mariadb"}:
-        with engine.begin() as connection:
-            preparer = engine.dialect.identifier_preparer
-            for table in Base.metadata.sorted_tables:
-                for column in table.primary_key.columns:
-                    if (getattr(column.type, "python_type", None) is not int
-                            or getattr(table, "autoincrement_column", None) is not column):
-                        continue
-                    maximum = connection.execute(
-                        select(func.max(column)).select_from(table)).scalar_one()
-                    next_value = max(int(maximum or 0), 0) + 1
-                    connection.exec_driver_sql(
-                        f"ALTER TABLE {preparer.quote(table.name)} AUTO_INCREMENT = {next_value}")
-        return
-    if engine.dialect.name != "postgresql":
-        return
-    with engine.begin() as connection:
-        for table in Base.metadata.sorted_tables:
-            for column in table.primary_key.columns:
-                if getattr(column.type, "python_type", None) is not int:
-                    continue
-                sequence_name = connection.execute(text(
-                    "SELECT pg_get_serial_sequence(:table_name, :column_name)"),
-                    {"table_name": f'"{table.name}"', "column_name": f'"{column.name}"'}).scalar_one_or_none()
-                if not sequence_name:
-                    continue
-                maximum = connection.execute(select(func.max(column)).select_from(table)).scalar_one()
-                if maximum is None:
-                    connection.execute(text(
-                        "SELECT setval(CAST(:sequence_name AS regclass), 1, false)"),
-                                       {"sequence_name": sequence_name})
-                else:
-                    connection.execute(text(
-                        "SELECT setval(CAST(:sequence_name AS regclass), :value, true)"),
-                                       {"sequence_name": sequence_name, "value": int(maximum)})
+    create_backend(engine.dialect.name).calibrate_sequences(engine, Base.metadata)
 
 
 def _verify_probe(engine):
