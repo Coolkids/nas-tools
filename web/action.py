@@ -5047,6 +5047,8 @@ class WebAction:
         sqlite_info = database.get("sqlite")
         if isinstance(sqlite_info, dict):
             sqlite_info.pop("path", None)
+            sqlite_info["last_reclaim"] = _sanitize_database_job(
+                sqlite_info.get("last_reclaim"))
         return result
 
     @staticmethod

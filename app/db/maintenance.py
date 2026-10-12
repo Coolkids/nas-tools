@@ -187,6 +187,29 @@ def _estimated_table_counts(engine):
         return ({table.name: None for table in Base.metadata.sorted_tables}, {"_all": reason})
 
 
+def _sqlite_reclaim_availability(engine, path, stats):
+    if STORAGE_JOBS.maintenance_gate("database"):
+        return False, "数据库已有维护任务正在运行"
+    if any(job.get("status") not in {"CHECKING", "READY"}
+           for job in STORAGE_JOBS.active()):
+        return False, "另一个存储维护任务正在运行"
+    if stats.get("integrity") != "ok":
+        return False, "SQLite 完整性检查未通过"
+    if not os.path.isfile(path) or not os.access(path, os.W_OK):
+        return False, "数据库文件不存在或当前用户没有写入权限"
+    directory = os.path.dirname(path)
+    if not os.access(directory, os.W_OK):
+        return False, "数据库目录不可写"
+    try:
+        available = shutil.disk_usage(directory).free
+    except OSError as error:
+        return False, f"无法检查数据库卷可用空间：{str(error)[:300]}"
+    required = int(stats.get("database_size_bytes") or 0) * 2 + 64 * 1024 * 1024
+    if available < required:
+        return False, f"可用空间不足，约需 {required} 字节，当前 {available} 字节"
+    return True, None
+
+
 def _count_tables_with_progress(engine, job_id):
     inspector = inspect(engine)
     available = {name.upper() for name in inspector.get_table_names()}
@@ -343,17 +366,26 @@ def get_database_info():
                 if STORAGE_JOBS.maintenance_gate("database"):
                     raise RuntimeError("数据库维护中，暂不读取 SQLite 空间统计")
                 path = _sqlite_path()
-                status["sqlite"] = _sqlite_stats(path)
-                status["sqlite"].update({
+                sqlite_status = _sqlite_stats(path)
+                reclaim_allowed, reclaim_reason = _sqlite_reclaim_availability(
+                    engine, path, sqlite_status)
+                latest_reclaim = STORAGE_JOBS.latest(_RECLAIM_KIND)
+                sqlite_status.update({
                     "path": path,
                     "database_file": os.path.basename(path),
                     "reclaim_supported": True,
-                    "reclaim_allowed": True,
-                    "estimated_reclaimable_bytes": status["sqlite"]["free_pages_bytes"],
+                    "reclaim_allowed": reclaim_allowed,
+                    "reclaim_reason": reclaim_reason,
+                    "error": reclaim_reason,
+                    "last_reclaim": latest_reclaim,
+                    "connections_to_drain": engine.pool.checkedout(),
+                    "estimated_reclaimable_bytes": sqlite_status["free_pages_bytes"],
                 })
+                status["sqlite"] = sqlite_status
         except Exception as exception:
             status["sqlite"] = {"reclaim_supported": True, "reclaim_allowed": False,
-                                "error": str(exception)[:1000]}
+                                "error": str(exception)[:1000],
+                                "reclaim_reason": str(exception)[:1000]}
     else:
         status["sqlite"] = None
     return {"code": 0, "database": status}
