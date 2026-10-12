@@ -27,7 +27,7 @@ class _Config:
         return {"type": "sqlite"} if node == "database" else {}
 
 
-def _create_user_database(path):
+def _create_user_database(path, user_id=17):
     engine = create_engine(URL.create("sqlite", database=str(path)))
     main_tables = [Base.metadata.tables[name]
                    for name in LOGICAL_DOMAIN_TABLES["main"]]
@@ -39,7 +39,8 @@ def _create_user_database(path):
             connection.execute(text("INSERT INTO alembic_version(version_num) VALUES (:version)"),
                                {"version": _MEDIA_BASE_REVISION})
             connection.execute(text("""INSERT INTO CONFIG_USERS
-                (ID, NAME, PASSWORD, PRIS) VALUES (17, '管理员', 'hash', 'all')"""))
+                (ID, NAME, PASSWORD, PRIS) VALUES (:user_id, '管理员', 'hash', 'all')"""),
+                               {"user_id": user_id})
     finally:
         engine.dispose()
 
@@ -84,7 +85,7 @@ def test_old_main_and_media_databases_merge_into_fixed_single_database(
     source_dir.mkdir(exist_ok=True)
     user_path = source_dir / "user.db"
     media_path = source_dir / "media.db"
-    _create_user_database(user_path)
+    _create_user_database(user_path, user_id=31)
     _create_media_database(media_path)
     user_hash = hashlib.sha256(user_path.read_bytes()).hexdigest()
     media_hash = hashlib.sha256(media_path.read_bytes()).hexdigest()
@@ -95,7 +96,7 @@ def test_old_main_and_media_databases_merge_into_fixed_single_database(
     assert target_path.is_file()
     with sqlite3.connect(target_path) as connection:
         assert connection.execute(
-            "SELECT ID, NAME FROM CONFIG_USERS WHERE ID=17").fetchone() == (17, "管理员")
+            "SELECT ID, NAME FROM CONFIG_USERS WHERE ID=31").fetchone() == (31, "管理员")
         assert connection.execute("""SELECT ID, ITEM_ID, GENERATION_ID
             FROM MEDIASYNC_ITEMS ORDER BY ID""").fetchall() == [
             (31, "movie-31", "legacy"), (32, "series-32", "legacy")]
@@ -174,6 +175,49 @@ def test_database_directory_occupied_by_file_does_not_touch_legacy_source(
     assert database_dir.read_text(encoding="utf-8") == "keep this file"
     assert user_path.is_file()
     assert not target_path.exists()
+
+
+def test_insufficient_disk_space_preserves_legacy_source(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import app.db.sqlite_files as sqlite_files
+
+    user_path = tmp_path / "user.db"
+    _create_user_database(user_path)
+    source_hash = hashlib.sha256(user_path.read_bytes()).hexdigest()
+    target_path = _configure_migration(tmp_path, monkeypatch)
+    monkeypatch.setattr(sqlite_files.shutil, "disk_usage",
+                        lambda _path: SimpleNamespace(free=0))
+
+    with pytest.raises(RuntimeError, match="可用空间不足"):
+        prepare_sqlite_database()
+
+    assert not target_path.exists()
+    assert hashlib.sha256(user_path.read_bytes()).hexdigest() == source_hash
+
+
+def test_invalid_legacy_media_signature_preserves_both_sources(tmp_path, monkeypatch):
+    user_path = tmp_path / "user.db"
+    media_path = tmp_path / "media.db"
+    _create_user_database(user_path)
+    with sqlite3.connect(media_path) as connection:
+        connection.executescript("""
+            CREATE TABLE MEDIASYNC_ITEMS (ID INTEGER PRIMARY KEY, ITEM_ID TEXT);
+            CREATE TABLE MEDIASYNC_STATISTICS (
+                ID INTEGER PRIMARY KEY, SERVER TEXT, TOTAL_COUNT TEXT,
+                MOVIE_COUNT TEXT, TV_COUNT TEXT, UPDATE_TIME TEXT
+            );
+        """)
+    source_hashes = (hashlib.sha256(user_path.read_bytes()).hexdigest(),
+                     hashlib.sha256(media_path.read_bytes()).hexdigest())
+    target_path = _configure_migration(tmp_path, monkeypatch)
+
+    with pytest.raises(RuntimeError, match="结构指纹不匹配"):
+        prepare_sqlite_database()
+
+    assert not target_path.exists()
+    assert hashlib.sha256(user_path.read_bytes()).hexdigest() == source_hashes[0]
+    assert hashlib.sha256(media_path.read_bytes()).hexdigest() == source_hashes[1]
 
 
 def test_legacy_sources_in_both_locations_are_rejected(tmp_path, monkeypatch):
