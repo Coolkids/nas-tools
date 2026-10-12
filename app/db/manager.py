@@ -39,6 +39,7 @@ class DatabaseManager:
             "transaction_max_seconds": 0.0,
             "rollback_count": 0,
             "maintenance_lock_wait_seconds": 0.0,
+            "exclusive_maintenance_seconds": 0.0,
             "connection_checkouts": 0,
             "connection_checkins": 0,
             "pool_wait_count": 0,
@@ -210,6 +211,9 @@ class DatabaseManager:
             self._metrics["pool_wait_seconds"] += elapsed
             self._metrics["pool_wait_max_seconds"] = max(
                 self._metrics["pool_wait_max_seconds"], elapsed)
+
+    def record_exclusive_maintenance(self, elapsed):
+        self._record_metric("exclusive_maintenance_seconds", max(0.0, elapsed))
 
     def _before_cursor_execute(self, connection, cursor, statement, parameters,
                                context, executemany):

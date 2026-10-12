@@ -65,6 +65,7 @@ class StorageJobStore:
         lock_path = os.path.join(directory, "storage-maintenance.lock")
         stream = open(lock_path, "a+b")
         deadline = time.monotonic() + timeout
+        exclusive_started_at = None
         try:
             while True:
                 try:
@@ -87,6 +88,8 @@ class StorageJobStore:
                     time.sleep(0.05)
             self._thread_state.depth = 1
             self._thread_state.exclusive = bool(exclusive)
+            if exclusive:
+                exclusive_started_at = time.perf_counter()
             try:
                 yield
             finally:
@@ -97,6 +100,14 @@ class StorageJobStore:
                 else:  # pragma: no cover - Windows
                     stream.seek(0)
                     msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                if exclusive_started_at is not None:
+                    try:
+                        from app.db.manager import DATABASE
+                        DATABASE.record_exclusive_maintenance(
+                            time.perf_counter() - exclusive_started_at)
+                    except Exception:
+                        # Diagnostics must not interfere with releasing a lock.
+                        pass
         finally:
             stream.close()
 
