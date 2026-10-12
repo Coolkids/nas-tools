@@ -5,6 +5,7 @@ description = "NAS media library resource aggregation and automation tool"
 requires-python = ">=3.14"
 dependencies = [
     "alembic==1.20.0",
+    "anitopy==2.2.0rc2",
     "APScheduler==3.11.3",
     "boddle==0.2.9",
     "boto3==1.43.111",
@@ -70,6 +71,9 @@ dev = [
 [tool.uv]
 # NAS-tools is a directly-run application, not a distributable package.
 package = false
+
+[tool.uv.sources]
+anitopy = { path = "third_party/anitopy" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
