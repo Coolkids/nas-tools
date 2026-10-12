@@ -4,8 +4,8 @@ from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
-from app.mediaserver.media_server import (MediaServer, _collect_media_sync_items,
-                                         _media_sync_batches)
+from app.mediaserver.media_server import (MediaServer, _MediaSyncBatchSizer,
+                                         _collect_media_sync_items, _media_sync_batches)
 
 
 class MediaSyncSnapshotTest(TestCase):
@@ -77,6 +77,31 @@ class MediaSyncSnapshotTest(TestCase):
 
         by_bytes = list(_media_sync_batches(items, max_rows=20, max_bytes=3))
         self.assertEqual([1, 1, 1, 1, 1], [len(batch) for batch in by_bytes])
+
+    def test_batch_sizer_reduces_slow_batches_and_grows_fast_batches(self):
+        sizer = _MediaSyncBatchSizer(max_rows=400, target_seconds=0.2,
+                                     min_rows=20, max_limit=800)
+
+        self.assertEqual(200, sizer.observe(400, 0.8))
+        self.assertEqual(220, sizer.observe(200, 0.05))
+
+    def test_streaming_batches_apply_updated_limit_after_each_commit(self):
+        sizer = _MediaSyncBatchSizer(max_rows=4, target_seconds=0.1,
+                                     min_rows=1, max_limit=8)
+        items = [{"id": str(number), "type": "Movie", "title": str(number)}
+                 for number in range(9)]
+        batches = []
+
+        def commit(batch):
+            batches.append(batch)
+            if len(batches) == 1:
+                sizer.observe(len(batch), 0.5)
+
+        _collect_media_sync_items({"MovieCount": 9, "SeriesCount": 0},
+                                  [{"id": "movies"}], lambda _: items,
+                                  on_batch=commit, batch_sizer=sizer)
+
+        self.assertEqual([4, 2, 2, 1], [len(batch) for batch in batches])
 
     def test_streaming_validation_delivers_bounded_batches_without_retaining_snapshot(self):
         batches = []

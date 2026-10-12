@@ -281,6 +281,7 @@ class MediaDb:
             sync_metrics["longest_transaction_seconds"] = max(
                 sync_metrics.get("longest_transaction_seconds", 0.0),
                 metrics.get("transaction_seconds", 0.0))
+            sync_metrics["last_transaction_seconds"] = metrics.get("transaction_seconds", 0.0)
             sync_metrics["maintenance_lock_wait_seconds"] = (
                 sync_metrics.get("maintenance_lock_wait_seconds", 0.0)
                 + metrics.get("maintenance_lock_wait_seconds", 0.0))

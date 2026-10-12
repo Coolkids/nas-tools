@@ -16,12 +16,45 @@ server_lock = threading.Lock()
 
 _MEDIA_SYNC_BATCH_ROWS = 500
 _MEDIA_SYNC_BATCH_BYTES = 4 * 1024 * 1024
+_MEDIA_SYNC_BATCH_MIN_ROWS = 25
+_MEDIA_SYNC_BATCH_MAX_ROWS = 2000
+_MEDIA_SYNC_BATCH_TARGET_SECONDS = 0.25
 _MEDIA_SYNC_LEASE_SECONDS = 3600
 _MEDIA_SYNC_HEARTBEAT_SECONDS = 60
 
 
+class _MediaSyncBatchSizer:
+    """Bound transaction size and adapt future batches to observed write time."""
+
+    def __init__(self, max_rows=_MEDIA_SYNC_BATCH_ROWS,
+                 target_seconds=_MEDIA_SYNC_BATCH_TARGET_SECONDS,
+                 min_rows=_MEDIA_SYNC_BATCH_MIN_ROWS,
+                 max_limit=_MEDIA_SYNC_BATCH_MAX_ROWS):
+        self.max_rows = max(min_rows, min(int(max_rows), max_limit))
+        self.target_seconds = max(0.01, float(target_seconds))
+        self.min_rows = max(1, int(min_rows))
+        self.max_limit = max(self.min_rows, int(max_limit))
+
+    def observe(self, row_count, transaction_seconds):
+        """Adjust only subsequent batches; a slow transaction halves the limit."""
+        try:
+            elapsed = float(transaction_seconds)
+            rows = int(row_count)
+        except (TypeError, ValueError):
+            return self.max_rows
+        if rows <= 0 or elapsed <= 0:
+            return self.max_rows
+        if elapsed > self.target_seconds:
+            ratio = max(0.5, min(0.9, self.target_seconds / elapsed))
+            self.max_rows = max(self.min_rows, int(min(self.max_rows, rows) * ratio))
+        elif elapsed < self.target_seconds * 0.6:
+            self.max_rows = min(self.max_limit,
+                                max(self.max_rows + 1, int(self.max_rows * 1.1)))
+        return self.max_rows
+
+
 def _media_sync_batches(items, max_rows=_MEDIA_SYNC_BATCH_ROWS,
-                        max_bytes=_MEDIA_SYNC_BATCH_BYTES):
+                        max_bytes=_MEDIA_SYNC_BATCH_BYTES, batch_sizer=None):
     """按行数和持久化字段字节量切分批次，超大单条仍单独提交。"""
     batch = []
     batch_bytes = 0
@@ -29,7 +62,8 @@ def _media_sync_batches(items, max_rows=_MEDIA_SYNC_BATCH_ROWS,
               "tmdbid", "imdbid", "path")
     for item in items:
         item_bytes = sum(len(str(item.get(name) or "").encode("utf-8")) for name in fields)
-        if batch and (len(batch) >= max_rows or batch_bytes + item_bytes > max_bytes):
+        row_limit = min(max_rows, batch_sizer.max_rows) if batch_sizer else max_rows
+        if batch and (len(batch) >= row_limit or batch_bytes + item_bytes > max_bytes):
             yield batch
             batch = []
             batch_bytes = 0
@@ -40,7 +74,7 @@ def _media_sync_batches(items, max_rows=_MEDIA_SYNC_BATCH_ROWS,
 
 
 def _collect_media_sync_items(media_counts, libraries, get_items, on_library=None,
-                              on_batch=None):
+                              on_batch=None, batch_sizer=None):
     """校验完整拉取结果并按批交付，支持直接写入隐藏代次以控制内存。"""
     if not isinstance(media_counts, dict):
         raise ValueError("媒体服务器未返回有效的媒体统计")
@@ -117,7 +151,7 @@ def _collect_media_sync_items(media_counts, libraries, get_items, on_library=Non
     if rows is not None:
         rows.extend(item for batch in _media_sync_batches(normalized_items()) for item in batch)
     else:
-        for batch in _media_sync_batches(normalized_items()):
+        for batch in _media_sync_batches(normalized_items(), batch_sizer=batch_sizer):
             on_batch(batch)
 
     if actual != expected:
@@ -337,14 +371,16 @@ class MediaServer:
             def log_sync_metrics():
                 metrics = lease.get("_sync_metrics", {})
                 log.info("【MediaServer】本次同步数据库指标：写入批次 %s，最长批次事务 %.3fs，"
-                         "批次维护锁等待 %.3fs，代次清理 %.3fs" % (
+                         "批次维护锁等待 %.3fs，最终批大小上限 %s 行，代次清理 %.3fs" % (
                              metrics.get("batch_count", 0),
                              metrics.get("longest_transaction_seconds", 0.0),
                              metrics.get("maintenance_lock_wait_seconds", 0.0),
+                             batch_sizer.max_rows,
                              cleanup_elapsed))
 
             written_count = 0
             stream_write_elapsed = 0.0
+            batch_sizer = _MediaSyncBatchSizer()
 
             def write_sync_batch(batch):
                 nonlocal written_count, stream_write_elapsed
@@ -353,6 +389,8 @@ class MediaServer:
                 batch_started = time.perf_counter()
                 written_count += self.mediadb.write_sync_batch(lease, batch)
                 stream_write_elapsed += time.perf_counter() - batch_started
+                metrics = lease.get("_sync_metrics", {})
+                batch_sizer.observe(len(batch), metrics.get("last_transaction_seconds"))
 
             try:
                 cleanup_generations()
@@ -360,7 +398,7 @@ class MediaServer:
                     self.get_medias_count(), self.get_libraries(), self.get_items,
                     on_library=lambda name, count: self.progress.update(
                         ptype="mediasync", text="已拉取 %s，累计：%s ..." % (name, count)),
-                    on_batch=write_sync_batch)
+                    on_batch=write_sync_batch, batch_sizer=batch_sizer)
                 if written_count != movie_count + tv_count:
                     raise RuntimeError("媒体新代次写入条数与拉取快照不一致")
                 if heartbeat_lost.is_set():
