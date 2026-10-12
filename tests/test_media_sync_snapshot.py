@@ -1,8 +1,11 @@
 """媒体库全量快照必须完整后才能交给数据库替换。"""
 
+from types import SimpleNamespace
 from unittest import TestCase
+from unittest.mock import Mock, patch
 
-from app.mediaserver.media_server import _collect_media_sync_items
+from app.mediaserver.media_server import (MediaServer, _collect_media_sync_items,
+                                         _media_sync_batches)
 
 
 class MediaSyncSnapshotTest(TestCase):
@@ -66,3 +69,39 @@ class MediaSyncSnapshotTest(TestCase):
         with self.assertRaisesRegex(RuntimeError, "page request failed"):
             _collect_media_sync_items({"MovieCount": 2, "SeriesCount": 0},
                                       [{"id": "movies"}], failed_page)
+
+    def test_batches_are_bounded_by_row_count_and_persisted_field_bytes(self):
+        items = [{"id": str(number), "title": "x"} for number in range(5)]
+        by_rows = list(_media_sync_batches(items, max_rows=2, max_bytes=1024))
+        self.assertEqual([2, 2, 1], [len(batch) for batch in by_rows])
+
+        by_bytes = list(_media_sync_batches(items, max_rows=20, max_bytes=3))
+        self.assertEqual([1, 1, 1, 1, 1], [len(batch) for batch in by_bytes])
+
+    def test_sync_does_not_write_or_publish_when_snapshot_is_incomplete(self):
+        instance = MediaServer()
+        lease = {"server": "emby", "job_id": "job", "generation_id": "generation",
+                 "lease_token": 1, "expected_active_generation": "legacy"}
+        media_db = Mock()
+        media_db.acquire_sync_lease.return_value = lease
+        progress = Mock()
+        with patch.object(instance, "mediadb", media_db), \
+                patch.object(instance, "progress", progress), \
+                patch.object(instance, "_server_type", SimpleNamespace(value="emby")), \
+                patch.object(instance, "get_medias_count", return_value=None), \
+                patch.object(instance, "get_libraries", return_value=[]), \
+                patch.object(instance, "get_items") as get_items:
+            instance.sync_mediaserver()
+
+        get_items.assert_not_called()
+        media_db.write_sync_batch.assert_not_called()
+        media_db.publish_sync_generation.assert_not_called()
+        media_db.replace.assert_not_called()
+        self.assertEqual(2, media_db.cleanup_sync_generations.call_count)
+        self.assertEqual((lease,), media_db.cleanup_sync_generations.call_args_list[0].args)
+        self.assertEqual({}, media_db.cleanup_sync_generations.call_args_list[0].kwargs)
+        self.assertEqual((lease,), media_db.cleanup_sync_generations.call_args_list[1].args)
+        self.assertEqual({"generation_id": "generation"},
+                         media_db.cleanup_sync_generations.call_args_list[1].kwargs)
+        media_db.release_sync_lease.assert_called_once_with(lease, status="FAILED")
+        progress.end.assert_called_once_with("mediasync")

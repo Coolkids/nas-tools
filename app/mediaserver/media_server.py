@@ -14,6 +14,29 @@ lock = threading.Lock()
 server_lock = threading.Lock()
 
 
+_MEDIA_SYNC_BATCH_ROWS = 500
+_MEDIA_SYNC_BATCH_BYTES = 4 * 1024 * 1024
+
+
+def _media_sync_batches(items, max_rows=_MEDIA_SYNC_BATCH_ROWS,
+                        max_bytes=_MEDIA_SYNC_BATCH_BYTES):
+    """按行数和持久化字段字节量切分批次，超大单条仍单独提交。"""
+    batch = []
+    batch_bytes = 0
+    fields = ("id", "library", "type", "title", "originalTitle", "year",
+              "tmdbid", "imdbid", "path")
+    for item in items:
+        item_bytes = sum(len(str(item.get(name) or "").encode("utf-8")) for name in fields)
+        if batch and (len(batch) >= max_rows or batch_bytes + item_bytes > max_bytes):
+            yield batch
+            batch = []
+            batch_bytes = 0
+        batch.append(item)
+        batch_bytes += item_bytes
+    if batch:
+        yield batch
+
+
 def _collect_media_sync_items(media_counts, libraries, get_items, on_library=None):
     """校验完整的全库拉取结果，禁止把不完整响应当成空索引发布。"""
     if not isinstance(media_counts, dict):
@@ -246,40 +269,122 @@ class MediaServer:
         with lock:
             started_at = time.perf_counter()
             fetch_started_at = started_at
-            all_items = []
             # 开始进度条
             log.info("【MediaServer】开始同步媒体库数据...")
             self.progress.start("mediasync")
             self.progress.update(ptype="mediasync", text="请稍候...")
             try:
+                lease = self.mediadb.acquire_sync_lease(self._server_type.value, lease_seconds=60)
+            except Exception:
+                log.error("【MediaServer】无法取得媒体同步租约，本次同步未启动")
+                self.progress.update(ptype="mediasync", text="无法开始媒体同步，请稍后重试")
+                self.progress.end("mediasync")
+                return
+            if not lease:
+                log.info("【MediaServer】同一服务器已有有效的同步作业，本次跳过")
+                self.progress.update(ptype="mediasync", text="媒体库已有同步任务正在运行")
+                self.progress.end("mediasync")
+                return
+
+            heartbeat_stop = threading.Event()
+            heartbeat_lost = threading.Event()
+
+            def renew_lease():
+                try:
+                    while not heartbeat_stop.wait(20):
+                        if not self.mediadb.renew_sync_lease(lease, lease_seconds=60):
+                            heartbeat_lost.set()
+                            return
+                except Exception:
+                    heartbeat_lost.set()
+                finally:
+                    self.mediadb.close_session()
+
+            heartbeat = threading.Thread(target=renew_lease,
+                                         name="mediasync-lease-heartbeat", daemon=True)
+            heartbeat.start()
+            published = False
+
+            def finish_lease(status):
+                try:
+                    self.mediadb.release_sync_lease(lease, status=status)
+                except Exception:
+                    log.warning("【MediaServer】同步租约释放失败，将在过期后由后续任务接管")
+
+            try:
+                self.mediadb.cleanup_sync_generations(lease)
                 all_items, movie_count, tv_count = _collect_media_sync_items(
                     self.get_medias_count(), self.get_libraries(), self.get_items,
                     on_library=lambda name, count: self.progress.update(
                         ptype="mediasync", text="已拉取 %s，累计：%s ..." % (name, count)))
+                if heartbeat_lost.is_set():
+                    raise RuntimeError("媒体同步租约已失效")
             except Exception:
                 log.error("【MediaServer】媒体库全量拉取失败或数据不完整，保留旧索引")
                 self.progress.update(ptype="mediasync", text="媒体库数据不完整，同步已取消")
+                try:
+                    self.mediadb.cleanup_sync_generations(
+                        lease, generation_id=lease["generation_id"])
+                except Exception:
+                    log.warning("【MediaServer】未发布代次清理失败，将由后续同步恢复")
+                finish_lease("FAILED")
                 self.progress.end("mediasync")
+                heartbeat_stop.set()
+                heartbeat.join(timeout=2)
                 return
             fetch_elapsed = time.perf_counter() - fetch_started_at
 
             db_started_at = time.perf_counter()
-            replaced_count = self.mediadb.replace(self._server_type.value, all_items)
-            if replaced_count is False:
-                log.error("【MediaServer】媒体库索引替换失败，保留旧索引")
+            try:
+                written_count = 0
+                for batch in _media_sync_batches(all_items):
+                    if heartbeat_lost.is_set():
+                        raise RuntimeError("媒体同步租约已失效，停止写入新代次")
+                    written_count += self.mediadb.write_sync_batch(lease, batch)
+                if written_count != len(all_items):
+                    raise RuntimeError("媒体新代次写入条数与拉取快照不一致")
+                if (heartbeat_lost.is_set()
+                        or not self.mediadb.renew_sync_lease(lease, lease_seconds=60)):
+                    raise RuntimeError("媒体同步租约已失效，拒绝发布新代次")
+                publish_result = self.mediadb.publish_sync_generation(
+                    lease, movie_count=movie_count, series_count=tv_count)
+                published = True
+            except Exception:
+                log.error("【MediaServer】媒体新代次写入或发布失败，保留旧活动索引")
+                try:
+                    self.mediadb.cleanup_sync_generations(
+                        lease, generation_id=lease["generation_id"])
+                except Exception:
+                    log.warning("【MediaServer】未发布代次清理失败，将由后续同步恢复")
+                finish_lease("CLEANUP_PENDING" if published else "FAILED")
+                self.progress.update(ptype="mediasync", text="媒体库同步失败，旧索引保持可用")
                 self.progress.end("mediasync")
+                heartbeat_stop.set()
+                heartbeat.join(timeout=2)
                 return
-            total_count = replaced_count
+
+            total_count = publish_result["total_count"]
             db_elapsed = time.perf_counter() - db_started_at
-            # 更新总体同步情况
-            self.mediadb.statistics(server_type=self._server_type.value,
-                                    total_count=total_count,
-                                    movie_count=movie_count,
-                                    tv_count=tv_count)
+            cleanup_error = None
+            for attempt in range(3):
+                try:
+                    self.mediadb.cleanup_sync_generations(lease)
+                    cleanup_error = None
+                    break
+                except Exception:
+                    cleanup_error = True
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+            if cleanup_error:
+                finish_lease("CLEANUP_PENDING")
+                log.warning("【MediaServer】新代次已发布，旧代次清理失败，保留待恢复状态")
+            else:
+                finish_lease("SUCCEEDED")
             # 结束进度条
             self.progress.update(ptype="mediasync",
                                  value=100,
-                                 text="媒体库数据同步完成，同步数量：%s" % total_count)
+                                 text=("媒体库数据同步完成，旧数据待清理，同步数量：%s" if cleanup_error
+                                       else "媒体库数据同步完成，同步数量：%s") % total_count)
             self.progress.end("mediasync")
             log.info("【MediaServer】媒体库数据同步完成，同步数量：%s" % total_count)
             total_elapsed = time.perf_counter() - started_at
@@ -287,7 +392,10 @@ class MediaServer:
             log.info("【MediaServer】同步阶段耗时：拉取 %.3fs，数据库写入 %.3fs，总计 %.3fs，"
                      "条数 %s，单条 %.6fs" %
                      (fetch_elapsed, db_elapsed, total_elapsed, total_count, avg_elapsed))
-            log.info("【MediaServer】SQLite 指标：提交 %s 次，重试 %s 次" %
+            self.mediadb.close_session()
+            heartbeat_stop.set()
+            heartbeat.join(timeout=2)
+            log.info("【MediaServer】数据库指标：提交 %s 次，重试 %s 次" %
                      (get_db_metrics().get("commits", 0), get_db_metrics().get("retries", 0)))
 
     def check_item_exists(self, title, year=None, tmdbid=None):

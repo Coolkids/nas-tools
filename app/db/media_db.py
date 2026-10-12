@@ -1,7 +1,7 @@
 import time
 import uuid
 from contextlib import contextmanager
-from sqlalchemy import text, or_
+from sqlalchemy import and_, func, text, or_
 from sqlalchemy.exc import IntegrityError
 
 from app.db.models import (Base, MEDIA_SYNC_LEGACY_GENERATION, MEDIASYNCITEMS,
@@ -36,23 +36,27 @@ class MediaDb:
         if not server_type or not iteminfo:
             return False
         try:
-            self.session.query(MEDIASYNCITEMS).filter(MEDIASYNCITEMS.SERVER == server_type,
-                                                      MEDIASYNCITEMS.ITEM_ID == iteminfo.get("id")).delete()
-            self.session.flush()
-            self.session.add(MEDIASYNCITEMS(
-                SERVER=server_type,
-                GENERATION_ID=MEDIA_SYNC_LEGACY_GENERATION,
-                LIBRARY=iteminfo.get("library"),
-                ITEM_ID=iteminfo.get("id"),
-                ITEM_TYPE=iteminfo.get("type"),
-                TITLE=iteminfo.get("title"),
-                ORGIN_TITLE=iteminfo.get("originalTitle"),
-                YEAR=iteminfo.get("year"),
-                TMDBID=iteminfo.get("tmdbid"),
-                IMDBID=iteminfo.get("imdbid"),
-                PATH=iteminfo.get("path")
-            ))
-            self.session.commit()
+            with self.transaction() as session:
+                self._assert_server_not_syncing(session, server_type)
+                generation, _ = self._active_generation(session, server_type, lock=True)
+                generation = generation or MEDIA_SYNC_LEGACY_GENERATION
+                session.query(MEDIASYNCITEMS).filter(
+                    MEDIASYNCITEMS.SERVER == server_type,
+                    MEDIASYNCITEMS.GENERATION_ID == generation,
+                    MEDIASYNCITEMS.ITEM_ID == iteminfo.get("id")).delete(synchronize_session=False)
+                session.add(MEDIASYNCITEMS(
+                    SERVER=server_type,
+                    GENERATION_ID=generation,
+                    LIBRARY=iteminfo.get("library"),
+                    ITEM_ID=iteminfo.get("id"),
+                    ITEM_TYPE=iteminfo.get("type"),
+                    TITLE=iteminfo.get("title"),
+                    ORGIN_TITLE=iteminfo.get("originalTitle"),
+                    YEAR=iteminfo.get("year"),
+                    TMDBID=iteminfo.get("tmdbid"),
+                    IMDBID=iteminfo.get("imdbid"),
+                    PATH=iteminfo.get("path")
+                ))
             return True
         except Exception as e:
             ExceptionUtils.exception_traceback(e)
@@ -94,9 +98,8 @@ class MediaDb:
                     MEDIASYNCSYNCJOB.SERVER == server_type).with_for_update().first()
                 if job and float(job.LEASE_UNTIL) > now:
                     return None
-                statistic = session.query(MEDIASYNCSTATISTIC).filter(
-                    MEDIASYNCSTATISTIC.SERVER == server_type).with_for_update().first()
-                expected_generation = statistic.ACTIVE_GENERATION if statistic else None
+                expected_generation, _ = self._active_generation(
+                    session, server_type, lock=True)
                 payload = {
                     "server": str(server_type),
                     "job_id": uuid.uuid4().hex,
@@ -181,13 +184,161 @@ class MediaDb:
                     and int(job.LEASE_TOKEN) == lease.get("lease_token")
                     and float(job.LEASE_UNTIL) > time.time())
 
+    @staticmethod
+    def _active_generation(session, server_type, lock=False):
+        query = session.query(MEDIASYNCSTATISTIC).filter(
+            MEDIASYNCSTATISTIC.SERVER == server_type)
+        if lock:
+            query = query.with_for_update()
+        statistic = query.first()
+        return (statistic.ACTIVE_GENERATION if statistic else MEDIA_SYNC_LEGACY_GENERATION,
+                statistic)
+
+    def write_sync_batch(self, lease, items):
+        """将一批规范化记录写入不可见的代次，事务提交后释放写入机会。"""
+        rows = [{
+            "SERVER": lease["server"],
+            "GENERATION_ID": lease["generation_id"],
+            "LIBRARY": item.get("library"),
+            "ITEM_ID": item["id"],
+            "ITEM_TYPE": item["type"],
+            "TITLE": item["title"],
+            "ORGIN_TITLE": item.get("originalTitle"),
+            "YEAR": item.get("year"),
+            "TMDBID": item.get("tmdbid"),
+            "IMDBID": item.get("imdbid"),
+            "PATH": item.get("path"),
+        } for item in items]
+        if not rows:
+            return 0
+        with self.transaction() as session:
+            if not self.sync_lease_is_current(lease, session=session):
+                raise RuntimeError("媒体同步租约已过期或已被接管")
+            job = session.query(MEDIASYNCSYNCJOB).filter(
+                MEDIASYNCSYNCJOB.SERVER == lease["server"]).with_for_update().one()
+            job.STATUS = "WRITING"
+            job.UPDATED_AT = time.time()
+            session.bulk_insert_mappings(MEDIASYNCITEMS, rows)
+        return len(rows)
+
+    def publish_sync_generation(self, lease, movie_count, series_count):
+        """校验写入结果后，在一个短事务中同时切换可见代次和统计。"""
+        expected_counts = {"movie": int(movie_count), "series": int(series_count)}
+        now = time.time()
+        update_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+        with self.transaction() as session:
+            if not self.sync_lease_is_current(lease, session=session):
+                raise RuntimeError("媒体同步租约已过期或已被接管，拒绝发布")
+            active_generation, statistic = self._active_generation(
+                session, lease["server"], lock=True)
+            if active_generation != lease.get("expected_active_generation"):
+                raise RuntimeError("活动媒体代次已变化，拒绝发布过期快照")
+
+            item_filter = (MEDIASYNCITEMS.SERVER == lease["server"],
+                           MEDIASYNCITEMS.GENERATION_ID == lease["generation_id"])
+            actual_counts = {
+                "movie": int(session.query(func.count()).filter(
+                    *item_filter, func.lower(MEDIASYNCITEMS.ITEM_TYPE) == "movie").scalar()),
+                "series": int(session.query(func.count()).filter(
+                    *item_filter, func.lower(MEDIASYNCITEMS.ITEM_TYPE).in_(("series", "show"))
+                ).scalar()),
+            }
+            if actual_counts != expected_counts:
+                raise RuntimeError("媒体新代次条数与已校验快照不一致，拒绝发布")
+            total_count = actual_counts["movie"] + actual_counts["series"]
+            if statistic:
+                statistic.ACTIVE_GENERATION = lease["generation_id"]
+                statistic.TOTAL_COUNT = str(total_count)
+                statistic.MOVIE_COUNT = str(actual_counts["movie"])
+                statistic.TV_COUNT = str(actual_counts["series"])
+                statistic.UPDATE_TIME = update_time
+            else:
+                session.add(MEDIASYNCSTATISTIC(
+                    SERVER=lease["server"],
+                    ACTIVE_GENERATION=lease["generation_id"],
+                    TOTAL_COUNT=str(total_count),
+                    MOVIE_COUNT=str(actual_counts["movie"]),
+                    TV_COUNT=str(actual_counts["series"]),
+                    UPDATE_TIME=update_time,
+                ))
+            job = session.query(MEDIASYNCSYNCJOB).filter(
+                MEDIASYNCSYNCJOB.SERVER == lease["server"]).with_for_update().one()
+            job.STATUS = "CLEANUP_PENDING"
+            job.UPDATED_AT = now
+            job.LEASE_UNTIL = now + 60
+        lease["published"] = True
+        lease["lease_until"] = now + 60
+        return {"generation_id": lease["generation_id"], "total_count": total_count,
+                **actual_counts}
+
+    def cleanup_sync_generations(self, lease, batch_size=500, generation_id=None):
+        """分批删除非活动代次；每批重验租约并绝不删除当前活动代次。"""
+        removed = 0
+        while True:
+            now = time.time()
+            next_lease_until = now + 60
+            with self.transaction() as session:
+                if not self.sync_lease_is_current(lease, session=session):
+                    raise RuntimeError("媒体同步租约已失效，停止代次清理")
+                active_generation, _ = self._active_generation(
+                    session, lease["server"], lock=True)
+                if generation_id and generation_id == active_generation:
+                    raise RuntimeError("拒绝清理当前活动媒体代次")
+                query = session.query(MEDIASYNCITEMS.ID).filter(
+                    MEDIASYNCITEMS.SERVER == lease["server"])
+                if generation_id is not None:
+                    query = query.filter(MEDIASYNCITEMS.GENERATION_ID == generation_id)
+                if active_generation is not None:
+                    query = query.filter(MEDIASYNCITEMS.GENERATION_ID != active_generation)
+                item_ids = [row[0] for row in query.order_by(MEDIASYNCITEMS.ID)
+                            .limit(max(1, int(batch_size))).all()]
+                if not item_ids:
+                    return removed
+                deleted = session.query(MEDIASYNCITEMS).filter(
+                    MEDIASYNCITEMS.ID.in_(item_ids),
+                    MEDIASYNCITEMS.SERVER == lease["server"])
+                if active_generation is not None:
+                    deleted = deleted.filter(MEDIASYNCITEMS.GENERATION_ID != active_generation)
+                removed += deleted.delete(synchronize_session=False)
+                job = session.query(MEDIASYNCSYNCJOB).filter(
+                    MEDIASYNCSYNCJOB.SERVER == lease["server"]).with_for_update().one()
+                job.STATUS = "CLEANING"
+                job.LEASE_UNTIL = next_lease_until
+                job.UPDATED_AT = now
+            lease["lease_until"] = next_lease_until
+
+    def _assert_server_not_syncing(self, session, server_type):
+        job = session.query(MEDIASYNCSYNCJOB).filter(
+            MEDIASYNCSYNCJOB.SERVER == server_type).with_for_update().first()
+        if not job:
+            active_generation, _ = self._active_generation(session, server_type, lock=True)
+            now = time.time()
+            session.add(MEDIASYNCSYNCJOB(
+                SERVER=server_type,
+                JOB_ID=f"idle-{uuid.uuid4().hex}",
+                GENERATION_ID=active_generation,
+                LEASE_TOKEN=0,
+                LEASE_UNTIL=0,
+                EXPECTED_ACTIVE_GENERATION=active_generation,
+                STATUS="IDLE",
+                CREATED_AT=now,
+                UPDATED_AT=now,
+            ))
+            session.flush()
+            return
+        if job and float(job.LEASE_UNTIL) > time.time():
+            raise RuntimeError("媒体库正在执行全量同步，暂时不能修改活动索引")
+
     def insert_many(self, server_type, items):
         """批量插入媒体记录，提交由调用方负责。"""
         if not server_type or not items:
             return 0
+        self._assert_server_not_syncing(self.session, server_type)
+        generation, _ = self._active_generation(self.session, server_type, lock=True)
+        generation = generation or MEDIA_SYNC_LEGACY_GENERATION
         rows = [{
             "SERVER": server_type,
-            "GENERATION_ID": MEDIA_SYNC_LEGACY_GENERATION,
+            "GENERATION_ID": generation,
             "LIBRARY": item.get("library"),
             "ITEM_ID": item.get("id"),
             "ITEM_TYPE": item.get("type"),
@@ -224,8 +375,12 @@ class MediaDb:
         try:
             self.session.rollback()
             with self.session.begin():
+                self._assert_server_not_syncing(self.session, server_type)
+                generation, _ = self._active_generation(self.session, server_type, lock=True)
+                generation = generation or MEDIA_SYNC_LEGACY_GENERATION
                 self.session.query(MEDIASYNCITEMS).filter(
-                    MEDIASYNCITEMS.SERVER == server_type
+                    MEDIASYNCITEMS.SERVER == server_type,
+                    MEDIASYNCITEMS.GENERATION_ID == generation,
                 ).delete(synchronize_session=False)
                 if rows:
                     self.insert_many(server_type, items)
@@ -237,12 +392,23 @@ class MediaDb:
 
     def empty(self, server_type=None, library=None):
         try:
-            if server_type and library:
-                self.session.query(MEDIASYNCITEMS).filter(MEDIASYNCITEMS.SERVER == server_type,
-                                                          MEDIASYNCITEMS.LIBRARY == library).delete()
-            else:
-                self.session.query(MEDIASYNCITEMS).delete()
-            self.session.commit()
+            with self.transaction() as session:
+                if server_type:
+                    servers = [server_type]
+                else:
+                    servers = [row[0] for row in session.query(
+                        MEDIASYNCSTATISTIC.SERVER).filter(MEDIASYNCSTATISTIC.SERVER.is_not(None))]
+                for server in servers:
+                    self._assert_server_not_syncing(session, server)
+                    generation, _ = self._active_generation(session, server, lock=True)
+                    if generation is None:
+                        continue
+                    query = session.query(MEDIASYNCITEMS).filter(
+                        MEDIASYNCITEMS.SERVER == server,
+                        MEDIASYNCITEMS.GENERATION_ID == generation)
+                    if library:
+                        query = query.filter(MEDIASYNCITEMS.LIBRARY == library)
+                    query.delete(synchronize_session=False)
             return True
         except Exception as e:
             ExceptionUtils.exception_traceback(e)
@@ -253,18 +419,22 @@ class MediaDb:
         if not server_type:
             return False
         try:
-            self.session.query(MEDIASYNCSTATISTIC).filter(MEDIASYNCSTATISTIC.SERVER == server_type).delete()
-            self.session.flush()
-            self.session.add(MEDIASYNCSTATISTIC(
-                SERVER=server_type,
-                ACTIVE_GENERATION=MEDIA_SYNC_LEGACY_GENERATION,
-                TOTAL_COUNT=total_count,
-                MOVIE_COUNT=movie_count,
-                TV_COUNT=tv_count,
-                UPDATE_TIME=time.strftime('%Y-%m-%d %H:%M:%S',
-                                          time.localtime(time.time()))
-            ))
-            self.session.commit()
+            with self.transaction() as session:
+                self._assert_server_not_syncing(session, server_type)
+                generation, statistic = self._active_generation(session, server_type, lock=True)
+                values = {
+                    "ACTIVE_GENERATION": generation or MEDIA_SYNC_LEGACY_GENERATION,
+                    "TOTAL_COUNT": total_count,
+                    "MOVIE_COUNT": movie_count,
+                    "TV_COUNT": tv_count,
+                    "UPDATE_TIME": time.strftime('%Y-%m-%d %H:%M:%S',
+                                                 time.localtime(time.time())),
+                }
+                if statistic:
+                    for name, value in values.items():
+                        setattr(statistic, name, value)
+                else:
+                    session.add(MEDIASYNCSTATISTIC(SERVER=server_type, **values))
             return True
         except Exception as e:
             ExceptionUtils.exception_traceback(e)
@@ -274,12 +444,18 @@ class MediaDb:
     def exists(self, server_type, title, year, tmdbid):
         if not server_type or not title:
             return False
+        active_items = self.session.query(MEDIASYNCITEMS.ID).join(
+            MEDIASYNCSTATISTIC,
+            MEDIASYNCSTATISTIC.SERVER == MEDIASYNCITEMS.SERVER, isouter=True).filter(or_(
+                and_(MEDIASYNCSTATISTIC.SERVER.is_(None),
+                     MEDIASYNCITEMS.GENERATION_ID == MEDIA_SYNC_LEGACY_GENERATION),
+                MEDIASYNCITEMS.GENERATION_ID == MEDIASYNCSTATISTIC.ACTIVE_GENERATION))
         if tmdbid:
-            match = self.session.query(MEDIASYNCITEMS.ID).filter(
+            match = active_items.filter(
                 MEDIASYNCITEMS.TMDBID == str(tmdbid)).first()
             if match:
                 return True
-        query = self.session.query(MEDIASYNCITEMS.ID).filter(
+        query = active_items.filter(
             MEDIASYNCITEMS.SERVER == server_type,
             MEDIASYNCITEMS.TITLE == title)
         if year:
