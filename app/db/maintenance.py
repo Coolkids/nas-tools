@@ -18,7 +18,7 @@ from decimal import Decimal
 from sqlalchemy import func, inspect, or_, select, text, update
 
 from app.db.manager import DATABASE
-from app.db.models import Base, MEDIASYNCSYNCJOB
+from app.db.models import Base, MEDIASYNCSYNCJOB, validate_string_lengths
 from app.db.schema import LOGICAL_DOMAIN_TABLES, current_schema_revision
 from app.utils.storage_jobs import STORAGE_JOBS, schedule_restart
 
@@ -1425,6 +1425,7 @@ def _decode_backup_row(raw_row, table):
     for column in table.columns:
         if not _matches_column_type(decoded[column.name], column):
             raise ValueError(f"备份表 {table.name} 字段 {column.name} 的类型不匹配")
+    validate_string_lengths(table, (decoded,))
     return decoded
 
 

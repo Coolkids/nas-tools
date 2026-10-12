@@ -1,4 +1,5 @@
 # coding: utf-8
+from collections.abc import Mapping
 import hashlib
 import json
 
@@ -96,6 +97,20 @@ def _digest_default(*columns):
 def _set_digest(target, columns, digest_column):
     setattr(target, digest_column,
             portable_key_digest(tuple(getattr(target, name) for name in columns)))
+
+
+def validate_string_lengths(table, rows):
+    """在 SQLite 等不强制执行 VARCHAR 长度的后端拒绝超长值。"""
+    table = getattr(table, "__table__", table)
+    bounded_columns = [column for column in table.columns
+                       if isinstance(column.type, String) and column.type.length]
+    for row in rows:
+        for column in bounded_columns:
+            value = row.get(column.name) if isinstance(row, Mapping) else getattr(
+                row, column.name, None)
+            if value is not None and len(str(value)) > column.type.length:
+                raise ValueError(
+                    f"{table.name}.{column.name} 超过 {column.type.length} 个字符，拒绝截断")
 
 
 class CONFIGFILTERGROUP(Base):
@@ -235,7 +250,7 @@ class DOWNLOADHISTORY(Base):
     TITLE = Column(Text)
     YEAR = Column(Text)
     TYPE = Column(Text)
-    TMDBID = Column(Text)
+    TMDBID = Column(String(64))
     VOTE = Column(Text)
     POSTER = Column(Text)
     OVERVIEW = Column(Text)
@@ -284,10 +299,10 @@ class RSSHISTORY(Base):
 
     ID = Column(Integer, primary_key=True)
     TYPE = Column(Text)
-    RSSID = Column(Text, index=True)
+    RSSID = Column(String(128), index=True)
     NAME = Column(Text)
     YEAR = Column(Text)
-    TMDBID = Column(Text)
+    TMDBID = Column(String(64))
     SEASON = Column(Text)
     IMAGE = Column(Text)
     DESC = Column(Text)
@@ -307,7 +322,7 @@ class RSSMOVIES(Base):
     NAME = Column(Text, index=True)
     YEAR = Column(Text)
     KEYWORD = Column(Text)
-    TMDBID = Column(Text)
+    TMDBID = Column(String(64))
     IMAGE = Column(Text)
     SEARCH_SITES = Column(Text)
     OVER_EDITION = Column(Integer)
@@ -355,7 +370,7 @@ class RSSTVS(Base):
     YEAR = Column(Text)
     KEYWORD = Column(Text)
     SEASON = Column(Text)
-    TMDBID = Column(Text)
+    TMDBID = Column(String(64))
     IMAGE = Column(Text)
     SEARCH_SITES = Column(Text)
     OVER_EDITION = Column(Integer)
@@ -383,7 +398,7 @@ class RSSTVEPISODES(Base):
     __tablename__ = 'RSS_TV_EPISODES'
 
     ID = Column(Integer, primary_key=True)
-    RSSID = Column(Text, index=True)
+    RSSID = Column(String(128), index=True)
     EPISODES = Column(Text)
 
 
@@ -418,11 +433,11 @@ class SEARCHRESULTINFO(Base):
     VOTE = Column(Text)
     IMAGE = Column(Text)
     POSTER = Column(Text)
-    TMDBID = Column(Text)
+    TMDBID = Column(String(64))
     OVERVIEW = Column(Text)
     RES_TYPE = Column(Text)
     RES_ORDER = Column(Text)
-    SIZE = Column(Integer)
+    SIZE = Column(Text)
     SEEDERS = Column(Integer)
     PEERS = Column(Integer)
     SITE = Column(Text)
@@ -501,9 +516,9 @@ class RECOGNITIONATTEMPT(Base):
     __tablename__ = 'RECOGNITION_ATTEMPT'
 
     ID = Column(Integer, primary_key=True)
-    REQUEST_ID = Column(Text, index=True)
-    ATTEMPT_ID = Column(Text, index=True)
-    PROVIDER_ID = Column(Text, index=True)
+    REQUEST_ID = Column(String(128), index=True)
+    ATTEMPT_ID = Column(String(128), index=True)
+    PROVIDER_ID = Column(String(128), index=True)
     STATUS = Column(Text, index=True)
     INPUT = Column(LargeText)
     RAW_RESULT = Column(LargeText)
@@ -603,7 +618,7 @@ class USERRSSTASKHISTORY(Base):
     __tablename__ = 'USERRSS_TASK_HISTORY'
 
     ID = Column(Integer, primary_key=True)
-    TASK_ID = Column(Text, index=True)
+    TASK_ID = Column(String(128), index=True)
     TITLE = Column(Text)
     DOWNLOADER = Column(Text)
     DATE = Column(Text)
@@ -627,8 +642,8 @@ class MEDIASYNCITEMS(BaseMedia):
     TITLE = Column(Text, index=True)
     ORGIN_TITLE = Column(Text, index=True)
     YEAR = Column(Text)
-    TMDBID = Column(Text, index=True)
-    IMDBID = Column(Text)
+    TMDBID = Column(String(64), index=True)
+    IMDBID = Column(String(32))
     PATH = Column(Text)
     NOTE = Column(Text)
     JSON = Column(LargeText)

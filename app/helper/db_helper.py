@@ -6,7 +6,7 @@ import time
 import json
 import uuid
 from enum import Enum
-from sqlalchemy import cast, func, or_, and_, case
+from sqlalchemy import func, or_, and_, case
 
 from app.db import MainDb, DbPersist
 from app.db.models import *
@@ -16,6 +16,10 @@ from app.utils.types import MediaType, RmtMode
 
 class DbHelper:
     _db = MainDb()
+
+    @staticmethod
+    def _identifier_string(value):
+        return None if value is None else str(value)
 
     @staticmethod
     def _search_task_query(keyword):
@@ -127,14 +131,14 @@ class DbHelper:
                     DESCRIPTION=media_item.description,
                     TYPE=mtype if ident_flag else '',
                     TITLE=media_item.title if ident_flag else title,
-                    YEAR=media_item.year if ident_flag else '',
+                    YEAR=self._identifier_string(media_item.year) if ident_flag else '',
                     SEASON=media_item.get_season_string() if ident_flag else '',
                     EPISODE=media_item.get_episode_string() if ident_flag else '',
                     ES_STRING=media_item.get_season_episode_string() if ident_flag else '',
                     VOTE=media_item.vote_average or "0",
                     IMAGE=media_item.get_backdrop_image(default=False, original=True),
                     POSTER=media_item.get_poster_image(),
-                    TMDBID=media_item.tmdb_id,
+                    TMDBID=self._identifier_string(media_item.tmdb_id),
                     OVERVIEW=media_item.overview,
                     RES_TYPE=json.dumps({
                         "respix": media_item.resource_pix,
@@ -235,7 +239,6 @@ class DbHelper:
         """
         return self._db.query(SEARCHTASK).order_by(SEARCHTASK.ID.desc()).limit(limit).all()
 
-    @DbPersist(_db)
     def insert_ai_recognition_record(self, title, anitopy_result, ai_result,
                                      anitopy_tmdb, ai_tmdb, status):
         """保存未命中或匹配冲突的双解析结果。"""
@@ -248,6 +251,10 @@ class DbHelper:
             STATUS=status,
             ADD_TIME=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         )
+        return self._persist_ai_recognition_record(record)
+
+    @DbPersist(_db)
+    def _persist_ai_recognition_record(self, record):
         self._db.insert(record)
         return record
 
@@ -269,57 +276,63 @@ class DbHelper:
             (page - 1) * page_size if before_id is None else 0).limit(page_size).all()
         return total, records
 
-    @DbPersist(_db)
     def insert_recognition_record(self, payload):
         """Persist a recognition request and all provider attempts together."""
-        request_id = payload.get("request_id")
+        request_id = self._identifier_string(payload.get("request_id"))
+        projection = recognition_search_projection(
+            payload.get("overall_result"), payload.get("actions"))
+        request_values = {
+            "REQUEST_ID": request_id,
+            "ORIGINAL_NAME": payload.get("original_name"),
+            "SOURCE": payload.get("source"),
+            "STAGE": payload.get("stage"),
+            "CREATED_AT": payload.get("created_at"),
+            "SUMMARY": self._json_dumps(self.recognition_summary(payload)),
+            "STATUS_SUMMARY": projection["STATUS_SUMMARY"],
+            "BUSINESS_STATUS_SUMMARY": projection["BUSINESS_STATUS_SUMMARY"],
+            "REASON_SUMMARY": projection["REASON_SUMMARY"],
+            "REASON_HASH": projection["REASON_HASH"],
+            "BUSINESS_REASON_SUMMARY": projection["BUSINESS_REASON_SUMMARY"],
+            "BUSINESS_REASON_HASH": projection["BUSINESS_REASON_HASH"],
+            "CONTEXT": self._json_dumps(payload.get("context")),
+            "ACTIONS": self._json_dumps(payload.get("actions")),
+            "PROVIDER_RESULTS": self._json_dumps(payload.get("provider_results")),
+            "OVERALL_RESULT": self._json_dumps(payload.get("overall_result")),
+            "TMDB_RESULTS": self._json_dumps(payload.get("tmdb_results")),
+        }
+        attempts = []
+        for result in payload.get("provider_results") or []:
+            attempts.append({
+                "REQUEST_ID": request_id,
+                "ATTEMPT_ID": self._identifier_string(result.get("attempt_id")),
+                "PROVIDER_ID": self._identifier_string(result.get("provider_id")),
+                "STATUS": result.get("status"),
+                "INPUT": self._json_dumps(result.get("input")),
+                "RAW_RESULT": self._json_dumps(result.get("raw_result")),
+                "NORMALIZED_RESULT": self._json_dumps(result.get("normalized_result")),
+                "TMDB_RESULTS": self._json_dumps(result.get("tmdb_results")),
+                "ERROR": result.get("error"),
+                "ELAPSED_MS": result.get("elapsed_ms"),
+            })
+        return self._persist_recognition_record(
+            request_id, request_values, attempts, projection["ACTION_TYPES"])
+
+    @DbPersist(_db)
+    def _persist_recognition_record(self, request_id, request_values, attempts, action_types):
         if self._db.query(RECOGNITIONREQUEST).filter(
                 RECOGNITIONREQUEST.REQUEST_ID == request_id).first():
             return request_id
-        projection = recognition_search_projection(
-            payload.get("overall_result"), payload.get("actions"))
-        request = RECOGNITIONREQUEST(
-            REQUEST_ID=request_id,
-            ORIGINAL_NAME=payload.get("original_name"),
-            SOURCE=payload.get("source"),
-            STAGE=payload.get("stage"),
-            CREATED_AT=payload.get("created_at"),
-            SUMMARY=self._json_dumps(self.recognition_summary(payload)),
-            STATUS_SUMMARY=projection["STATUS_SUMMARY"],
-            BUSINESS_STATUS_SUMMARY=projection["BUSINESS_STATUS_SUMMARY"],
-            REASON_SUMMARY=projection["REASON_SUMMARY"],
-            REASON_HASH=projection["REASON_HASH"],
-            BUSINESS_REASON_SUMMARY=projection["BUSINESS_REASON_SUMMARY"],
-            BUSINESS_REASON_HASH=projection["BUSINESS_REASON_HASH"],
-            CONTEXT=self._json_dumps(payload.get("context")),
-            ACTIONS=self._json_dumps(payload.get("actions")),
-            PROVIDER_RESULTS=self._json_dumps(payload.get("provider_results")),
-            OVERALL_RESULT=self._json_dumps(payload.get("overall_result")),
-            TMDB_RESULTS=self._json_dumps(payload.get("tmdb_results")),
-        )
-        self._db.insert(request)
-        attempts = []
-        for result in payload.get("provider_results") or []:
-            attempts.append(RECOGNITIONATTEMPT(
-                REQUEST_ID=request_id,
-                ATTEMPT_ID=result.get("attempt_id"),
-                PROVIDER_ID=result.get("provider_id"),
-                STATUS=result.get("status"),
-                INPUT=self._json_dumps(result.get("input")),
-                RAW_RESULT=self._json_dumps(result.get("raw_result")),
-                NORMALIZED_RESULT=self._json_dumps(result.get("normalized_result")),
-                TMDB_RESULTS=self._json_dumps(result.get("tmdb_results")),
-                ERROR=result.get("error"),
-                ELAPSED_MS=result.get("elapsed_ms"),
-            ))
-        self._db.insert_many(RECOGNITIONATTEMPT, attempts)
-        self._save_recognition_action_index(request_id, projection["ACTION_TYPES"])
+        self._db.insert(RECOGNITIONREQUEST(**request_values))
+        self._db.insert_many(RECOGNITIONATTEMPT,
+                             [RECOGNITIONATTEMPT(**attempt) for attempt in attempts])
+        self._save_recognition_action_index(request_id, action_types)
         return request_id
 
     @DbPersist(_db)
     def append_recognition_business_action(self, request_id, action_type, reason,
                                            details=None, business_status="skipped"):
         """Append a late business-branch decision to its original parse record."""
+        request_id = self._identifier_string(request_id)
         request = self._db.query(RECOGNITIONREQUEST).filter(
             RECOGNITIONREQUEST.REQUEST_ID == request_id).first()
         if not request:
@@ -384,7 +397,8 @@ class DbHelper:
         if update_ai_error:
             attempt_row = self._db.query(RECOGNITIONATTEMPT).filter(
                 RECOGNITIONATTEMPT.REQUEST_ID == request_id,
-                RECOGNITIONATTEMPT.ATTEMPT_ID == ai_attempt.get("attempt_id")).first()
+                RECOGNITIONATTEMPT.ATTEMPT_ID == self._identifier_string(
+                    ai_attempt.get("attempt_id"))).first()
             if attempt_row:
                 attempt_row.ERROR = reason
         return True
@@ -430,7 +444,7 @@ class DbHelper:
         if provider_id:
             query = query.filter(RECOGNITIONREQUEST.REQUEST_ID.in_(
                 self._db.query(RECOGNITIONATTEMPT.REQUEST_ID)
-                .filter(RECOGNITIONATTEMPT.PROVIDER_ID == provider_id).distinct()))
+                .filter(RECOGNITIONATTEMPT.PROVIDER_ID == str(provider_id)).distinct()))
         if action_type:
             normalized_action = str(action_type).casefold()
             query = query.filter(RECOGNITIONREQUEST.REQUEST_ID.in_(
@@ -446,6 +460,7 @@ class DbHelper:
 
     def get_recognition_record(self, request_id):
         """Return one complete request and its indexed attempt rows."""
+        request_id = self._identifier_string(request_id)
         request = self._db.query(RECOGNITIONREQUEST).filter(
             RECOGNITIONREQUEST.REQUEST_ID == request_id).first()
         if not request:
@@ -469,8 +484,10 @@ class DbHelper:
             request_ids = [row[0] for row in self._db.query(
                 RECOGNITIONREQUEST.REQUEST_ID).filter(
                     RECOGNITIONREQUEST.CREATED_AT < older_than,
-                    or_(RECOGNITIONREQUEST.OVERALL_RESULT.is_(None),
-                        RECOGNITIONREQUEST.OVERALL_RESULT.notlike('%"status"%running%'))
+                    or_(RECOGNITIONREQUEST.STATUS_SUMMARY.is_(None),
+                        RECOGNITIONREQUEST.STATUS_SUMMARY != "running"),
+                    or_(RECOGNITIONREQUEST.BUSINESS_STATUS_SUMMARY.is_(None),
+                        RECOGNITIONREQUEST.BUSINESS_STATUS_SUMMARY != "running")
                 ).order_by(RECOGNITIONREQUEST.CREATED_AT.asc(),
                            RECOGNITIONREQUEST.REQUEST_ID.asc()).limit(batch_size).all()]
             if not request_ids:
@@ -518,15 +535,40 @@ class DbHelper:
                             RECOGNITIONREQUEST.CREATED_AT > last_created,
                             and_(RECOGNITIONREQUEST.CREATED_AT == last_created,
                                  RECOGNITIONREQUEST.REQUEST_ID > last_request_id)))
-                    requests = query.order_by(RECOGNITIONREQUEST.CREATED_AT.asc(),
-                                              RECOGNITIONREQUEST.REQUEST_ID.asc()) \
+                    requests = query.with_entities(
+                        RECOGNITIONREQUEST.REQUEST_ID,
+                        RECOGNITIONREQUEST.ORIGINAL_NAME,
+                        RECOGNITIONREQUEST.SOURCE,
+                        RECOGNITIONREQUEST.STAGE,
+                        RECOGNITIONREQUEST.CREATED_AT,
+                        RECOGNITIONREQUEST.SUMMARY,
+                        RECOGNITIONREQUEST.CONTEXT,
+                        RECOGNITIONREQUEST.ACTIONS,
+                        RECOGNITIONREQUEST.PROVIDER_RESULTS,
+                        RECOGNITIONREQUEST.OVERALL_RESULT,
+                        RECOGNITIONREQUEST.TMDB_RESULTS,
+                    ).order_by(RECOGNITIONREQUEST.CREATED_AT.asc(),
+                               RECOGNITIONREQUEST.REQUEST_ID.asc()) \
                         .limit(batch_size).all()
                     if not requests:
+                        self._db.commit()
                         break
                     request_ids = [request.REQUEST_ID for request in requests]
-                    attempts = self._db.query(RECOGNITIONATTEMPT).filter(
-                        RECOGNITIONATTEMPT.REQUEST_ID.in_(request_ids)) \
+                    attempts = self._db.query(
+                        RECOGNITIONATTEMPT.ID,
+                        RECOGNITIONATTEMPT.REQUEST_ID,
+                        RECOGNITIONATTEMPT.ATTEMPT_ID,
+                        RECOGNITIONATTEMPT.PROVIDER_ID,
+                        RECOGNITIONATTEMPT.STATUS,
+                        RECOGNITIONATTEMPT.INPUT,
+                        RECOGNITIONATTEMPT.RAW_RESULT,
+                        RECOGNITIONATTEMPT.NORMALIZED_RESULT,
+                        RECOGNITIONATTEMPT.TMDB_RESULTS,
+                        RECOGNITIONATTEMPT.ERROR,
+                        RECOGNITIONATTEMPT.ELAPSED_MS,
+                    ).filter(RECOGNITIONATTEMPT.REQUEST_ID.in_(request_ids)) \
                         .order_by(RECOGNITIONATTEMPT.ID.asc()).all()
+                    self._db.commit()
                     attempts_by_request = {}
                     for attempt in attempts:
                         attempts_by_request.setdefault(attempt.REQUEST_ID, []).append({
@@ -585,15 +627,16 @@ class DbHelper:
                         nonlocal deleted_count
                         if not batch_ids:
                             return
-                        self._db.query(RECOGNITIONATTEMPT).filter(
-                            RECOGNITIONATTEMPT.REQUEST_ID.in_(batch_ids)).delete(
-                                synchronize_session=False)
-                        self._db.query(RECOGNITIONREQUESTACTION).filter(
-                            RECOGNITIONREQUESTACTION.REQUEST_ID.in_(batch_ids)).delete(
-                                synchronize_session=False)
-                        deleted_count += self._db.query(RECOGNITIONREQUEST).filter(
-                            RECOGNITIONREQUEST.REQUEST_ID.in_(batch_ids)).delete(
-                                synchronize_session=False)
+                        with self._db.transaction():
+                            self._db.query(RECOGNITIONATTEMPT).filter(
+                                RECOGNITIONATTEMPT.REQUEST_ID.in_(batch_ids)).delete(
+                                    synchronize_session=False)
+                            self._db.query(RECOGNITIONREQUESTACTION).filter(
+                                RECOGNITIONREQUESTACTION.REQUEST_ID.in_(batch_ids)).delete(
+                                    synchronize_session=False)
+                            deleted_count += self._db.query(RECOGNITIONREQUEST).filter(
+                                RECOGNITIONREQUEST.REQUEST_ID.in_(batch_ids)).delete(
+                                    synchronize_session=False)
                     with open(archive_path, "r", encoding="utf-8") as archive_file:
                         for line in archive_file:
                             request_id = json.loads(line).get("request_id")
@@ -603,7 +646,6 @@ class DbHelper:
                                 delete_batch(request_ids)
                                 request_ids = []
                     delete_batch(request_ids)
-                    self._db.commit()
                 except Exception:
                     self._db.rollback()
                     raise
@@ -648,7 +690,7 @@ class DbHelper:
             "ENCLOSURE": media_info.enclosure,
             "TYPE": media_info.type.value,
             "TITLE": media_info.title,
-            "YEAR": media_info.year,
+            "YEAR": self._identifier_string(media_info.year),
             "SEASON": media_info.get_season_string(),
             "EPISODE": media_info.get_episode_string()
         }], ("ENCLOSURE",),
@@ -671,7 +713,7 @@ class DbHelper:
                 "ENCLOSURE": media_info.enclosure,
                 "TYPE": media_info.type.value,
                 "TITLE": media_info.title,
-                "YEAR": media_info.year,
+                "YEAR": self._identifier_string(media_info.year),
                 "SEASON": media_info.get_season_string(),
                 "EPISODE": media_info.get_episode_string()
             })
@@ -731,7 +773,7 @@ class DbHelper:
             self._db.insert(
                 DOUBANMEDIAS(
                     NAME=media.get_name(),
-                    YEAR=media.year,
+                    YEAR=str(media.year) if media.year is not None else None,
                     TYPE=media.type.value,
                     RATING=media.vote_average,
                     IMAGE=media.get_poster_image(),
@@ -746,7 +788,7 @@ class DbHelper:
         标记豆瓣数据的状态
         """
         self._db.query(DOUBANMEDIAS).filter(DOUBANMEDIAS.NAME == media.title,
-                                            DOUBANMEDIAS.YEAR == media.year).update(
+                                            DOUBANMEDIAS.YEAR == str(media.year)).update(
             {
                 "STATE": state
             }
@@ -808,7 +850,7 @@ class DbHelper:
                 CATEGORY=media_info.category,
                 TMDBID=int(media_info.tmdb_id),
                 TITLE=title,
-                YEAR=media_info.year,
+                YEAR=self._identifier_string(media_info.year),
                 SEASON_EPISODE=season_episode,
                 SOURCE=str(in_from.value),
                 SOURCE_PATH=source_path,
@@ -835,13 +877,20 @@ class DbHelper:
                        | (TRANSFERHISTORY.TITLE.ilike(search)))
             count = self._db.query(TRANSFERHISTORY).filter(matches).count()
             data = self._db.query(TRANSFERHISTORY).filter(matches).order_by(
+                case((TRANSFERHISTORY.DATE.is_(None), 1), else_=0).asc(),
                 TRANSFERHISTORY.DATE.desc(), TRANSFERHISTORY.ID.desc()
             ).limit(int(rownum)).offset(begin_pos).all()
+            # 页面随后可能逐条请求 TMDB 海报；释放只读事务，避免网络等待占住 SQLite 快照。
+            self._db.commit()
             return count, data
         else:
-            return self._db.query(TRANSFERHISTORY).count(), self._db.query(TRANSFERHISTORY).order_by(
+            count = self._db.query(TRANSFERHISTORY).count()
+            data = self._db.query(TRANSFERHISTORY).order_by(
+                case((TRANSFERHISTORY.DATE.is_(None), 1), else_=0).asc(),
                 TRANSFERHISTORY.DATE.desc(), TRANSFERHISTORY.ID.desc()
             ).limit(int(rownum)).offset(begin_pos).all()
+            self._db.commit()
+            return count, data
 
     def get_transfer_path_by_id(self, logid):
         """
@@ -1052,15 +1101,22 @@ class DbHelper:
         """
         查询过滤规则
         """
-        if not groupid:
-            return self._db.query(CONFIGFILTERRULES).order_by(CONFIGFILTERRULES.GROUP_ID,
-                                                              cast(CONFIGFILTERRULES.PRIORITY,
-                                                                   Integer)).all()
-        else:
-            return self._db.query(CONFIGFILTERRULES).filter(
-                CONFIGFILTERRULES.GROUP_ID == int(groupid)).order_by(CONFIGFILTERRULES.GROUP_ID,
-                                                                     cast(CONFIGFILTERRULES.PRIORITY,
-                                                                          Integer)).all()
+        query = self._db.query(CONFIGFILTERRULES)
+        if groupid:
+            query = query.filter(CONFIGFILTERRULES.GROUP_ID == str(groupid))
+        rules = query.all()
+
+        def priority_key(value):
+            normalized = str(value or "").strip()
+            if not normalized:
+                return 0, 0
+            try:
+                return 0, int(normalized)
+            except (TypeError, ValueError):
+                return 1, normalized.casefold()
+
+        return sorted(rules, key=lambda rule: (
+            str(rule.GROUP_ID or ""), priority_key(rule.PRIORITY), rule.ID))
 
     def get_rss_movies(self, state=None, rssid=None):
         """
@@ -1107,9 +1163,9 @@ class DbHelper:
         if not tmdbid:
             return
         self._db.query(RSSMOVIES).filter(RSSMOVIES.ID == int(rid)).update({
-            "TMDBID": tmdbid,
+            "TMDBID": self._identifier_string(tmdbid),
             "NAME": title,
-            "YEAR": year,
+            "YEAR": str(year) if year is not None else None,
             "IMAGE": image,
             "NOTE": note,
             "DESC": desc
@@ -1192,8 +1248,8 @@ class DbHelper:
             return 9
         self._db.insert(RSSMOVIES(
             NAME=media_info.title,
-            YEAR=media_info.year,
-            TMDBID=media_info.tmdb_id,
+            YEAR=str(media_info.year) if media_info.year is not None else None,
+            TMDBID=self._identifier_string(media_info.tmdb_id),
             IMAGE=media_info.get_message_image(),
             SEARCH_SITES=json.dumps(search_sites),
             OVER_EDITION=over_edition,
@@ -1222,7 +1278,8 @@ class DbHelper:
             self._db.query(RSSMOVIES).filter(RSSMOVIES.ID == int(rssid)).delete()
         else:
             if tmdbid:
-                self._db.query(RSSMOVIES).filter(RSSMOVIES.TMDBID == tmdbid).delete()
+                self._db.query(RSSMOVIES).filter(
+                    RSSMOVIES.TMDBID == self._identifier_string(tmdbid)).delete()
             self._db.query(RSSMOVIES).filter(RSSMOVIES.NAME == title,
                                              RSSMOVIES.YEAR == str(year)).delete()
 
@@ -1265,10 +1322,12 @@ class DbHelper:
             return ""
         if tmdbid:
             if season:
-                ret = self._db.query(RSSTVS.ID).filter(RSSTVS.TMDBID == tmdbid,
-                                                       RSSTVS.SEASON == season).first()
+                ret = self._db.query(RSSTVS.ID).filter(
+                    RSSTVS.TMDBID == self._identifier_string(tmdbid),
+                    RSSTVS.SEASON == str(season)).first()
             else:
-                ret = self._db.query(RSSTVS.ID).filter(RSSTVS.TMDBID == tmdbid).first()
+                ret = self._db.query(RSSTVS.ID).filter(
+                    RSSTVS.TMDBID == self._identifier_string(tmdbid)).first()
             if ret:
                 return ret[0]
         if season and year:
@@ -1302,9 +1361,9 @@ class DbHelper:
             return
         self._db.query(RSSTVS).filter(RSSTVS.ID == int(rid)).update(
             {
-                "TMDBID": tmdbid,
+                "TMDBID": self._identifier_string(tmdbid),
                 "NAME": title,
-                "YEAR": year,
+                "YEAR": str(year) if year is not None else None,
                 "TOTAL": total,
                 "LACK": lack,
                 "IMAGE": image,
@@ -1333,7 +1392,7 @@ class DbHelper:
         if season:
             count = self._db.query(RSSTVS).filter(RSSTVS.NAME == title,
                                                   RSSTVS.YEAR == str(year),
-                                                  RSSTVS.SEASON == season).count()
+                                                  RSSTVS.SEASON == str(season)).count()
         else:
             count = self._db.query(RSSTVS).filter(RSSTVS.NAME == title,
                                                   RSSTVS.YEAR == str(year)).count()
@@ -1379,9 +1438,9 @@ class DbHelper:
             return 9
         self._db.insert(RSSTVS(
             NAME=media_info.title,
-            YEAR=media_info.year,
+            YEAR=str(media_info.year) if media_info.year is not None else None,
             SEASON=season_str,
-            TMDBID=media_info.tmdb_id,
+            TMDBID=self._identifier_string(media_info.tmdb_id),
             IMAGE=media_info.get_message_image(),
             SEARCH_SITES=json.dumps(search_sites),
             OVER_EDITION=over_edition,
@@ -1424,7 +1483,7 @@ class DbHelper:
         else:
             self._db.query(RSSTVS).filter(RSSTVS.NAME == title,
                                           RSSTVS.YEAR == str(year),
-                                          RSSTVS.SEASON == season).update(
+                                          RSSTVS.SEASON == str(season)).update(
                 {
                     "LACK": lack
                 }
@@ -1449,7 +1508,8 @@ class DbHelper:
         """
         if not rid:
             return False
-        count = self._db.query(RSSTVEPISODES).filter(RSSTVEPISODES.RSSID == int(rid)).count()
+        count = self._db.query(RSSTVEPISODES).filter(
+            RSSTVEPISODES.RSSID == self._identifier_string(rid)).count()
         if count > 0:
             return True
         else:
@@ -1467,14 +1527,15 @@ class DbHelper:
         else:
             episodes = [str(epi) for epi in episodes]
         if self.is_exists_rss_tv_episodes(rid):
-            self._db.query(RSSTVEPISODES).filter(RSSTVEPISODES.RSSID == int(rid)).update(
+            self._db.query(RSSTVEPISODES).filter(
+                RSSTVEPISODES.RSSID == self._identifier_string(rid)).update(
                 {
                     "EPISODES": ",".join(episodes)
                 }
             )
         else:
             self._db.insert(RSSTVEPISODES(
-                RSSID=rid,
+                RSSID=self._identifier_string(rid),
                 EPISODES=",".join(episodes)
             ))
 
@@ -1484,7 +1545,8 @@ class DbHelper:
         """
         if not rid:
             return []
-        ret = self._db.query(RSSTVEPISODES.EPISODES).filter(RSSTVEPISODES.RSSID == rid).first()
+        ret = self._db.query(RSSTVEPISODES.EPISODES).filter(
+            RSSTVEPISODES.RSSID == self._identifier_string(rid)).first()
         if ret:
             return [int(epi) for epi in str(ret[0]).split(',')]
         else:
@@ -1497,7 +1559,8 @@ class DbHelper:
         """
         if not rid:
             return
-        self._db.query(RSSTVEPISODES).filter(RSSTVEPISODES.RSSID == int(rid)).delete()
+        self._db.query(RSSTVEPISODES).filter(
+            RSSTVEPISODES.RSSID == self._identifier_string(rid)).delete()
 
     @DbPersist(_db)
     def update_rss_tv_state(self, title=None, year=None, season=None, rssid=None, state='R'):
@@ -1514,7 +1577,7 @@ class DbHelper:
         else:
             self._db.query(RSSTVS).filter(RSSTVS.NAME == title,
                                           RSSTVS.YEAR == str(year),
-                                          RSSTVS.SEASON == season).update(
+                                          RSSTVS.SEASON == str(season)).update(
                 {
                     "STATE": state
                 })
@@ -1625,6 +1688,7 @@ class DbHelper:
         """
         if not title or not tmdbid:
             return False
+        tmdbid = self._identifier_string(tmdbid)
         if mtype:
             count = self._db.query(DOWNLOADHISTORY).filter(
                 (DOWNLOADHISTORY.TITLE == title) | (DOWNLOADHISTORY.TMDBID == tmdbid),
@@ -1648,7 +1712,8 @@ class DbHelper:
             return
         if self.is_exists_download_history(media_info.title, media_info.tmdb_id, media_info.type.value):
             self._db.query(DOWNLOADHISTORY).filter(DOWNLOADHISTORY.TITLE == media_info.title,
-                                                   DOWNLOADHISTORY.TMDBID == media_info.tmdb_id,
+                                                   DOWNLOADHISTORY.TMDBID == self._identifier_string(
+                                                       media_info.tmdb_id),
                                                    DOWNLOADHISTORY.TYPE == media_info.type.value).update(
                 {
                     "TORRENT": media_info.org_string,
@@ -1661,9 +1726,9 @@ class DbHelper:
         else:
             self._db.insert(DOWNLOADHISTORY(
                 TITLE=media_info.title,
-                YEAR=media_info.year,
+                YEAR=self._identifier_string(media_info.year),
                 TYPE=media_info.type.value,
-                TMDBID=media_info.tmdb_id,
+                TMDBID=self._identifier_string(media_info.tmdb_id),
                 VOTE=media_info.vote_average,
                 POSTER=media_info.get_poster_image(),
                 OVERVIEW=media_info.overview,
@@ -1787,7 +1852,8 @@ class DbHelper:
         """
         删除规则组
         """
-        self._db.query(CONFIGFILTERRULES).filter(CONFIGFILTERRULES.GROUP_ID == groupid).delete()
+        self._db.query(CONFIGFILTERRULES).filter(
+            CONFIGFILTERRULES.GROUP_ID == str(groupid)).delete()
         self._db.query(CONFIGFILTERGROUP).filter(CONFIGFILTERGROUP.ID == int(groupid)).delete()
 
     def restore_filter_groups(self, groups):
@@ -1832,7 +1898,7 @@ class DbHelper:
             self._db.query(CONFIGFILTERRULES).filter(CONFIGFILTERRULES.ID == int(ruleid)).update(
                 {
                     "ROLE_NAME": item.get("name"),
-                    "PRIORITY": item.get("pri"),
+                    "PRIORITY": self._identifier_string(item.get("pri")),
                     "INCLUDE": item.get("include"),
                     "EXCLUDE": item.get("exclude"),
                     "SIZE_LIMIT": item.get("size"),
@@ -1841,9 +1907,9 @@ class DbHelper:
             )
         else:
             self._db.insert(CONFIGFILTERRULES(
-                GROUP_ID=item.get("group"),
+                GROUP_ID=self._identifier_string(item.get("group")),
                 ROLE_NAME=item.get("name"),
-                PRIORITY=item.get("pri"),
+                PRIORITY=self._identifier_string(item.get("pri")),
                 INCLUDE=item.get("include"),
                 EXCLUDE=item.get("exclude"),
                 SIZE_LIMIT=item.get("size"),
@@ -1990,7 +2056,7 @@ class DbHelper:
         增加自定义RSS订阅任务的下载记录
         """
         self._db.insert(USERRSSTASKHISTORY(
-            TASK_ID=task_id,
+            TASK_ID=self._identifier_string(task_id),
             TITLE=title,
             DOWNLOADER=downloader,
             DATE=time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))
@@ -2002,7 +2068,8 @@ class DbHelper:
         """
         if not task_id:
             return []
-        return self._db.query(USERRSSTASKHISTORY).filter(USERRSSTASKHISTORY.TASK_ID == task_id) \
+        return self._db.query(USERRSSTASKHISTORY).filter(
+            USERRSSTASKHISTORY.TASK_ID == self._identifier_string(task_id)) \
             .order_by(USERRSSTASKHISTORY.DATE.desc()).all()
 
     def get_rss_history(self, rtype=None, rid=None, page=1, page_size=30):
@@ -2025,7 +2092,8 @@ class DbHelper:
         """
         if not rssid:
             return False
-        count = self._db.query(RSSHISTORY).filter(RSSHISTORY.RSSID == rssid).count()
+        count = self._db.query(RSSHISTORY).filter(
+            RSSHISTORY.RSSID == self._identifier_string(rssid)).count()
         if count > 0:
             return True
         else:
@@ -2039,10 +2107,10 @@ class DbHelper:
         if not self.is_exists_rss_history(rssid):
             self._db.insert(RSSHISTORY(
                 TYPE=rtype,
-                RSSID=rssid,
+                RSSID=self._identifier_string(rssid),
                 NAME=name,
-                YEAR=year,
-                TMDBID=tmdbid,
+                YEAR=self._identifier_string(year),
+                TMDBID=self._identifier_string(tmdbid),
                 SEASON=season,
                 IMAGE=image,
                 DESC=desc,
@@ -2140,7 +2208,7 @@ class DbHelper:
         """
         self._db.insert(CUSTOMWORDGROUPS(
             TITLE=title,
-            YEAR=year,
+            YEAR=self._identifier_string(year),
             TYPE=int(gtype),
             TMDBID=int(tmdbid),
             SEASON_COUNT=int(season_count),

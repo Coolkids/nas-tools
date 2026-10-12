@@ -5,7 +5,7 @@ import re
 
 from sqlalchemy import LargeBinary, String, func, insert, inspect, select
 
-from app.db.models import portable_key_digest
+from app.db.models import portable_key_digest, validate_string_lengths
 
 
 @dataclass(frozen=True)
@@ -106,6 +106,7 @@ class DatabaseBackend:
     @staticmethod
     def insert_many(connection, table, rows):
         if rows:
+            validate_string_lengths(table, rows)
             connection.execute(insert(table), rows)
         return len(rows)
 
@@ -136,6 +137,8 @@ class DatabaseBackend:
         """为跨数据库长唯一键生成确定性摘要，并在碰撞时拒绝覆盖。"""
         table = model.__table__
         conflict_columns = tuple(conflict_columns)
+        rows = [dict(row) for row in rows]
+        validate_string_lengths(table, rows)
         portable_keys = getattr(model, "__portable_unique_keys__", {})
         digest_column_name = portable_keys.get(conflict_columns)
         if not digest_column_name:
@@ -143,7 +146,6 @@ class DatabaseBackend:
 
         digest_column = table.c[digest_column_name]
         values_by_digest = {}
-        rows = [dict(row) for row in rows]
         for row in rows:
             key_values = tuple(row.get(column) for column in conflict_columns)
             digest = portable_key_digest(key_values)

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, scoped_session, sessionmaker
 
 from app.db.backends import create_backend
 from app.db.contracts import DatabaseStatus
+from app.db.models import validate_string_lengths
 from app.utils.storage_jobs import STORAGE_JOBS
 
 
@@ -172,6 +173,8 @@ class DatabaseManager:
 
     def _before_flush(self, session, flush_context, instances):
         self._guard_database_session(session)
+        for instance in session.new.union(session.dirty):
+            validate_string_lengths(type(instance), (instance,))
 
     @staticmethod
     def _after_transaction_end(session, transaction):

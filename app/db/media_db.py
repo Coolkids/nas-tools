@@ -13,6 +13,10 @@ from app.utils.storage_jobs import STORAGE_JOBS
 from app.utils import ExceptionUtils
 
 
+def _string_identifier(value):
+    return None if value is None else str(value)
+
+
 class MediaDb:
 
     @property
@@ -38,6 +42,7 @@ class MediaDb:
     def insert(self, server_type, iteminfo):
         if not server_type or not iteminfo:
             return False
+        item_id = _string_identifier(iteminfo.get("id"))
         try:
             with self.transaction() as session:
                 self._assert_server_not_syncing(session, server_type)
@@ -46,18 +51,18 @@ class MediaDb:
                 session.query(MEDIASYNCITEMS).filter(
                     MEDIASYNCITEMS.SERVER == server_type,
                     MEDIASYNCITEMS.GENERATION_ID == generation,
-                    MEDIASYNCITEMS.ITEM_ID == iteminfo.get("id")).delete(synchronize_session=False)
+                    MEDIASYNCITEMS.ITEM_ID == item_id).delete(synchronize_session=False)
                 session.add(MEDIASYNCITEMS(
                     SERVER=server_type,
                     GENERATION_ID=generation,
                     LIBRARY=iteminfo.get("library"),
-                    ITEM_ID=iteminfo.get("id"),
+                    ITEM_ID=item_id,
                     ITEM_TYPE=iteminfo.get("type"),
                     TITLE=iteminfo.get("title"),
                     ORGIN_TITLE=iteminfo.get("originalTitle"),
-                    YEAR=iteminfo.get("year"),
-                    TMDBID=iteminfo.get("tmdbid"),
-                    IMDBID=iteminfo.get("imdbid"),
+                    YEAR=_string_identifier(iteminfo.get("year")),
+                    TMDBID=_string_identifier(iteminfo.get("tmdbid")),
+                    IMDBID=_string_identifier(iteminfo.get("imdbid")),
                     PATH=iteminfo.get("path")
                 ))
             return True
@@ -253,13 +258,13 @@ class MediaDb:
             "SERVER": lease["server"],
             "GENERATION_ID": lease["generation_id"],
             "LIBRARY": item.get("library"),
-            "ITEM_ID": item["id"],
+            "ITEM_ID": _string_identifier(item["id"]),
             "ITEM_TYPE": item["type"],
             "TITLE": item["title"],
             "ORGIN_TITLE": item.get("originalTitle"),
-            "YEAR": item.get("year"),
-            "TMDBID": item.get("tmdbid"),
-            "IMDBID": item.get("imdbid"),
+            "YEAR": _string_identifier(item.get("year")),
+            "TMDBID": _string_identifier(item.get("tmdbid")),
+            "IMDBID": _string_identifier(item.get("imdbid")),
             "PATH": item.get("path"),
         } for item in items]
         if not rows:
@@ -437,13 +442,13 @@ class MediaDb:
             "SERVER": server_type,
             "GENERATION_ID": generation,
             "LIBRARY": item.get("library"),
-            "ITEM_ID": item.get("id"),
+            "ITEM_ID": _string_identifier(item.get("id")),
             "ITEM_TYPE": item.get("type"),
             "TITLE": item.get("title"),
             "ORGIN_TITLE": item.get("originalTitle"),
-            "YEAR": item.get("year"),
-            "TMDBID": item.get("tmdbid"),
-            "IMDBID": item.get("imdbid"),
+            "YEAR": _string_identifier(item.get("year")),
+            "TMDBID": _string_identifier(item.get("tmdbid")),
+            "IMDBID": _string_identifier(item.get("imdbid")),
             "PATH": item.get("path")
         } for item in items if item and item.get("id")]
         DATABASE.insert_many(MEDIASYNCITEMS, rows)
@@ -460,13 +465,13 @@ class MediaDb:
             rows.append({
                 "SERVER": server_type,
                 "LIBRARY": iteminfo.get("library"),
-                "ITEM_ID": iteminfo.get("id"),
+                "ITEM_ID": _string_identifier(iteminfo.get("id")),
                 "ITEM_TYPE": iteminfo.get("type"),
                 "TITLE": iteminfo.get("title"),
                 "ORGIN_TITLE": iteminfo.get("originalTitle"),
-                "YEAR": iteminfo.get("year"),
-                "TMDBID": iteminfo.get("tmdbid"),
-                "IMDBID": iteminfo.get("imdbid"),
+                "YEAR": _string_identifier(iteminfo.get("year")),
+                "TMDBID": _string_identifier(iteminfo.get("tmdbid")),
+                "IMDBID": _string_identifier(iteminfo.get("imdbid")),
                 "PATH": iteminfo.get("path")
             })
         try:
