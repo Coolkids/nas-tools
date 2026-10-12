@@ -15,10 +15,10 @@ import zipfile
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import func, inspect, select, text
+from sqlalchemy import func, inspect, or_, select, text, update
 
 from app.db.manager import DATABASE
-from app.db.models import Base
+from app.db.models import Base, MEDIASYNCSYNCJOB
 from app.db.schema import LOGICAL_DOMAIN_TABLES, current_schema_revision
 from app.utils.storage_jobs import STORAGE_JOBS
 
@@ -540,6 +540,52 @@ def _content_digests_match(engine, expected):
     return True
 
 
+def _content_digests_match_except_sync_jobs(engine, expected):
+    """恢复事务可有意重置同步租约，其余备份表仍须逐表完全匹配。"""
+    if not isinstance(expected, dict) or set(expected) != set(Base.metadata.tables):
+        return False
+    actual = _digest_tables(engine)
+    for name, digest in actual.items():
+        if name == MEDIASYNCSYNCJOB.__tablename__:
+            continue
+        reference = expected.get(name)
+        if isinstance(reference, dict):
+            rows, sha256 = reference.get("rows"), reference.get("sha256")
+        elif isinstance(reference, (tuple, list)) and len(reference) == 2:
+            rows, sha256 = reference
+        else:
+            return False
+        if int(rows) != digest[0] or sha256 != digest[1]:
+            return False
+    return True
+
+
+def _restore_expected_digests(job):
+    result = job.get("result") or {}
+    payload = job.get("payload") or {}
+    return result.get("restored_digests") or payload.get("content_digests")
+
+
+def _invalidate_restored_media_sync_leases(connection):
+    """恢复导入时废弃备份中的租约，后续启动只清理未发布代次。"""
+    now = time.time()
+    result = connection.execute(update(MEDIASYNCSYNCJOB).values(
+        LEASE_TOKEN=MEDIASYNCSYNCJOB.LEASE_TOKEN + 1,
+        LEASE_UNTIL=0,
+        STATUS="CLEANUP_PENDING",
+        UPDATED_AT=now,
+    ))
+    return max(0, result.rowcount or 0)
+
+
+def _restored_media_sync_leases_invalidated(engine):
+    with engine.connect() as connection:
+        active = connection.execute(select(func.count()).select_from(MEDIASYNCSYNCJOB).where(
+            or_(MEDIASYNCSYNCJOB.LEASE_UNTIL != 0,
+                MEDIASYNCSYNCJOB.STATUS != "CLEANUP_PENDING"))).scalar_one()
+    return int(active) == 0
+
+
 def _pre_restore_backup_path(job_id):
     return os.path.join(_backup_root(), f"pre-restore-{job_id}.zip")
 
@@ -664,7 +710,7 @@ def _recover_sqlite_restore(job):
     if status in {"VERIFYING_RESTORE", "RESTART_PENDING", "RECOVERY_REQUIRED"}:
         engine = DATABASE.engine
         _verify_revision(engine)
-        if not _content_digests_match(engine, payload.get("content_digests")):
+        if not _content_digests_match(engine, _restore_expected_digests(job)):
             raise RuntimeError("恢复后的 SQLite 内容摘要与经检查的备份不一致")
         from app.db.migration import _calibrate_sequences
         _calibrate_sequences(engine)
@@ -699,14 +745,30 @@ def _recover_remote_restore(job):
         _mark_maintenance_recovered(job, recovered_status,
                                     "远程恢复事务尚未提交；原活动数据库已验证并保留")
         return True
-    if _content_digests_match(engine, payload.get("content_digests")):
+    backup_digests = payload.get("content_digests")
+    if _content_digests_match(engine, result.get("restored_digests")):
+        restored_digests = result["restored_digests"]
+    elif _content_digests_match(engine, backup_digests):
+        # 兼容恢复提交成功、进程在持久化任务结果前崩溃的窗口。
+        with engine.begin() as connection:
+            _invalidate_restored_media_sync_leases(connection)
+        restored_digests = _digest_tables(engine)
+    elif (_content_digests_match_except_sync_jobs(engine, backup_digests)
+          and _restored_media_sync_leases_invalidated(engine)):
+        # 同步作业表在恢复事务中被重置，其他表仍须与检查通过的备份一致。
+        restored_digests = _digest_tables(engine)
+    else:
+        restored_digests = None
+
+    if restored_digests is not None:
         _calibrate_sequences(engine)
         _verify_revision(engine)
-        if not _content_digests_match(engine, payload.get("content_digests")):
+        if not _content_digests_match(engine, restored_digests):
             raise RuntimeError("远程数据库自增校准后数据摘要不一致")
         retired_spool = _clear_restore_derived_state(job_id)
         final_result = dict(result)
-        final_result.update({"restore_validated": True, "retired_spool": retired_spool,
+        final_result.update({"restored_digests": restored_digests,
+                             "restore_validated": True, "retired_spool": retired_spool,
                              "restart_required": False, "startup_recovered": True})
         _mark_maintenance_recovered(job, "SUCCEEDED",
                                     "重启后已确认远程数据库恢复内容，恢复业务访问",
@@ -1449,7 +1511,7 @@ def retry_database_restore_restart(job_id):
             STORAGE_JOBS.set_maintenance_gate("database", job_id, "VERIFYING_RESTORE")
         engine = DATABASE.engine
         _verify_revision(engine)
-        if not _content_digests_match(engine, payload.get("content_digests")):
+        if not _content_digests_match(engine, _restore_expected_digests(job)):
             raise RuntimeError("恢复后的数据库内容不再匹配检查通过的备份")
         retired_spool = _clear_restore_derived_state(job_id)
         result = dict(job.get("result") or {})
@@ -1487,7 +1549,7 @@ def retry_database_restore_restart(job_id):
             STORAGE_JOBS.set_maintenance_gate("database", job_id, "VERIFYING_RESTORE")
         engine = DATABASE.engine
         _verify_revision(engine)
-        if not _content_digests_match(engine, payload.get("content_digests")):
+        if not _content_digests_match(engine, _restore_expected_digests(job)):
             raise RuntimeError("恢复后的数据库内容不再匹配检查通过的备份")
         retired_spool = _clear_restore_derived_state(job_id)
         result = dict(job.get("result") or {})
@@ -1591,8 +1653,12 @@ def _run_database_restore(job_id, settings, fingerprint, upload_path):
                                     message="正在向 SQLite 隔离暂存库流式导入备份",
                                     progress=0.12)
                 with stage_engine.begin() as connection:
-                    restored_digests = _import_backup_data(
+                    imported_digests = _import_backup_data(
                         upload_path, connection, job_id, "BUILDING_STAGE")
+                    if imported_digests != checked["content_digests"]:
+                        raise RuntimeError("SQLite 恢复暂存库与已检查备份摘要不一致")
+                    _invalidate_restored_media_sync_leases(connection)
+                restored_digests = _digest_tables(stage_engine)
                 _verify_revision(stage_engine)
                 if restored_digests != _digest_tables(stage_engine):
                     raise RuntimeError("SQLite 暂存库逐表内容校验失败")
@@ -1643,6 +1709,7 @@ def _run_database_restore(job_id, settings, fingerprint, upload_path):
                                "old_identity": old_identity,
                                "staged_identity": staged_identity,
                                "staged_path": staged_path,
+                               "restored_digests": restored_digests,
                                "publish_intent": True,
                                "restore_archive_sha256": checked["archive_sha256"]})
                 claimed = STORAGE_JOBS.update(
@@ -1695,8 +1762,12 @@ def _run_database_restore(job_id, settings, fingerprint, upload_path):
                         for table in Base.metadata.sorted_tables:
                             connection.exec_driver_sql(
                                 f"LOCK TABLE {preparer.format_table(table)} IN ACCESS EXCLUSIVE MODE")
-                    restored_digests = _import_backup_data(
+                    imported_digests = _import_backup_data(
                         upload_path, connection, job_id, "RESTORING", delete_existing=True)
+                    if imported_digests != checked["content_digests"]:
+                        raise RuntimeError("远程恢复事务与已检查备份摘要不一致")
+                    _invalidate_restored_media_sync_leases(connection)
+                restored_digests = _digest_tables(actual_engine)
                 transaction_committed = True
                 STORAGE_JOBS.update(job_id, status="CALIBRATING", stage="CALIBRATING",
                                     result={"pre_restore_backup_id": job_id,
