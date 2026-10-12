@@ -66,11 +66,13 @@ SQLite 的文件名和目录由后端固定生成，不能在设置页或 API �
 
 `tests/test_database_backup_contract.py` 在 SQLite、PostgreSQL、MySQL、MariaDB 上生成并校验完整归档，并通过低层导出、校验、导入接口运行全部 16 个源/目标组合；远程执行结果 `20 passed`（含四种源归档检查）。数据包含 Unicode、长路径、JSON 和空表，恢复后校验主键并执行新增写入。测试发现并修复空表预期摘要遗漏和 PostgreSQL 序列校准传参问题。该矩阵不覆盖完整后台任务生命周期、上传检查、维护锁、原子发布/重启或大数据压力。
 
-2026-10-13 最终本地回归：后端 `321 passed, 28 skipped, 83 subtests passed`；隔离缓存容量压力 `2 passed`；前端 `npm run type-check` 和 `npm run build` 均通过。跳过项中包含远程环境和压力门控用例；远程契约、备份归档矩阵和压力用例另行运行并记录在上文。
+`tests/test_database_migration_contract.py` 通过 `_copy_table`、逐表内容摘要和自增校准验证全部 16 个源/目标引擎组合，远程运行 `16 passed`。每个用例从空隔离库开始，复制含 Unicode、长路径和 JSON 的样例，校验目标摘要并验证新增主键。相同远程实例的用例使用本地 SQLite 快照作为隔离中间库，因为正式流程应拒绝源/目标为同一实例。此项不覆盖 `start_database_migration` 的检查凭证、维护锁、配置提交、重启及故障恢复编排。
+
+2026-10-13 最终本地回归：后端 `322 passed, 43 skipped, 83 subtests passed`；隔离缓存容量压力 `2 passed`；前端 `npm run type-check` 和 `npm run build` 均通过。跳过项包含未注入远程设置和门控压力用例；远程契约、备份归档矩阵、迁移复制矩阵和压力用例另行运行并记录在上文。
 
 使用 Google Chrome 154 headless 加本地 mock `/do` 响应加载构建产物，缓存和数据库标签在 360、390、768、1280、1440 px 与浅/深色主题下均无页面横向溢出。此项只验证空数据状态的布局，不覆盖真实 API 联调、含数据表格、软键盘、安全区、放大、键盘/屏幕阅读器或迁移/恢复交互。
 
-备份/恢复仍未完成实库验收。本次没有生成或导入数据库备份，因此不记录耗时，也不把任何未测试平台标为已验证。部署操作仍按上文的“完整数据库备份与恢复”流程执行；正式启用恢复前应先在隔离副本完成目标数据库组合、损坏包和中断回滚验收。
+完整后台备份/恢复仍未完成端到端验收。本次已对隔离远程库实际生成归档并运行低层导入，但未通过上传、检查、维护锁、恢复任务、原子发布和受控重启全链路恢复。暂不记录端到端恢复耗时；正式启用恢复前仍需在隔离副本完成任务生命周期、损坏包和中断回滚验收。
 
 直接运行 smoke test 使用临时配置目录和 SQLite，验证 `/index`、登录以及 SIGINT 停止。PyInstaller 6.22.2 命令已安装，但未构建可执行产物。`docker compose -f docker/compose.yml config --quiet` 静态检查通过；Docker CLI 可用，但当前执行用户无法访问 daemon socket，镜像构建、Supervisor 容器启动和容器内受控重启均未验证。前端 `npm run type-check` 与 `npm run build` 已通过；浏览器空状态布局已按上文验证，真实 API、可访问性和迁移/恢复交互仍待验收。
 
