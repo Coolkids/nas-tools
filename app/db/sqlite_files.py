@@ -312,6 +312,32 @@ def _execute(connection, statement, parameters=()):
     return connection.execute(statement, parameters)
 
 
+def cleanup_legacy_startup_data(connection):
+    """Apply the one-time legacy cleanup when importing snapshots into a new layout."""
+    tables = {name.casefold(): name for name in _table_names(connection)}
+    for table_name in ("RSS_MOVIES", "RSS_TVS"):
+        actual = tables.get(table_name.casefold())
+        if not actual:
+            continue
+        columns = {row[1].casefold(): row[1] for row in _execute(
+            connection, f"PRAGMA table_info({_quote(actual)})")}
+        rss_sites = columns.get("rss_sites")
+        if rss_sites:
+            _execute(connection,
+                     f"UPDATE {_quote(actual)} SET {_quote(rss_sites)}=NULL")
+
+    system_dict = tables.get("system_dict")
+    if system_dict:
+        columns = {row[1].casefold(): row[1] for row in _execute(
+            connection, f"PRAGMA table_info({_quote(system_dict)})")}
+        type_column, key_column = columns.get("type"), columns.get("key")
+        if type_column and key_column:
+            _execute(connection,
+                     f"DELETE FROM {_quote(system_dict)} WHERE {_quote(type_column)}=? "
+                     f"AND {_quote(key_column)} IN (?, ?)",
+                     ("SystemConfig", "CookieUserInfo", "CookieCloud"))
+
+
 def _quote(identifier):
     return '"' + identifier.replace('"', '""') + '"'
 
@@ -601,6 +627,7 @@ def _prepare_sqlite_database():
                     # stale legacy lease must never block the first new sync.
                     _copy_domain(connection, media_snapshot, "media", expected_tables,
                                  excluded_tables={"MEDIASYNC_SYNC_JOBS"})
+                cleanup_legacy_startup_data(connection)
                 _backfill_recognition_search(connection)
                 head = current_schema_revision()
                 connection.exec_driver_sql(
