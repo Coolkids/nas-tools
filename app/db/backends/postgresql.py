@@ -89,7 +89,10 @@ class PostgreSQLBackend(DatabaseBackend):
                     sequence_name = connection.execute(text(
                         "SELECT pg_get_serial_sequence(:table_name, :column_name)"), {
                             "table_name": f'"{table.name}"',
-                            "column_name": f'"{column.name}"',
+                            # pg_get_serial_sequence accepts the column name
+                            # itself and performs identifier handling; passing
+                            # an SQL-quoted string searches for quote characters.
+                            "column_name": column.name,
                         }).scalar_one_or_none()
                     if not sequence_name:
                         continue

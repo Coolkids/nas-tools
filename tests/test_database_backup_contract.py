@@ -8,8 +8,11 @@ import sqlalchemy as sa
 
 import app.db as app_database
 import app.db.maintenance as maintenance
+from app.db.backends import create_backend
 from app.db.manager import DatabaseManager
 from app.db.models import Base, MEDIASYNCITEMS
+
+
 @pytest.mark.parametrize("backend_name", ("sqlite", "postgresql", "mariadb", "mysql"))
 def test_full_backup_archive_exports_and_validates_on_each_engine(
         backend_name, tmp_path, monkeypatch):
@@ -93,3 +96,100 @@ def test_full_backup_archive_exports_and_validates_on_each_engine(
                 if "alembic_version" in sa.inspect(engine).get_table_names():
                     sa.Table("alembic_version", sa.MetaData(), autoload_with=engine).drop(engine)
             engine.dispose()
+
+
+@pytest.mark.parametrize("source_type", ("sqlite", "postgresql", "mariadb", "mysql"))
+@pytest.mark.parametrize("target_type", ("sqlite", "postgresql", "mariadb", "mysql"))
+def test_backup_import_matrix_preserves_rows_and_allows_new_writes(
+        source_type, target_type, tmp_path, monkeypatch):
+    remote_settings = json.loads(os.environ.get("NASTOOLS_TEST_DATABASE_SETTINGS", "{}"))
+    required_remote = {kind for kind in (source_type, target_type) if kind != "sqlite"}
+    missing = sorted(kind for kind in required_remote if not remote_settings.get(kind))
+    if missing:
+        pytest.skip(f"未配置隔离数据库：{', '.join(missing)}")
+    for kind in required_remote:
+        if remote_settings[kind].get("type") != kind:
+            pytest.fail(f"{kind} 测试库配置类型不匹配")
+
+    class NoopJobs:
+        @staticmethod
+        def cancel_requested(_job_id):
+            return False
+
+        @staticmethod
+        def update(*_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(maintenance, "STORAGE_JOBS", NoopJobs())
+    same_remote_database = source_type == target_type and source_type != "sqlite"
+
+    def make_engine(kind, role):
+        if kind == "sqlite":
+            path = tmp_path / f"{role}.sqlite3"
+            return sa.create_engine(f"sqlite:///{path}")
+        return create_backend(kind).create_engine(remote_settings[kind])
+
+    source_engine = make_engine(source_type, "source")
+    target_engine = (source_engine if same_remote_database
+                     else make_engine(target_type, "target"))
+    source_created = target_created = False
+    try:
+        assert not sa.inspect(source_engine).get_table_names(), \
+            f"{source_type} 源测试库非空，拒绝运行备份矩阵"
+        if target_engine is not source_engine:
+            assert not sa.inspect(target_engine).get_table_names(), \
+                f"{target_type} 目标测试库非空，拒绝运行备份矩阵"
+
+        Base.metadata.create_all(source_engine)
+        source_created = True
+        with source_engine.begin() as connection:
+            source_id = connection.execute(MEDIASYNCITEMS.__table__.insert().values(
+                SERVER="backup-matrix",
+                ITEM_ID="matrix-中文-🧪",
+                TITLE="矩阵备份标题",
+                PATH="/matrix/" + "路径/" * 100,
+                JSON=json.dumps({"source": source_type, "value": "雪"}, ensure_ascii=False),
+            )).inserted_primary_key[0]
+
+        archive_path = tmp_path / f"{source_type}-to-{target_type}.zip"
+        with source_engine.connect() as connection:
+            maintenance._export_backup(
+                connection, str(archive_path), f"{source_type}-{target_type}", source_type)
+        checked = maintenance._validate_backup_archive(str(archive_path))
+        assert checked["manifest"]["source_database_type"] == source_type
+
+        if target_engine is source_engine:
+            Base.metadata.drop_all(target_engine)
+            source_created = False
+        Base.metadata.create_all(target_engine)
+        target_created = True
+        with target_engine.begin() as connection:
+            restored = maintenance._import_backup_data(
+                str(archive_path), connection, f"{source_type}-{target_type}", "BUILDING_STAGE")
+        assert restored["MEDIASYNC_ITEMS"]["rows"] == 1
+
+        target_backend = create_backend(target_type)
+        calibrate = getattr(target_backend, "calibrate_sequences", None)
+        if calibrate:
+            calibrate(target_engine, Base.metadata)
+        with target_engine.begin() as connection:
+            row = connection.execute(sa.select(
+                MEDIASYNCITEMS.__table__.c.TITLE,
+                MEDIASYNCITEMS.__table__.c.ITEM_ID,
+                MEDIASYNCITEMS.__table__.c.ID,
+            )).one()
+            assert row == ("矩阵备份标题", "matrix-中文-🧪", source_id)
+            inserted_id = connection.execute(MEDIASYNCITEMS.__table__.insert().values(
+                SERVER="backup-matrix",
+                ITEM_ID="matrix-after-restore",
+                TITLE="恢复后新增",
+            )).inserted_primary_key[0]
+            assert inserted_id > source_id
+    finally:
+        if target_created:
+            Base.metadata.drop_all(target_engine)
+        if source_created and source_engine is not target_engine:
+            Base.metadata.drop_all(source_engine)
+        if target_engine is not source_engine:
+            target_engine.dispose()
+        source_engine.dispose()
