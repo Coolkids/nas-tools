@@ -1,6 +1,8 @@
 """延迟创建的统一业务数据库管理器。"""
 
 import copy
+import os
+import time
 from contextlib import contextmanager
 from threading import RLock
 
@@ -25,6 +27,24 @@ class DatabaseManager:
         self._session = None
         self._session_class = None
         self._commit_count = 0
+        self._metrics_lock = RLock()
+        self._metrics = {
+            "sql_count": 0,
+            "sql_seconds": 0.0,
+            "sql_max_seconds": 0.0,
+            "unknown_rowcount": 0,
+            "sql_errors": 0,
+            "transaction_count": 0,
+            "transaction_seconds": 0.0,
+            "transaction_max_seconds": 0.0,
+            "rollback_count": 0,
+            "maintenance_lock_wait_seconds": 0.0,
+            "connection_checkouts": 0,
+            "connection_checkins": 0,
+            "reported_rowcount": 0,
+            "sqlite_busy_errors": 0,
+            "lock_conflict_errors": 0,
+        }
 
     @staticmethod
     def _read_settings():
@@ -68,13 +88,18 @@ class DatabaseManager:
             engine = backend.create_engine(settings)
             event.listen(engine, "connect",
                          lambda connection, record: backend.configure_connection(connection))
+            event.listen(engine, "before_cursor_execute", self._before_cursor_execute)
+            event.listen(engine, "after_cursor_execute", self._after_cursor_execute)
+            event.listen(engine, "handle_error", self._handle_sql_error)
+            event.listen(engine.pool, "checkout", self._on_connection_checkout)
+            event.listen(engine.pool, "checkin", self._on_connection_checkin)
             try:
                 initialize = getattr(backend, "initialize", None)
                 if initialize:
                     initialize(engine)
                 backend.validate_product(backend.capabilities(engine))
             except Exception:
-                engine.dispose()
+                backend.release(engine)
                 raise
             self._backend = backend
             self._engine = engine
@@ -125,7 +150,10 @@ class DatabaseManager:
         if STORAGE_JOBS.owns_exclusive_lock() or session.info.get("_storage_lock"):
             return
         lock = STORAGE_JOBS.maintenance_lock(exclusive=False)
+        started = time.perf_counter()
         lock.__enter__()
+        DATABASE._record_metric("maintenance_lock_wait_seconds",
+                                time.perf_counter() - started)
         if STORAGE_JOBS.maintenance_gate("database"):
             lock.__exit__(None, None, None)
             raise RuntimeError("数据库正在维护，暂时拒绝业务读写")
@@ -165,6 +193,72 @@ class DatabaseManager:
             connected = False
         return DatabaseStatus(backend=backend, connected=connected, url=url,
                               supports_space_reclaim=supports_space_reclaim)
+
+    def _record_metric(self, key, value=1):
+        with self._metrics_lock:
+            self._metrics[key] = self._metrics.get(key, 0) + value
+
+    def _before_cursor_execute(self, connection, cursor, statement, parameters,
+                               context, executemany):
+        # Keep only timing and row counts; SQL and bound values may contain secrets.
+        context._nas_tools_started_at = time.perf_counter()
+
+    def _after_cursor_execute(self, connection, cursor, statement, parameters,
+                              context, executemany):
+        elapsed = max(0.0, time.perf_counter() -
+                      getattr(context, "_nas_tools_started_at", time.perf_counter()))
+        with self._metrics_lock:
+            self._metrics["sql_count"] += 1
+            self._metrics["sql_seconds"] += elapsed
+            self._metrics["sql_max_seconds"] = max(
+                self._metrics["sql_max_seconds"], elapsed)
+            rowcount = getattr(cursor, "rowcount", -1)
+            if isinstance(rowcount, int) and rowcount >= 0:
+                self._metrics["reported_rowcount"] += rowcount
+            else:
+                self._metrics["unknown_rowcount"] += 1
+
+    def _handle_sql_error(self, exception_context):
+        original = getattr(exception_context, "original_exception", None)
+        with self._metrics_lock:
+            self._metrics["sql_errors"] += 1
+            code = getattr(original, "sqlite_errorcode", None)
+            message = str(original).lower()
+            if ((code is not None and (code & 0xFF) in (5, 6))
+                    or "database is locked" in message
+                    or "database is busy" in message):
+                self._metrics["sqlite_busy_errors"] += 1
+            arguments = getattr(original, "args", ())
+            error_code = arguments[0] if arguments and isinstance(arguments[0], int) else None
+            sqlstate = (getattr(original, "sqlstate", None)
+                        or getattr(original, "pgcode", None))
+            if (sqlstate in {"40001", "40P01"}
+                    or error_code in {1205, 1213}):
+                self._metrics["lock_conflict_errors"] += 1
+
+    def _on_connection_checkout(self, dbapi_connection, connection_record,
+                                connection_proxy):
+        self._record_metric("connection_checkouts")
+
+    def _on_connection_checkin(self, dbapi_connection, connection_record):
+        self._record_metric("connection_checkins")
+
+    def metrics(self):
+        with self._metrics_lock:
+            result = dict(self._metrics)
+            result["commits"] = self._commit_count
+            result["pool_checked_out"] = (
+                self._engine.pool.checkedout() if self._engine is not None else 0)
+        if self._engine is not None and self._settings.get("type") == "sqlite":
+            path = self._engine.url.database
+            try:
+                result["sqlite_wal_bytes"] = (os.path.getsize(path + "-wal")
+                                              if os.path.isfile(path + "-wal") else 0)
+            except OSError:
+                result["sqlite_wal_bytes"] = None
+        else:
+            result["sqlite_wal_bytes"] = None
+        return result
 
     def create_schema(self, metadata):
         metadata.create_all(self.engine)
@@ -214,6 +308,7 @@ class DatabaseManager:
             session = self.session
             depth = int(session.info.get(TRANSACTION_DEPTH_KEY, 0))
             session.info[TRANSACTION_DEPTH_KEY] = depth + 1
+            started = time.perf_counter()
             try:
                 yield session
                 if depth == 0:
@@ -221,8 +316,17 @@ class DatabaseManager:
                     self._commit_count += 1
             except Exception:
                 session.rollback()
+                if depth == 0:
+                    self._record_metric("rollback_count")
                 raise
             finally:
+                if depth == 0:
+                    elapsed = max(0.0, time.perf_counter() - started)
+                    with self._metrics_lock:
+                        self._metrics["transaction_count"] += 1
+                        self._metrics["transaction_seconds"] += elapsed
+                        self._metrics["transaction_max_seconds"] = max(
+                            self._metrics["transaction_max_seconds"], elapsed)
                 if depth:
                     session.info[TRANSACTION_DEPTH_KEY] = depth
                 else:

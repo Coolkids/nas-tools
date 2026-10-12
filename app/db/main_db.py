@@ -254,4 +254,6 @@ class DbPersist(object):
 
 def get_db_metrics():
     """返回用于性能日志和诊断的指标快照。"""
-    return {"commits": DATABASE.commit_count, "retries": _db_metrics["retries"]}
+    metrics = DATABASE.metrics()
+    metrics["retries"] = _db_metrics["retries"]
+    return metrics
