@@ -2677,19 +2677,26 @@ class WebAction:
         """
         恢复初始规则组
         """
-        groupids = data.get("groupids")
-        init_rulegroups = data.get("init_rulegroups")
-        for groupid in groupids:
-            try:
-                self.dbhelper.delete_filtergroup(groupid)
-            except Exception as err:
-                ExceptionUtils.exception_traceback(err)
-            for init_rulegroup in init_rulegroups:
-                if str(init_rulegroup.get("id")) == groupid:
-                    for sql in init_rulegroup.get("sql"):
-                        self.dbhelper.excute(sql)
-        Filter().init_config()
-        return {"code": 0}
+        from app.db.seed_data import builtin_filter_groups
+
+        groupids = data.get("groupids") or []
+        if not isinstance(groupids, list) or not groupids:
+            return {"code": 1, "msg": "请选择要恢复的规则组"}
+        templates = {str(group["id"]): group for group in builtin_filter_groups()}
+        selected = []
+        try:
+            for value in groupids:
+                group_id = str(int(value))
+                if group_id not in templates:
+                    return {"code": 1, "msg": "所选规则组不属于内置模板"}
+                if group_id not in {str(item["id"]) for item in selected}:
+                    selected.append(templates[group_id])
+            self.dbhelper.restore_filter_groups(selected)
+            Filter().init_config()
+            return {"code": 0}
+        except Exception as error:
+            ExceptionUtils.exception_traceback(error)
+            return {"code": 1, "msg": "恢复内置规则组失败，数据库事务已回滚"}
 
     def __set_default_filtergroup(self, data):
         groupid = data.get("id")
@@ -4461,33 +4468,9 @@ class WebAction:
         查询所有过滤规则
         """
         RuleGroups = Filter().get_rule_infos()
-        sql_file = os.path.join(Config().get_root_path(),
-                                "config", "init_filter.sql")
-        with open(sql_file, "r", encoding="utf-8") as f:
-            sql_list = f.read().split(';\n')
-            Init_RuleGroups = []
-            i = 0
-            while i < len(sql_list):
-                rulegroup = {}
-                rulegroup_info = re.findall(
-                    r"[0-9]+,'[^\"]+NULL", sql_list[i], re.I)[0].split(",")
-                rulegroup['id'] = int(rulegroup_info[0])
-                rulegroup['name'] = rulegroup_info[1][1:-1]
-                rulegroup['rules'] = []
-                rulegroup['sql'] = [sql_list[i]]
-                if i + 1 < len(sql_list):
-                    rules = re.findall(
-                        r"[0-9]+,'[^\"]+NULL", sql_list[i + 1], re.I)[0].split("),\n (")
-                    for rule in rules:
-                        rule_info = {}
-                        rule = rule.split(",")
-                        rule_info['name'] = rule[2][1:-1]
-                        rule_info['include'] = rule[4][1:-1]
-                        rule_info['exclude'] = rule[5][1:-1]
-                        rulegroup['rules'].append(rule_info)
-                    rulegroup["sql"].append(sql_list[i + 1])
-                Init_RuleGroups.append(rulegroup)
-                i = i + 2
+        from app.db.seed_data import builtin_filter_groups
+
+        Init_RuleGroups = builtin_filter_groups()
         return {
             "code": 0,
             "ruleGroups": RuleGroups,

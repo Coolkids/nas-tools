@@ -1675,6 +1675,32 @@ class DbHelper:
         self._db.query(CONFIGFILTERRULES).filter(CONFIGFILTERRULES.GROUP_ID == groupid).delete()
         self._db.query(CONFIGFILTERGROUP).filter(CONFIGFILTERGROUP.ID == int(groupid)).delete()
 
+    def restore_filter_groups(self, groups):
+        """Atomically replace selected, server-provided built-in filter templates."""
+        if not isinstance(groups, list) or not groups:
+            raise ValueError("没有可恢复的内置规则组")
+        with self._db.transaction() as session:
+            for group in groups:
+                group_id = int(group["id"])
+                session.query(CONFIGFILTERRULES).filter(
+                    CONFIGFILTERRULES.GROUP_ID == str(group_id)).delete(
+                        synchronize_session=False)
+                session.query(CONFIGFILTERGROUP).filter(
+                    CONFIGFILTERGROUP.ID == group_id).delete(synchronize_session=False)
+                session.add(CONFIGFILTERGROUP(
+                    ID=group_id, GROUP_NAME=str(group["name"]),
+                    IS_DEFAULT=group.get("default") or "N", NOTE=group.get("note")))
+                rows = []
+                for rule in group.get("rules") or []:
+                    rows.append(CONFIGFILTERRULES(
+                        ID=int(rule["id"]), GROUP_ID=str(group_id),
+                        ROLE_NAME=str(rule.get("name") or ""),
+                        PRIORITY=str(rule.get("priority") or ""),
+                        INCLUDE=rule.get("include"), EXCLUDE=rule.get("exclude"),
+                        SIZE_LIMIT=rule.get("size_limit"), NOTE=rule.get("note")))
+                session.add_all(rows)
+        return True
+
     @DbPersist(_db)
     def delete_filterrule(self, ruleid):
         """
@@ -1837,11 +1863,11 @@ class DbHelper:
 
     @DbPersist(_db)
     def excute(self, sql):
-        return self._db.excute(sql)
+        raise RuntimeError("业务数据库 helper 已禁用原始 SQL；请使用受控仓储方法")
 
     @DbPersist(_db)
     def drop_table(self, table_name):
-        return self._db.excute(f"""DROP TABLE IF EXISTS {table_name}""")
+        raise RuntimeError("业务数据库 helper 不允许动态删除表")
 
     @DbPersist(_db)
     def insert_userrss_task_history(self, task_id, title, downloader):

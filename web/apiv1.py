@@ -1389,7 +1389,7 @@ class FilterRuleGroupAdd(ClientResource):
 class FilterRuleGroupRestore(ClientResource):
     parser = reqparse.RequestParser()
     parser.add_argument('groupids', type=list, help='规则组ID', location='form', required=True)
-    parser.add_argument('init_rulegroups', type=list, help='规则组脚本', location='form', required=True)
+    parser.add_argument('init_rulegroups', type=list, help='兼容旧客户端字段', location='form', required=False)
 
     @filterrule.doc(parser=parser)
     def post(self):
