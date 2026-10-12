@@ -950,6 +950,8 @@ def _keep_cache_job_in_recovery(job_id, error, message):
         STORAGE_JOBS.set_maintenance_gate("cache", job_id, "RECOVERY_REQUIRED")
     elif gate.get("job_id") != job_id:
         raise RuntimeError("缓存维护闸门属于另一项任务，保持维护状态")
+    else:
+        STORAGE_JOBS.set_maintenance_gate("cache", job_id, "RECOVERY_REQUIRED")
     STORE.freeze()
     STORAGE_JOBS.update(job_id, status="RECOVERY_REQUIRED", stage="RECOVERY_REQUIRED",
                         error=_safe_error(error), message=message)
