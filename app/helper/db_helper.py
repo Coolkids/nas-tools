@@ -259,7 +259,7 @@ class DbHelper:
         page_size = min(max(int(page_size or 20), 1), 100)
         query = self._db.query(AIRECOGNITIONRECORD)
         if title:
-            query = query.filter(AIRECOGNITIONRECORD.TITLE.contains(title))
+            query = query.filter(AIRECOGNITIONRECORD.TITLE.ilike(f"%{title}%"))
         if snapshot_id is not None:
             query = query.filter(AIRECOGNITIONRECORD.ID <= int(snapshot_id))
         if before_id is not None:
@@ -399,7 +399,7 @@ class DbHelper:
         page_size = min(max(int(page_size or 20), 1), 100)
         query = self._db.query(RECOGNITIONREQUEST)
         if title:
-            query = query.filter(RECOGNITIONREQUEST.ORIGINAL_NAME.contains(title))
+            query = query.filter(RECOGNITIONREQUEST.ORIGINAL_NAME.ilike(f"%{title}%"))
         if source:
             query = query.filter(RECOGNITIONREQUEST.SOURCE == source)
         if status:
@@ -831,15 +831,17 @@ class DbHelper:
 
         if search:
             search = f"%{search}%"
-            count = self._db.query(TRANSFERHISTORY).filter((TRANSFERHISTORY.SOURCE_FILENAME.like(search))
-                                                           | (TRANSFERHISTORY.TITLE.like(search))).count()
-            data = self._db.query(TRANSFERHISTORY).filter((TRANSFERHISTORY.SOURCE_FILENAME.like(search))
-                                                          | (TRANSFERHISTORY.TITLE.like(search))).order_by(
-                TRANSFERHISTORY.DATE.desc()).limit(int(rownum)).offset(begin_pos).all()
+            matches = ((TRANSFERHISTORY.SOURCE_FILENAME.ilike(search))
+                       | (TRANSFERHISTORY.TITLE.ilike(search)))
+            count = self._db.query(TRANSFERHISTORY).filter(matches).count()
+            data = self._db.query(TRANSFERHISTORY).filter(matches).order_by(
+                TRANSFERHISTORY.DATE.desc(), TRANSFERHISTORY.ID.desc()
+            ).limit(int(rownum)).offset(begin_pos).all()
             return count, data
         else:
             return self._db.query(TRANSFERHISTORY).count(), self._db.query(TRANSFERHISTORY).order_by(
-                TRANSFERHISTORY.DATE.desc()).limit(int(rownum)).offset(begin_pos).all()
+                TRANSFERHISTORY.DATE.desc(), TRANSFERHISTORY.ID.desc()
+            ).limit(int(rownum)).offset(begin_pos).all()
 
     def get_transfer_path_by_id(self, logid):
         """
