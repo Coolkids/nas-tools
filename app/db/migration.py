@@ -219,6 +219,43 @@ def _database_objects(engine):
     return sorted(set(objects))
 
 
+def _remote_target_object_baseline(engine):
+    """Reject objects outside the just-created application schema and capture it."""
+    objects = _database_objects(engine)
+    expected_tables = {name.casefold() for name in Base.metadata.tables}
+    expected_tables.add("alembic_version")
+    actual_tables = [
+        item.partition(":")[2].rsplit(".", 1)[-1].strip('"`').casefold()
+        for item in objects if item.startswith("table:")]
+    if (len(actual_tables) != len(expected_tables)
+            or set(actual_tables) != expected_tables):
+        raise RuntimeError("迁移期间远程目标表结构发生变化，拒绝保存配置")
+    if any(item.startswith(("view:", "materialized_view:")) for item in objects):
+        raise RuntimeError("迁移期间远程目标出现用户视图，拒绝保存配置")
+
+    expected_sequences = set()
+    if engine.dialect.name == "postgresql":
+        with engine.connect() as connection:
+            for table in Base.metadata.sorted_tables:
+                column = getattr(table, "autoincrement_column", None)
+                if column is None:
+                    continue
+                sequence = connection.execute(text(
+                    "SELECT pg_get_serial_sequence(:table_name, :column_name)"), {
+                        "table_name": f'"{table.name}"',
+                        "column_name": column.name,
+                    }).scalar_one_or_none()
+                if sequence:
+                    expected_sequences.add(
+                        str(sequence).rsplit(".", 1)[-1].strip('"').casefold())
+    actual_sequences = {
+        item.partition(":")[2].rsplit(".", 1)[-1].strip('"`').casefold()
+        for item in objects if item.startswith("sequence:")}
+    if actual_sequences != expected_sequences:
+        raise RuntimeError("迁移期间远程目标序列与应用结构不符，拒绝保存配置")
+    return objects
+
+
 def _sqlite_objects(path):
     if not os.path.exists(path):
         return []
@@ -1120,6 +1157,7 @@ def _run_migration(job_id, candidate, source_fingerprint, target_fingerprint,
     source_engine = source_connection = source_transaction = None
     target_engine = None
     target_lock_connection = target_lock_transaction = None
+    target_object_baseline = None
     snapshot_path = None
     staging_dir = None
     remote_target_touched = False
@@ -1207,6 +1245,8 @@ def _run_migration(job_id, candidate, source_fingerprint, target_fingerprint,
             _write_migration_marker(target_engine, job_id, source_fingerprint,
                                     target_fingerprint)
             _validate_source_shape(target_engine, Base.metadata)
+            if candidate["type"] != "sqlite":
+                target_object_baseline = _remote_target_object_baseline(target_engine)
             target_lock_connection, target_lock_transaction = _lock_target_database(target_engine)
             if target_lock_connection is None:
                 target_lock_connection = target_engine.connect()
@@ -1214,6 +1254,9 @@ def _run_migration(job_id, candidate, source_fingerprint, target_fingerprint,
             else:
                 close_target_validation_connection = False
             try:
+                if (target_object_baseline is not None
+                        and _database_objects(target_lock_connection) != target_object_baseline):
+                    raise RuntimeError("迁移验证期间远程目标对象发生变化，拒绝保存配置")
                 for table in tables:
                     if table is DATABASEMIGRATIONMARKER.__table__:
                         continue
