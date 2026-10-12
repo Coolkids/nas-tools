@@ -8,6 +8,7 @@ import math
 import os
 import pickle
 import sqlite3
+import stat
 import struct
 import sys
 import time
@@ -29,6 +30,7 @@ DEFAULT_SETTINGS = {"backend": "memory_disk", "host": "127.0.0.1", "port": 6379,
                     "connect_timeout": 0.5, "retry_interval": 30, "storage_generation": ""}
 BACKENDS = {"memory", "memory_disk", "redis", "valkey"}
 PREFIX = "nastool:cache:v2:"
+_LEGACY_SOURCE_RETENTION_SECONDS = 30 * 24 * 60 * 60
 CACHE_NAMESPACE_REGISTRY = (
     "tmdb_supply", "TmdbWebSearchCache", "TorznabCache", "WebSearchCache",
     "WebMediaInfoCache", "TmdbEnTitleCache", "TmdbHotMoviesCache", "TmdbHotTvsCache",
@@ -617,6 +619,7 @@ class CacheStore:
                 if self._invalid:
                     raise ValueError("缓存后端配置无效，无法升级缓存存储")
                 self._prepare_storage()
+                self._cleanup_retired_legacy_sources()
                 path = os.path.join(self._directory(), "system.sqlite3")
                 configured_backend = self._settings.get("backend")
                 if configured_backend == "memory_disk" and self._actual == "memory_disk":
@@ -908,6 +911,175 @@ class CacheStore:
         return os.path.join(os.path.dirname(self._directory()), ".maintenance", "cache-layout.json")
 
     @staticmethod
+    def _legacy_file_identity(path):
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        return {"device": info.st_dev, "inode": info.st_ino,
+                "size": info.st_size, "mtime_ns": info.st_mtime_ns}
+
+    def _legacy_retirement_records(self):
+        """登记已知旧缓存来源及身份，避免清理后来替换的新文件。"""
+        root = os.path.realpath(os.path.dirname(self._directory()))
+        cache_directory = os.path.realpath(self._directory())
+        candidates = {
+            os.path.join(root, "system.sqlite3"),
+            os.path.join(root, "tmdb.dat"),
+        }
+        for path in getattr(self, "_legacy_sqlite_paths", ()):
+            candidates.add(path)
+
+        known_names = {self._key(namespace) for namespace in CACHE_NAMESPACE_REGISTRY}
+        files_directory = os.path.join(cache_directory, "files")
+        if os.path.isdir(files_directory) and not os.path.islink(files_directory):
+            for namespace in known_names:
+                namespace_directory = os.path.join(files_directory, namespace)
+                if not os.path.isdir(namespace_directory) or os.path.islink(namespace_directory):
+                    continue
+                for current, directories, filenames in os.walk(namespace_directory, followlinks=False):
+                    directories[:] = [name for name in directories
+                                      if not os.path.islink(os.path.join(current, name))]
+                    candidates.update(os.path.join(current, name) for name in filenames
+                                      if not os.path.islink(os.path.join(current, name)))
+
+        migrations = os.path.join(cache_directory, "migrations")
+        if os.path.isdir(migrations) and not os.path.islink(migrations):
+            try:
+                for entry in os.scandir(migrations):
+                    if entry.name in known_names and entry.is_file(follow_symlinks=False):
+                        candidates.add(entry.path)
+            except OSError:
+                logger.warning("无法完整枚举旧缓存标记目录：%s", migrations)
+
+        staging = os.path.join(cache_directory, ".staging")
+        if os.path.isdir(staging) and not os.path.islink(staging):
+            try:
+                for entry in os.scandir(staging):
+                    if (entry.is_file(follow_symlinks=False)
+                            and (entry.name in {"legacy-system.sqlite3", "legacy-root-system.sqlite3"}
+                                 or entry.name.startswith("legacy-system.original")
+                                 or entry.name.startswith("legacy-current-system"))):
+                        candidates.add(entry.path)
+            except OSError:
+                logger.warning("无法完整枚举旧缓存快照目录：%s", staging)
+
+        records = []
+        for path in sorted(candidates):
+            try:
+                identity = self._legacy_file_identity(path)
+            except OSError as error:
+                logger.warning("无法记录旧缓存来源身份：%s：%s", path, error)
+                continue
+            if identity is None:
+                continue
+            absolute = os.path.abspath(path)
+            try:
+                contained = os.path.commonpath((root, absolute)) == root
+            except ValueError:
+                contained = False
+            if not contained:
+                continue
+            records.append({"path": os.path.relpath(absolute, root),
+                            "identity": identity, "status": "pending"})
+        return records
+
+    def _cleanup_retired_legacy_sources(self, now=None):
+        state_path = self._layout_state_path()
+        state = self._read_layout_state(state_path)
+        if state.get("legacy_sources") != "retired":
+            return 0
+        retired_at = float(state.get("legacy_sources_retired_at") or 0)
+        current_time = time.time() if now is None else float(now)
+        if not retired_at or current_time - retired_at < _LEGACY_SOURCE_RETENTION_SECONDS:
+            return 0
+
+        root = os.path.realpath(os.path.dirname(self._directory()))
+        records = state.get("retired_legacy_files") or []
+        removed = 0
+        changed = False
+        for record in records:
+            if record.get("status") != "pending":
+                continue
+            relative = record.get("path")
+            if not isinstance(relative, str) or os.path.isabs(relative):
+                record["status"] = "preserved_invalid_path"
+                changed = True
+                continue
+            path = os.path.abspath(os.path.join(root, relative))
+            try:
+                contained = os.path.commonpath((root, path)) == root
+            except ValueError:
+                contained = False
+            real_parent = os.path.realpath(os.path.dirname(path))
+            try:
+                parent_contained = os.path.commonpath((root, real_parent)) == root
+            except ValueError:
+                parent_contained = False
+            if not contained or not parent_contained or os.path.islink(path):
+                record["status"] = "preserved_invalid_path"
+                changed = True
+                continue
+            try:
+                current_identity = self._legacy_file_identity(path)
+            except OSError as error:
+                record["last_error"] = str(error)[:500]
+                logger.warning("旧缓存来源暂时不可访问，清理待重试：%s：%s", path, error)
+                changed = True
+                continue
+            if current_identity is None:
+                record["status"] = ("preserved_changed" if os.path.lexists(path)
+                                     else "removed")
+                changed = True
+                continue
+            if current_identity != record.get("identity"):
+                record["status"] = "preserved_changed"
+                changed = True
+                continue
+            try:
+                os.unlink(path)
+                record["status"] = "removed"
+                removed += 1
+                changed = True
+                self._cleanup_empty_legacy_parents(path, root)
+            except OSError as error:
+                record["last_error"] = str(error)[:500]
+                logger.warning("旧缓存来源清理待重试：%s：%s", path, error)
+                changed = True
+
+        if changed:
+            state["retired_legacy_files"] = records
+            self._write_layout_state(state_path, state)
+        return removed
+
+    def _cleanup_empty_legacy_parents(self, path, root):
+        cache_directory = os.path.realpath(self._directory())
+        safe_roots = (os.path.join(cache_directory, "files"),
+                      os.path.join(cache_directory, ".staging"))
+        parent = os.path.dirname(path)
+        while parent not in safe_roots:
+            try:
+                if os.path.commonpath((root, parent)) != root:
+                    return
+                safe_root = next((candidate for candidate in safe_roots
+                                  if os.path.commonpath((candidate, parent)) == candidate), None)
+            except ValueError:
+                return
+            if safe_root is None or parent == safe_root or os.path.islink(parent):
+                return
+            try:
+                os.rmdir(parent)
+            except OSError:
+                return
+            parent = os.path.dirname(parent)
+        try:
+            os.rmdir(parent)
+        except OSError:
+            pass
+
+    @staticmethod
     def _read_layout_state(path):
         try:
             with open(path, "r", encoding="utf-8") as stream:
@@ -939,6 +1111,9 @@ class CacheStore:
                    for namespace in CACHE_NAMESPACE_REGISTRY):
             return
         known = {self._key(namespace) for namespace in CACHE_NAMESPACE_REGISTRY}
+        retiring_legacy_sources = state.get("legacy_sources") != "retired"
+        retired_files = (self._legacy_retirement_records()
+                         if retiring_legacy_sources else None)
         unknown = []
         if os.path.isdir(directory):
             with os.scandir(directory) as entries:
@@ -955,6 +1130,9 @@ class CacheStore:
             logger.warning("缓存迁移目录包含未知内容，保留：%s", ", ".join(sorted(unknown)))
             state["migration_markers"] = "unknown_preserved"
         state["legacy_sources"] = "retired"
+        if retiring_legacy_sources:
+            state["legacy_sources_retired_at"] = time.time()
+            state["retired_legacy_files"] = retired_files
         self._write_layout_state(state_path, state)
 
     def _prepare_storage(self):
