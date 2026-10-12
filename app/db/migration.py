@@ -7,6 +7,7 @@ import hmac
 import ipaddress
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -1204,6 +1205,139 @@ def _save_database_config(candidate, source_fingerprint):
             raise RuntimeError("数据库配置保存失败")
 
 
+def _source_config_backup_path(job_id):
+    if not re.fullmatch(r"[0-9a-f]{32}", str(job_id or "")):
+        raise ValueError("数据库迁移任务 ID 无效")
+    from config import Config
+    return os.path.join(Config().get_config_path(), ".maintenance",
+                        "database-migration", job_id, "source-config.json")
+
+
+def _write_source_config_backup(job_id, settings, fingerprint):
+    """Keep the prior database credentials in a private file until startup verifies the target."""
+    path = _source_config_backup_path(job_id)
+    directory = os.path.dirname(path)
+    _secure_directory(directory)
+    temporary = f"{path}.tmp-{uuid.uuid4().hex}"
+    payload = {"job_id": job_id, "source_fingerprint": fingerprint,
+               "database": settings}
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        _secure_file(path)
+        _fsync_directory(directory)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def _remove_source_config_backup(job_id):
+    try:
+        path = _source_config_backup_path(job_id)
+        directory = os.path.dirname(path)
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        try:
+            with os.scandir(directory) as entries:
+                temporary_names = [entry.name for entry in entries
+                                   if re.fullmatch(r"source-config\.json\.tmp-[0-9a-f]{32}",
+                                                   entry.name)
+                                   and entry.is_file(follow_symlinks=False)]
+            for name in temporary_names:
+                os.unlink(os.path.join(directory, name))
+        except FileNotFoundError:
+            pass
+        _fsync_directory(directory)
+        os.rmdir(directory)
+        os.rmdir(os.path.dirname(directory))
+    except FileNotFoundError:
+        pass
+    except OSError:
+        # Keep cleanup retryable; the task outcome must not be changed by it.
+        pass
+
+
+def _normalize_saved_database_settings(settings):
+    if not isinstance(settings, dict):
+        raise ValueError("原数据库配置快照无效")
+    normalized = copy.deepcopy(settings)
+    normalized.setdefault("type", "sqlite")
+    normalized["type"] = str(normalized.get("type") or "sqlite").lower()
+    if normalized["type"] != "sqlite":
+        normalized["port"] = int(normalized.get("port") or (
+            5432 if normalized["type"] == "postgresql" else 3306))
+        normalized["connect_timeout"] = int(normalized.get("connect_timeout") or 5)
+        normalized["ssl"] = copy.deepcopy(normalized.get("ssl") or {})
+    DATABASE._validate(normalized)
+    return normalized
+
+
+def _restore_source_database_config_before_startup(job, error):
+    """Restore the prior database only while this process has not opened the manager."""
+    if DATABASE._engine is not None:
+        return False
+    payload = job.get("payload") or {}
+    result = job.get("result") or {}
+    source_fingerprint = payload.get("source_fingerprint")
+    target_fingerprint = result.get("target_fingerprint") or payload.get("fingerprint")
+    path = _source_config_backup_path(job["job_id"])
+    try:
+        info = os.lstat(path)
+        if not os.path.isfile(path) or os.path.islink(path):
+            return False
+        if os.name != "nt" and info.st_mode & 0o077:
+            return False
+        with open(path, "r", encoding="utf-8") as stream:
+            backup = json.load(stream)
+        if (not isinstance(backup, dict) or backup.get("job_id") != job["job_id"]
+                or not hmac.compare_digest(str(backup.get("source_fingerprint") or ""),
+                                           str(source_fingerprint or ""))):
+            return False
+        source = _normalize_saved_database_settings(backup.get("database"))
+        if not hmac.compare_digest(_fingerprint(source), str(source_fingerprint or "")):
+            return False
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+    from config import CONFIG_LOCK, Config
+    import ruamel.yaml
+
+    manager = Config()
+    try:
+        with CONFIG_LOCK:
+            with open(manager._config_path, "r", encoding="utf-8") as stream:
+                current_config = ruamel.yaml.YAML().load(stream) or {}
+            current = _normalize_saved_database_settings(
+                current_config.get("database") or {"type": "sqlite"})
+            if not hmac.compare_digest(_fingerprint(current), str(target_fingerprint or "")):
+                return False
+            current_config["database"] = source
+            if not manager.save_config(current_config):
+                return False
+    except Exception:
+        return False
+
+    STORAGE_JOBS.update(job["job_id"], status="FAILED", stage="FAILED",
+                        error=_safe_error(error),
+                        result={**result, "startup_rollback": True},
+                        message="新数据库启动验证失败；已恢复原数据库配置，准备受控重启")
+    STORAGE_JOBS.clear_maintenance_gate("database", job["job_id"])
+    _remove_source_config_backup(job["job_id"])
+    from app.utils.cache_migration import _schedule_restart
+    _schedule_restart()
+    return True
+
+
 def _run_migration(job_id, candidate, source_fingerprint, target_fingerprint,
                    target_identity, check_id):
     published = None
@@ -1215,12 +1349,14 @@ def _run_migration(job_id, candidate, source_fingerprint, target_fingerprint,
     staging_dir = None
     remote_target_touched = False
     config_committed = False
+    source_settings = None
     try:
         with STORAGE_JOBS.maintenance_lock(exclusive=True):
             job = STORAGE_JOBS.get(job_id)
             if not job or job.get("status") != "QUIESCING":
                 raise RuntimeError("数据库迁移任务状态已变化")
-            if not hmac.compare_digest(_fingerprint(_current_settings()), source_fingerprint):
+            source_settings = _current_settings()
+            if not hmac.compare_digest(_fingerprint(source_settings), source_fingerprint):
                 raise RuntimeError("活动数据库配置已变化，迁移已取消")
             if STORAGE_JOBS.cancel_requested(job_id):
                 STORAGE_JOBS.update(job_id, status="CANCELLED", stage="CANCELLED",
@@ -1388,6 +1524,7 @@ def _run_migration(job_id, candidate, source_fingerprint, target_fingerprint,
                 STORAGE_JOBS.update(job_id, status="CANCELLED", stage="CANCELLED",
                                     message="配置提交前收到取消请求，活动数据库保持原值")
                 return
+            _write_source_config_backup(job_id, source_settings, source_fingerprint)
             _save_database_config(candidate, source_fingerprint)
             config_committed = True
             STORAGE_JOBS.set_maintenance_gate("database", job_id, "RESTART_PENDING")
@@ -1442,6 +1579,7 @@ def _run_migration(job_id, candidate, source_fingerprint, target_fingerprint,
             shutil.rmtree(staging_dir, ignore_errors=True)
         current = STORAGE_JOBS.get(job_id) or {}
         if current.get("status") in {"FAILED", "CANCELLED"}:
+            _remove_source_config_backup(job_id)
             try:
                 with STORAGE_JOBS.maintenance_lock(exclusive=True):
                     gate = STORAGE_JOBS.maintenance_gate("database")
@@ -1601,6 +1739,7 @@ def verify_database_startup():
             STORAGE_JOBS.update(pending["job_id"], status="INTERRUPTED",
                                 stage="INTERRUPTED",
                                 message="配置提交前维护闸门丢失；原活动数据库配置保持不变")
+            _remove_source_config_backup(pending["job_id"])
             return True
         if not gate and not pending:
             return True
@@ -1629,10 +1768,14 @@ def verify_database_startup():
                     return True
         if not gate or not pending or gate.get("job_id") != pending.get("job_id"):
             raise RuntimeError("数据库维护闸门与持久化任务不匹配，保持业务关闭")
-        if pending.get("status") == "RECOVERY_REQUIRED":
+        pending_result = pending.get("result") or {}
+        retry_startup_recovery = (
+            pending.get("status") == "RECOVERY_REQUIRED"
+            and pending_result.get("resume_stage") == "VERIFYING_STARTUP")
+        if pending.get("status") == "RECOVERY_REQUIRED" and not retry_startup_recovery:
             raise RuntimeError("数据库切换需要受控恢复，系统保持维护状态")
         payload = pending.get("payload") or {}
-        result = pending.get("result") or {}
+        result = pending_result
         current = _current_settings()
         current_fingerprint = _fingerprint(current)
         source_fingerprint = payload.get("source_fingerprint")
@@ -1641,6 +1784,7 @@ def verify_database_startup():
             STORAGE_JOBS.update(pending["job_id"], status="INTERRUPTED", stage="INTERRUPTED",
                                 message="重启前未提交目标配置；原活动数据库保持不变")
             STORAGE_JOBS.clear_maintenance_gate("database", pending["job_id"])
+            _remove_source_config_backup(pending["job_id"])
             return True
         if not hmac.compare_digest(current_fingerprint, target_fingerprint or ""):
             raise RuntimeError("活动数据库配置与待验证目标不匹配，保持维护状态")
@@ -1650,28 +1794,40 @@ def verify_database_startup():
                 raise RuntimeError("待验证 SQLite 目标文件缺失，保持维护状态")
         STORAGE_JOBS.update(pending["job_id"], status="VERIFYING_STARTUP",
                             stage="VERIFYING_STARTUP", message="新进程正在验证活动数据库")
-        engine = DATABASE.engine
-        head = current_schema_revision()
-        inspector = inspect(engine)
-        tables = {name.upper() for name in inspector.get_table_names()}
-        if "ALEMBIC_VERSION" not in tables:
-            raise RuntimeError("目标数据库缺少统一结构版本，保持维护状态")
-        with engine.connect() as connection:
-            versions = [row[0] for row in connection.execute(
-                text("SELECT version_num FROM alembic_version"))]
-            marker = connection.execute(select(DATABASEMIGRATIONMARKER.__table__).where(
-                DATABASEMIGRATIONMARKER.ID == pending["job_id"])).mappings().one_or_none()
-            connection.execute(text("SELECT 1")).scalar_one()
-        if versions != [head] or not marker or marker["STATUS"] != "complete" \
-                or marker["TARGET_FINGERPRINT"] != target_fingerprint:
+        manager_was_initialized = DATABASE._engine is not None
+        try:
+            engine = DATABASE.engine
+            head = current_schema_revision()
+            inspector = inspect(engine)
+            tables = {name.upper() for name in inspector.get_table_names()}
+            if "ALEMBIC_VERSION" not in tables:
+                raise RuntimeError("目标数据库缺少统一结构版本")
+            with engine.connect() as connection:
+                versions = [row[0] for row in connection.execute(
+                    text("SELECT version_num FROM alembic_version"))]
+                marker = connection.execute(select(DATABASEMIGRATIONMARKER.__table__).where(
+                    DATABASEMIGRATIONMARKER.ID == pending["job_id"])).mappings().one_or_none()
+                connection.execute(text("SELECT 1")).scalar_one()
+            if versions != [head] or not marker or marker["STATUS"] != "complete" \
+                    or marker["TARGET_FINGERPRINT"] != target_fingerprint:
+                raise RuntimeError("数据库版本或迁移完成标记校验失败")
+        except Exception as error:
+            if not manager_was_initialized:
+                DATABASE.dispose()
+                if _restore_source_database_config_before_startup(pending, error):
+                    raise RuntimeError(
+                        "新数据库启动验证失败，已恢复原数据库配置并申请受控重启") from error
+            failed_result = {**result, "resume_stage": "VERIFYING_STARTUP"}
             STORAGE_JOBS.update(pending["job_id"], status="RECOVERY_REQUIRED",
-                                stage="RECOVERY_REQUIRED",
-                                message="新数据库启动校验失败，保持维护闸门")
+                                stage="RECOVERY_REQUIRED", error=_safe_error(error),
+                                result=failed_result,
+                                message="新数据库启动验证失败；原数据库配置恢复条件未满足，系统保持维护状态")
             STORAGE_JOBS.set_maintenance_gate("database", pending["job_id"],
                                               "RECOVERY_REQUIRED")
-            raise RuntimeError("数据库版本或迁移完成标记校验失败，保持维护状态")
+            raise RuntimeError("数据库版本或迁移完成标记校验失败，保持维护状态") from error
         STORAGE_JOBS.update(pending["job_id"], status="SUCCEEDED", stage="SUCCEEDED",
                             message="新进程已确认目标数据库和迁移标记，恢复业务访问",
                             progress=1)
         STORAGE_JOBS.clear_maintenance_gate("database", pending["job_id"])
+        _remove_source_config_backup(pending["job_id"])
     return True
