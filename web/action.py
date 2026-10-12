@@ -2880,10 +2880,20 @@ class WebAction:
         return {"code": 0, "Items": res_list}
 
     def get_downloaded(self, data):
-        page = data.get("page")
-        Items = self.dbhelper.get_download_history(page=page)
+        data = data or {}
+        cursor_mode = "cursor" in data
+        if cursor_mode:
+            try:
+                Items, next_cursor = self.dbhelper.get_download_history_page(
+                    page_size=data.get("page_size", 30), cursor=data.get("cursor"))
+            except ValueError as error:
+                return {"code": 1, "msg": str(error), "Items": []}
+        else:
+            page = data.get("page")
+            Items = self.dbhelper.get_download_history(page=page)
+            next_cursor = None
         if Items:
-            return {"code": 0, "Items": [{
+            response = {"code": 0, "Items": [{
                 'id': item.TMDBID,
                 'orgid': item.TMDBID,
                 'tmdbid': item.TMDBID,
@@ -2897,8 +2907,14 @@ class WebAction:
                 "date": item.DATE,
                 "site": item.SITE
             } for item in Items]}
+            if cursor_mode:
+                response["next_cursor"] = next_cursor
+            return response
         else:
-            return {"code": 0, "Items": []}
+            response = {"code": 0, "Items": []}
+            if cursor_mode:
+                response["next_cursor"] = next_cursor
+            return response
 
     @staticmethod
     def parse_brush_rule_string(rules: dict):

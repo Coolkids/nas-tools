@@ -6,7 +6,7 @@ import time
 import json
 import uuid
 from enum import Enum
-from sqlalchemy import cast, func, or_, and_
+from sqlalchemy import cast, func, or_, and_, case
 
 from app.db import MainDb, DbPersist
 from app.db.models import *
@@ -1682,11 +1682,56 @@ class DbHelper:
             return self._db.query(DOWNLOADHISTORY).filter(DOWNLOADHISTORY.ID == int(hid)).all()
         elif date:
             return self._db.query(DOWNLOADHISTORY).filter(
-                DOWNLOADHISTORY.DATE > date).order_by(DOWNLOADHISTORY.DATE.desc()).all()
+                DOWNLOADHISTORY.DATE > date).order_by(
+                    case((DOWNLOADHISTORY.DATE.is_(None), 1), else_=0).asc(),
+                    DOWNLOADHISTORY.DATE.desc(), DOWNLOADHISTORY.ID.desc()).all()
         else:
             offset = (int(page) - 1) * int(num)
             return self._db.query(DOWNLOADHISTORY).order_by(
-                DOWNLOADHISTORY.DATE.desc()).limit(num).offset(offset).all()
+                case((DOWNLOADHISTORY.DATE.is_(None), 1), else_=0).asc(),
+                DOWNLOADHISTORY.DATE.desc(), DOWNLOADHISTORY.ID.desc()
+            ).limit(num).offset(offset).all()
+
+    def get_download_history_page(self, page_size=30, cursor=None):
+        """Read a stable keyset page without counting the full download history."""
+        try:
+            page_size = int(page_size)
+        except (TypeError, ValueError) as error:
+            raise ValueError("下载历史分页大小无效") from error
+        if not 1 <= page_size <= 200:
+            raise ValueError("下载历史分页大小必须介于 1 和 200 之间")
+
+        query = self._db.query(DOWNLOADHISTORY)
+        if cursor is not None:
+            if not isinstance(cursor, dict) or set(cursor) != {"date", "id"}:
+                raise ValueError("下载历史游标格式无效")
+            cursor_date = cursor.get("date")
+            cursor_id = cursor.get("id")
+            if cursor_date is not None and not isinstance(cursor_date, str):
+                raise ValueError("下载历史游标日期无效")
+            if type(cursor_id) is not int or cursor_id < 1:
+                raise ValueError("下载历史游标 ID 无效")
+            if cursor_date is None:
+                query = query.filter(DOWNLOADHISTORY.DATE.is_(None),
+                                     DOWNLOADHISTORY.ID < cursor_id)
+            else:
+                query = query.filter(or_(
+                    DOWNLOADHISTORY.DATE < cursor_date,
+                    and_(DOWNLOADHISTORY.DATE == cursor_date,
+                         DOWNLOADHISTORY.ID < cursor_id),
+                    DOWNLOADHISTORY.DATE.is_(None),
+                ))
+
+        records = query.order_by(
+            case((DOWNLOADHISTORY.DATE.is_(None), 1), else_=0).asc(),
+            DOWNLOADHISTORY.DATE.desc(), DOWNLOADHISTORY.ID.desc()
+        ).limit(page_size + 1).all()
+        has_more = len(records) > page_size
+        records = records[:page_size]
+        next_cursor = None
+        if has_more and records:
+            next_cursor = {"date": records[-1].DATE, "id": int(records[-1].ID)}
+        return records, next_cursor
 
     def is_media_downloaded(self, title, tmdbid):
         """
