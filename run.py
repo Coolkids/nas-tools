@@ -78,24 +78,36 @@ signal.signal(signal.SIGTERM, sigal_handler)
 def init_system():
     # 配置
     log.console('NAStool 当前版本号：%s' % APP_VERSION)
+    # 旧双库合并必须早于 ORM 建表，避免在旧数据旁误建空单库。
+    try:
+        from app.utils.storage_jobs import STORAGE_JOBS
+        from app.db.sqlite_files import prepare_sqlite_database
+        # 启动结构升级使用跨进程独占锁，避免两个新版本进程同时迁移同一目录。
+        with STORAGE_JOBS.maintenance_lock(exclusive=True):
+            prepare_sqlite_database()
+            update_db()
+            init_db()
+            init_data()
+            # 配置升级会读取数据库，也保持在启动结构锁内，避免并发初始化竞争。
+            update_config()
+            check_config()
+    except Exception as e:
+        log.error(f"数据库布局检查或合库失败：{e}")
+        raise
+    try:
+        from app.db.sqlite_files import finalize_sqlite_migration
+        finalize_sqlite_migration()
+    except Exception as e:
+        # 新单库已通过结构检查；归档失败留待下次启动重试。
+        log.error(f"旧数据库归档待重试：{e}")
     # 清理上次运行遗留在配置 temp 目录中的种子文件
     Torrent().clean_temp_torrent_files()
-    # 数据库初始化
-    init_db()
-    # 数据库更新
-    update_db()
     # 数据库结构就绪后回放未完成的全量识别记录暂存。
     try:
         from app.media.recognition.records import replay_recognition_spool
         replay_recognition_spool()
     except Exception as e:
         log.error(f"恢复识别记录暂存失败：{e}")
-    # 数据初始化
-    init_data()
-    # 升级配置文件
-    update_config()
-    # 检查配置文件
-    check_config()
     # 本地缓存布局升级与旧数据导入必须在定时任务和后台服务启动前完成。
     try:
         from app.utils.cache_backend import STORE

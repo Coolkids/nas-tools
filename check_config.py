@@ -307,6 +307,12 @@ def update_config():
     if not isinstance(_config.get('recognition'), dict):
         _config['recognition'] = {}
         overwrite_cofig = True
+    if "database" not in _config:
+        _config["database"] = {"type": "sqlite"}
+        overwrite_cofig = True
+    elif isinstance(_config.get("database"), dict) and not _config["database"].get("type"):
+        _config["database"]["type"] = "sqlite"
+        overwrite_cofig = True
     merge_recognition_defaults(_config['recognition'], recognition_defaults)
     recognition = _config['recognition']
     parse_cache = (recognition.get('cache') or {}).get('parse')

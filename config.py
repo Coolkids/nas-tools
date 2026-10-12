@@ -157,6 +157,12 @@ class Config(object):
             cache["username_set"] = bool(cache.get("username"))
             cache["password"] = ""
             cache["username"] = ""
+        database = config.get("database")
+        if isinstance(database, dict):
+            database["password_set"] = bool(database.get("password"))
+            database["username_set"] = bool(database.get("username"))
+            database["password"] = ""
+            database["username"] = ""
         return config
 
     def save_config(self, new_cfg):

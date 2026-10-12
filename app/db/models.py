@@ -1,16 +1,45 @@
 # coding: utf-8
-from sqlalchemy import Column, Float, Index, Integer, Text, text, Sequence
+import hashlib
+
+from sqlalchemy import Column, Float, Index, Integer, String, Text, event, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import deferred
+from sqlalchemy.dialects.mysql import LONGTEXT
 
 Base = declarative_base()
-BaseMedia = declarative_base()
+# 两个业务逻辑域共用一份 metadata 和结构版本。
+BaseMedia = declarative_base(metadata=Base.metadata)
+LargeText = Text().with_variant(LONGTEXT(), "mysql", "mariadb")
+
+
+def portable_key_digest(values):
+    """为无自然长度上限的精确唯一键生成稳定摘要；NULL 保留数据库唯一键语义。"""
+    if any(value is None for value in values):
+        return None
+    digest = hashlib.sha256()
+    for value in values:
+        encoded = str(value).encode("utf-8", "surrogatepass")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _digest_default(*columns):
+    def default(context):
+        parameters = context.get_current_parameters()
+        return portable_key_digest(tuple(parameters.get(name) for name in columns))
+    return default
+
+
+def _set_digest(target, columns, digest_column):
+    setattr(target, digest_column,
+            portable_key_digest(tuple(getattr(target, name) for name in columns)))
 
 
 class CONFIGFILTERGROUP(Base):
     __tablename__ = 'CONFIG_FILTER_GROUP'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     GROUP_NAME = Column(Text)
     IS_DEFAULT = Column(Text)
     NOTE = Column(Text)
@@ -19,7 +48,7 @@ class CONFIGFILTERGROUP(Base):
 class CONFIGFILTERRULES(Base):
     __tablename__ = 'CONFIG_FILTER_RULES'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     GROUP_ID = Column(Text, index=True)
     ROLE_NAME = Column(Text)
     PRIORITY = Column(Text)
@@ -32,7 +61,7 @@ class CONFIGFILTERRULES(Base):
 class CONFIGRSSPARSER(Base):
     __tablename__ = 'CONFIG_RSS_PARSER'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     NAME = Column(Text, index=True)
     TYPE = Column(Text)
     FORMAT = Column(Text)
@@ -44,7 +73,7 @@ class CONFIGRSSPARSER(Base):
 class CONFIGSYNCPATHS(Base):
     __tablename__ = 'CONFIG_SYNC_PATHS'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     SOURCE = Column(Text)
     DEST = Column(Text)
     UNKNOWN = Column(Text)
@@ -57,7 +86,7 @@ class CONFIGSYNCPATHS(Base):
 class CONFIGUSERS(Base):
     __tablename__ = 'CONFIG_USERS'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     NAME = Column(Text, index=True)
     PASSWORD = Column(Text)
     PRIS = Column(Text)
@@ -66,7 +95,7 @@ class CONFIGUSERS(Base):
 class CONFIGUSERRSS(Base):
     __tablename__ = 'CONFIG_USER_RSS'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     NAME = Column(Text, index=True)
     ADDRESS = Column(Text)
     PARSER = Column(Text)
@@ -91,7 +120,7 @@ class CONFIGUSERRSS(Base):
 class CUSTOMWORDS(Base):
     __tablename__ = 'CUSTOM_WORDS'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     REPLACED = Column(Text)
     REPLACE = Column(Text)
     FRONT = Column(Text)
@@ -109,7 +138,7 @@ class CUSTOMWORDS(Base):
 class CUSTOMWORDGROUPS(Base):
     __tablename__ = 'CUSTOM_WORD_GROUPS'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     TITLE = Column(Text)
     YEAR = Column(Text)
     TYPE = Column(Integer)
@@ -124,7 +153,7 @@ class DOUBANMEDIAS(Base):
         Index('INDX_DOUBAN_MEDIAS_NAME', 'NAME', 'YEAR'),
     )
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     NAME = Column(Text)
     YEAR = Column(Text)
     TYPE = Column(Text)
@@ -140,7 +169,7 @@ class DOUBANMEDIAS(Base):
 class DOWNLOADHISTORY(Base):
     __tablename__ = 'DOWNLOAD_HISTORY'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     TITLE = Column(Text)
     YEAR = Column(Text)
     TYPE = Column(Text)
@@ -161,7 +190,7 @@ class DOWNLOADHISTORY(Base):
 class DOWNLOADSETTING(Base):
     __tablename__ = 'DOWNLOAD_SETTING'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     NAME = Column(Text)
     CATEGORY = Column(Text)
     TAGS = Column(Text)
@@ -178,7 +207,7 @@ class DOWNLOADSETTING(Base):
 class MESSAGECLIENT(Base):
     __tablename__ = 'MESSAGE_CLIENT'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     NAME = Column(Text)
     TYPE = Column(Text)
     CONFIG = Column(Text)
@@ -191,7 +220,7 @@ class MESSAGECLIENT(Base):
 class RSSHISTORY(Base):
     __tablename__ = 'RSS_HISTORY'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     TYPE = Column(Text)
     RSSID = Column(Text, index=True)
     NAME = Column(Text)
@@ -212,7 +241,7 @@ class RSSHISTORY(Base):
 class RSSMOVIES(Base):
     __tablename__ = 'RSS_MOVIES'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     NAME = Column(Text, index=True)
     YEAR = Column(Text)
     KEYWORD = Column(Text)
@@ -240,12 +269,15 @@ class RSSTORRENTS(Base):
     __tablename__ = 'RSS_TORRENTS'
     __table_args__ = (
         Index('INDX_RSS_TORRENTS_NAME', 'TITLE', 'YEAR', 'SEASON', 'EPISODE'),
-        Index('UN_INDX_RSS_TORRENTS_ENCLOSURE', 'ENCLOSURE', unique=True),
+        Index('UN_INDX_RSS_TORRENTS_ENCLOSURE', 'ENCLOSURE_HASH', unique=True),
     )
+    __portable_unique_keys__ = {("ENCLOSURE",): "ENCLOSURE_HASH"}
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     TORRENT_NAME = Column(Text)
-    ENCLOSURE = Column(Text, index=True)
+    ENCLOSURE = Column(Text)
+    ENCLOSURE_HASH = Column(String(64), nullable=True,
+                            default=_digest_default("ENCLOSURE"))
     TYPE = Column(Text)
     TITLE = Column(Text)
     YEAR = Column(Text)
@@ -256,7 +288,7 @@ class RSSTORRENTS(Base):
 class RSSTVS(Base):
     __tablename__ = 'RSS_TVS'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     NAME = Column(Text, index=True)
     YEAR = Column(Text)
     KEYWORD = Column(Text)
@@ -288,7 +320,7 @@ class RSSTVS(Base):
 class RSSTVEPISODES(Base):
     __tablename__ = 'RSS_TV_EPISODES'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     RSSID = Column(Text, index=True)
     EPISODES = Column(Text)
 
@@ -296,7 +328,7 @@ class RSSTVEPISODES(Base):
 class TORRENTREMOVETASK(Base):
     __tablename__ = 'TORRENT_REMOVE_TASK'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     NAME = Column(Text)
     ACTION = Column(Integer)
     INTERVAL = Column(Integer)
@@ -311,7 +343,7 @@ class TORRENTREMOVETASK(Base):
 class SEARCHRESULTINFO(Base):
     __tablename__ = 'SEARCH_RESULT_INFO'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     TORRENT_NAME = Column(Text)
     ENCLOSURE = Column(Text)
     DESCRIPTION = Column(Text)
@@ -344,8 +376,11 @@ class SEARCHRESULTINFO(Base):
 class SEARCHTASK(Base):
     __tablename__ = 'SEARCH_TASK'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
-    KEYWORD = Column(Text, unique=True, index=True)
+    ID = Column(Integer, primary_key=True)
+    __table_args__ = (Index("UN_INDX_SEARCH_TASK_KEYWORD_HASH", "KEYWORD_HASH", unique=True),)
+    KEYWORD = Column(Text)
+    KEYWORD_HASH = Column(String(64), nullable=True,
+                          default=_digest_default("KEYWORD"))
     STATUS = Column(Text)
     START_TIME = Column(Text)
     END_TIME = Column(Text)
@@ -356,12 +391,12 @@ class AIRECOGNITIONRECORD(Base):
     """需要人工核对的本地解析、AI解析和TMDB匹配记录。"""
     __tablename__ = 'AI_RECOGNITION_RECORD'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     TITLE = Column(Text, index=True)
-    ANITOPY_RESULT = Column(Text)
-    AI_RESULT = Column(Text)
-    ANITOPY_TMDB = Column(Text)
-    AI_TMDB = Column(Text)
+    ANITOPY_RESULT = Column(LargeText)
+    AI_RESULT = Column(LargeText)
+    ANITOPY_TMDB = Column(LargeText)
+    AI_TMDB = Column(LargeText)
     STATUS = Column(Text)
     ADD_TIME = Column(Text)
 
@@ -373,46 +408,49 @@ class RECOGNITIONREQUEST(Base):
     """One media-name recognition call and its aggregated raw outcomes."""
     __tablename__ = 'RECOGNITION_REQUEST'
 
-    REQUEST_ID = Column(Text, primary_key=True)
+    REQUEST_ID = Column(String(128), primary_key=True)
     ORIGINAL_NAME = Column(Text, index=True)
     SOURCE = Column(Text, index=True)
     STAGE = Column(Text)
     CREATED_AT = Column(Text, index=True)
     SUMMARY = Column(Text)
-    CONTEXT = deferred(Column(Text))
-    ACTIONS = deferred(Column(Text))
-    PROVIDER_RESULTS = deferred(Column(Text))
-    OVERALL_RESULT = deferred(Column(Text))
-    TMDB_RESULTS = deferred(Column(Text))
+    CONTEXT = deferred(Column(LargeText))
+    ACTIONS = deferred(Column(LargeText))
+    PROVIDER_RESULTS = deferred(Column(LargeText))
+    OVERALL_RESULT = deferred(Column(LargeText))
+    TMDB_RESULTS = deferred(Column(LargeText))
 
 
 class RECOGNITIONATTEMPT(Base):
     """A discoverable provider attempt attached to a recognition request."""
     __tablename__ = 'RECOGNITION_ATTEMPT'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     REQUEST_ID = Column(Text, index=True)
     ATTEMPT_ID = Column(Text, index=True)
     PROVIDER_ID = Column(Text, index=True)
     STATUS = Column(Text, index=True)
-    INPUT = Column(Text)
-    RAW_RESULT = Column(Text)
-    NORMALIZED_RESULT = Column(Text)
-    TMDB_RESULTS = Column(Text)
-    ERROR = Column(Text)
+    INPUT = Column(LargeText)
+    RAW_RESULT = Column(LargeText)
+    NORMALIZED_RESULT = Column(LargeText)
+    TMDB_RESULTS = Column(LargeText)
+    ERROR = Column(LargeText)
     ELAPSED_MS = Column(Integer)
 
 
 class SYNCHISTORY(Base):
     __tablename__ = 'SYNC_HISTORY'
     __table_args__ = (
-        Index('UN_INDX_SYNC_HISTORY_PATH_DEST', 'PATH', 'DEST', unique=True),
+        Index('UN_INDX_SYNC_HISTORY_PATH_DEST', 'PATH_DEST_HASH', unique=True),
     )
+    __portable_unique_keys__ = {("PATH", "DEST"): "PATH_DEST_HASH"}
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     PATH = Column(Text, index=True)
     SRC = Column(Text)
     DEST = Column(Text)
+    PATH_DEST_HASH = Column(String(64), nullable=True,
+                            default=_digest_default("PATH", "DEST"))
 
 
 class SYSTEMDICT(Base):
@@ -421,7 +459,7 @@ class SYSTEMDICT(Base):
         Index('INDX_SYSTEM_DICT', 'TYPE', 'KEY'),
     )
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     TYPE = Column(Text)
     KEY = Column(Text)
     VALUE = Column(Text)
@@ -431,7 +469,7 @@ class SYSTEMDICT(Base):
 class TRANSFERBLACKLIST(Base):
     __tablename__ = 'TRANSFER_BLACKLIST'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     PATH = Column(Text, index=True)
 
 
@@ -442,7 +480,7 @@ class TRANSFERHISTORY(Base):
               'SOURCE_PATH', 'SOURCE_FILENAME', 'DEST_PATH', 'DEST_FILENAME'),
     )
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     MODE = Column(Text)
     TYPE = Column(Text)
     CATEGORY = Column(Text)
@@ -465,7 +503,7 @@ class TRANSFERHISTORY(Base):
 class TRANSFERUNKNOWN(Base):
     __tablename__ = 'TRANSFER_UNKNOWN'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     PATH = Column(Text, index=True)
     DEST = Column(Text)
     MODE = Column(Text)
@@ -475,7 +513,7 @@ class TRANSFERUNKNOWN(Base):
 class USERRSSTASKHISTORY(Base):
     __tablename__ = 'USERRSS_TASK_HISTORY'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     TASK_ID = Column(Text, index=True)
     TITLE = Column(Text)
     DOWNLOADER = Column(Text)
@@ -489,10 +527,10 @@ class MEDIASYNCITEMS(BaseMedia):
         Index('UN_INDX_MEDIASYNC_ITEMS_SERVER_ITEM', 'SERVER', 'ITEM_ID', unique=True),
     )
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
-    SERVER = Column(Text)
+    ID = Column(Integer, primary_key=True)
+    SERVER = Column(String(128))
     LIBRARY = Column(Text)
-    ITEM_ID = Column(Text, index=True)
+    ITEM_ID = Column(String(256), index=True)
     ITEM_TYPE = Column(Text)
     TITLE = Column(Text, index=True)
     ORGIN_TITLE = Column(Text, index=True)
@@ -501,15 +539,46 @@ class MEDIASYNCITEMS(BaseMedia):
     IMDBID = Column(Text)
     PATH = Column(Text)
     NOTE = Column(Text)
-    JSON = Column(Text)
+    JSON = Column(LargeText)
+
+
+@event.listens_for(RSSTORRENTS, "before_insert")
+@event.listens_for(RSSTORRENTS, "before_update")
+def _sync_torrent_enclosure_hash(mapper, connection, target):
+    _set_digest(target, ("ENCLOSURE",), "ENCLOSURE_HASH")
+
+
+@event.listens_for(SEARCHTASK, "before_insert")
+@event.listens_for(SEARCHTASK, "before_update")
+def _sync_search_task_hash(mapper, connection, target):
+    _set_digest(target, ("KEYWORD",), "KEYWORD_HASH")
+
+
+@event.listens_for(SYNCHISTORY, "before_insert")
+@event.listens_for(SYNCHISTORY, "before_update")
+def _sync_sync_history_hash(mapper, connection, target):
+    _set_digest(target, ("PATH", "DEST"), "PATH_DEST_HASH")
 
 
 class MEDIASYNCSTATISTIC(BaseMedia):
     __tablename__ = 'MEDIASYNC_STATISTICS'
 
-    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    ID = Column(Integer, primary_key=True)
     SERVER = Column(Text, index=True)
     TOTAL_COUNT = Column(Text)
     MOVIE_COUNT = Column(Text)
     TV_COUNT = Column(Text)
     UPDATE_TIME = Column(Text)
+
+
+# 非唯一全文索引在 MySQL/MariaDB 使用固定前缀，在 PostgreSQL 上不创建可能
+# 因超长路径或标题而失败的 btree 索引；SQLite 继续保留完整索引。
+for _table in Base.metadata.tables.values():
+    for _index in _table.indexes:
+        _text_columns = [column for column in _index.columns
+                         if isinstance(column.type, Text)]
+        if _text_columns and not _index.unique:
+            _index.dialect_options["mysql"]["length"] = {
+                column.name: 191 for column in _text_columns
+            }
+            _index.ddl_if(dialect=("sqlite", "mysql", "mariadb"))

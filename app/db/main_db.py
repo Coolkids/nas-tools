@@ -2,12 +2,10 @@ import os
 import time
 import threading
 from contextlib import contextmanager
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker, scoped_session
-from sqlalchemy.pool import QueuePool
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import MetaData, Table, delete, inspect, text, update
 
 from app.db.models import Base
+from app.db.manager import DATABASE
 from app.utils import ExceptionUtils, PathUtils
 from config import Config
 
@@ -16,87 +14,64 @@ _db_metrics = {
     "commits": 0,
     "retries": 0,
 }
-_Engine = create_engine(
-    f"sqlite:///{os.path.join(Config().get_config_path(), 'user.db')}?check_same_thread=False",
-    echo=False,
-    poolclass=QueuePool,
-    pool_pre_ping=True,
-    pool_size=30,
-    pool_recycle=1800,
-    max_overflow=60,
-    pool_timeout=60,
-    connect_args={
-        'timeout': 60,              # 等待数据库锁释放的超时时间
-        'check_same_thread': False  # 允许在不同线程中复用连接
-    }
-)
-_Session = scoped_session(sessionmaker(bind=_Engine,
-                                       autoflush=True,
-                                       autocommit=False,
-                                       expire_on_commit=False))
-
-
 class MainDb:
 
     @property
     def session(self):
-        return _Session()
+        return DATABASE.session
 
     @staticmethod
     def close_session():
-        _Session.remove()
+        DATABASE.close_session()
 
     @staticmethod
     def init_db():
         with lock:
-            with _Engine.begin() as conn:
+            engine = DATABASE.engine
+            inspector = inspect(engine)
+            tables = {name.upper(): name for name in inspector.get_table_names()}
+            with engine.begin() as conn:
+                metadata = MetaData()
                 # 站点管理功能已移除，同时清理旧版本留下的数据表。
                 for table in ("SITE_STATISTICS_HISTORY", "SITE_USER_INFO_STATS",
                               "SITE_USER_SEEDING_INFO", "SITE_FAVICON", "CONFIG_SITE"):
-                    conn.execute(text(f"DROP TABLE IF EXISTS {table}"))
+                    actual_name = tables.get(table)
+                    if actual_name:
+                        Table(actual_name, metadata, autoload_with=conn).drop(conn, checkfirst=True)
                 # 订阅改为只保存索引器列表，清除旧版本保存的私有站点选择。
                 for table in ("RSS_MOVIES", "RSS_TVS"):
-                    try:
-                        conn.execute(text(f"UPDATE {table} SET RSS_SITES = NULL"))
-                    except Exception:
-                        # 首次创建数据库时表或旧字段尚不存在。
-                        pass
-                try:
+                    actual_name = tables.get(table)
+                    columns = inspector.get_columns(actual_name) if actual_name else []
+                    rss_sites = next((column["name"] for column in columns
+                                      if column["name"].upper() == "RSS_SITES"), None)
+                    if actual_name and rss_sites:
+                        reflected = Table(actual_name, metadata, autoload_with=conn)
+                        conn.execute(update(reflected).values({reflected.c[rss_sites]: None}))
+                system_table = tables.get("SYSTEM_DICT")
+                system_columns = inspector.get_columns(system_table) if system_table else []
+                system_column_names = {column["name"].upper(): column["name"]
+                                       for column in system_columns}
+                if system_table and {"TYPE", "KEY"}.issubset(system_column_names):
                     # 清理站点自动登录功能曾保存的账户凭据。
-                    conn.execute(text(
-                        "DELETE FROM SYSTEM_DICT WHERE TYPE = 'SystemConfig' AND KEY IN ('CookieUserInfo', 'CookieCloud')"))
-                except Exception:
-                    # 首次创建数据库时尚无系统配置表。
-                    pass
-            # 新增唯一索引必须兼容旧数据库中的重复历史记录。
-            # 迁移脚本会再次执行该步骤，init_db 则保证 create_all 本身安全。
-            with _Engine.begin() as conn:
-                for table, columns in (
-                        ("RSS_TORRENTS", ("ENCLOSURE",)),
-                        ("SYNC_HISTORY", ("PATH", "DEST"))):
-                    try:
-                        joined = ", ".join(columns)
-                        predicate = "ENCLOSURE IS NOT NULL AND " if table == "RSS_TORRENTS" else ""
-                        conn.execute(text(
-                            f"DELETE FROM {table} WHERE {predicate}ID NOT IN "
-                            f"(SELECT MIN(ID) FROM {table} GROUP BY {joined})"))
-                    except Exception:
-                        # 表可能需要在下面首次创建。
-                        pass
-            Base.metadata.create_all(_Engine)
-            with _Engine.connect() as conn:
-                conn.execute(text("PRAGMA journal_mode=WAL;"))
-                conn.execute(text("PRAGMA SYNCHRONOUS=NORMAL;"))
-                conn.execute(text("PRAGMA wal_autocheckpoint=1000;"))
+                    reflected = Table(system_table, metadata, autoload_with=conn)
+                    conn.execute(delete(reflected).where(
+                        reflected.c[system_column_names["TYPE"]] == "SystemConfig",
+                        reflected.c[system_column_names["KEY"]].in_(
+                            ("CookieUserInfo", "CookieCloud"))))
+            Base.metadata.create_all(engine)
+            if engine.dialect.name == "sqlite":
+                with engine.connect() as conn:
+                    conn.execute(text("PRAGMA journal_mode=WAL"))
+                    conn.execute(text("PRAGMA synchronous=NORMAL"))
+                    conn.execute(text("PRAGMA wal_autocheckpoint=1000"))
         MainDb.wal_checkpoint()
 
     @staticmethod
     def wal_checkpoint():
-        try:
-            with _Engine.connect() as conn:
-                conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE);"))
-        except Exception as e:
-            ExceptionUtils.exception_traceback(e)
+        if DATABASE.backend.name != "sqlite":
+            return
+        with DATABASE.engine.connect() as conn:
+            conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
 
     def init_data(self):
         """
@@ -113,6 +88,8 @@ class MainDb:
                 with open(sql_file, "r", encoding="utf-8") as f:
                     sql_list = f.read().split(';\n')
                     for sql in sql_list:
+                        if not sql.strip():
+                            continue
                         try:
                             self.excute(sql)
                             self.commit()
@@ -143,24 +120,8 @@ class MainDb:
         return len(rows)
 
     def upsert_many(self, model, rows, conflict_columns, update_columns=None):
-        """执行 SQLite 批量 upsert，事务由调用方负责。"""
-        if not rows:
-            return 0
-        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-
-        statement = sqlite_insert(model.__table__).values(rows)
-        if update_columns:
-            statement = statement.on_conflict_do_update(
-                index_elements=list(conflict_columns),
-                set_={column: getattr(statement.excluded, column)
-                      for column in update_columns}
-            )
-        else:
-            statement = statement.on_conflict_do_nothing(
-                index_elements=list(conflict_columns)
-            )
-        self.session.execute(statement)
-        return len(rows)
+        """按活动数据库方言执行批量 upsert，事务由调用方负责。"""
+        return DATABASE.upsert_many(model, rows, conflict_columns, update_columns)
 
     @contextmanager
     def transaction(self):
@@ -182,7 +143,7 @@ class MainDb:
         """
         执行SQL语句
         """
-        self.session.execute(sql)
+        self.session.execute(text(sql))
 
     def flush(self):
         """
@@ -209,9 +170,10 @@ class DbPersist(object):
     数据库持久化装饰器，写操作失败时自动重试（解决 SQLite 锁冲突）
     """
 
-    def __init__(self, db, retries=3):
+    def __init__(self, db, retries=3, retry_safe=False):
         self.db = db
         self.retries = retries
+        self.retry_safe = retry_safe
 
     def __call__(self, f):
         def persist(*args, **kwargs):
@@ -221,7 +183,13 @@ class DbPersist(object):
                     ret = f(*args, **kwargs)
                     self.db.commit()
                     return True if ret is None else ret
-                except OperationalError as e:
+                except Exception as e:
+                    from app.db.manager import DATABASE
+
+                    if not self.retry_safe or not DATABASE.is_retryable_transaction_error(e):
+                        ExceptionUtils.exception_traceback(e)
+                        self.db.rollback()
+                        return False
                     last_exception = e
                     _db_metrics["retries"] += 1
                     self.db.rollback()
@@ -230,10 +198,6 @@ class DbPersist(object):
                     else:
                         ExceptionUtils.exception_traceback(e)
                         return False
-                except Exception as e:
-                    ExceptionUtils.exception_traceback(e)
-                    self.db.rollback()
-                    return False
             if last_exception:
                 ExceptionUtils.exception_traceback(last_exception)
             return False

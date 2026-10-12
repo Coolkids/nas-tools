@@ -1106,6 +1106,8 @@ class WebAction:
                         ignored_cache_limits.add(key)
         if any(key.startswith("cache.") for key in data):
             return {"code": 1, "msg": "缓存保存方式需通过缓存迁移流程修改"}
+        if any(key == "database" or key.startswith("database.") for key in data):
+            return {"code": 1, "msg": "数据库连接配置需通过受控数据库迁移流程修改"}
         strategy = data.get("recognition.decision.strategy")
         if strategy and strategy not in ("legacy", "title_evidence"):
             return {"code": 1, "msg": "媒体识别策略无效"}

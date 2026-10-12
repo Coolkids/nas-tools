@@ -18,6 +18,12 @@ class DbHelper:
     _db = MainDb()
 
     @staticmethod
+    def _search_task_query(keyword):
+        digest = portable_key_digest((keyword,))
+        return DbHelper._db.query(SEARCHTASK).filter(
+            SEARCHTASK.KEYWORD_HASH == digest, SEARCHTASK.KEYWORD == keyword)
+
+    @staticmethod
     def _json_default(value):
         """将 TMDB 的 AsObj 等对象转换为可持久化的 JSON 结构。"""
         if isinstance(value, Enum):
@@ -178,7 +184,7 @@ class DbHelper:
         """
         保存或更新搜索任务
         """
-        task = self._db.query(SEARCHTASK).filter(SEARCHTASK.KEYWORD == keyword).first()
+        task = self._search_task_query(keyword).first()
         if task:
             task.STATUS = status
             if start_time:
@@ -196,7 +202,7 @@ class DbHelper:
         """
         根据关键词查询任务
         """
-        return self._db.query(SEARCHTASK).filter(SEARCHTASK.KEYWORD == keyword).first()
+        return self._search_task_query(keyword).first()
 
     def get_search_tasks(self, limit=20):
         """
@@ -412,7 +418,9 @@ class DbHelper:
                     synchronize_session=False)
             deleted_count += self._db.query(RECOGNITIONREQUEST).filter(
                 RECOGNITIONREQUEST.REQUEST_ID.in_(request_ids)).delete(
-                    synchronize_session=False)
+                synchronize_session=False)
+            # 每个批次独立提交，让其他 SQLite 写入在批次边界获得机会。
+            self._db.commit()
         return deleted_count
 
     def archive_recognition_records(self, older_than, archive_path, delete_archived=False,
@@ -560,7 +568,7 @@ class DbHelper:
         删除指定关键词的搜索任务及其结果
         """
         self._db.query(SEARCHRESULTINFO).filter(SEARCHRESULTINFO.KEYWORD == keyword).delete()
-        self._db.query(SEARCHTASK).filter(SEARCHTASK.KEYWORD == keyword).delete()
+        self._search_task_query(keyword).delete()
 
     @DbPersist(_db)
     def insert_rss_torrents(self, media_info):
@@ -1538,8 +1546,8 @@ class DbHelper:
                               func.substr(TRANSFERHISTORY.DATE, 1, 10),
                               func.count('*')
                               ).filter(TRANSFERHISTORY.DATE > begin_date).group_by(
-            func.substr(TRANSFERHISTORY.DATE, 1, 10)
-        ).order_by(TRANSFERHISTORY.DATE).all()
+            TRANSFERHISTORY.TYPE, func.substr(TRANSFERHISTORY.DATE, 1, 10)
+        ).order_by(func.substr(TRANSFERHISTORY.DATE, 1, 10), TRANSFERHISTORY.TYPE).all()
 
     def is_exists_download_history(self, title, tmdbid, mtype=None):
         """

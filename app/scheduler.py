@@ -134,7 +134,6 @@ class Scheduler:
 
         # 定时 WAL checkpoint，防止 WAL 文件过度膨胀
         self.SCHEDULER.add_job(MainDb.wal_checkpoint, 'interval', hours=6)
-        self.SCHEDULER.add_job(MediaDb.wal_checkpoint, 'interval', hours=6)
 
         # 定时清理超过保留期限的媒体识别记录。
         record_cleanup = (((self._recognition or {}).get('records') or {}).get('cleanup') or {})

@@ -1,78 +1,33 @@
-import os
-import threading
 import time
 from contextlib import contextmanager
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, scoped_session
-from sqlalchemy.pool import QueuePool
-from sqlalchemy import text
+from sqlalchemy import text, or_
 
-from app.db.models import BaseMedia, MEDIASYNCITEMS, MEDIASYNCSTATISTIC
+from app.db.models import Base, MEDIASYNCITEMS, MEDIASYNCSTATISTIC
+from app.db.manager import DATABASE
 from app.utils import ExceptionUtils
-from config import Config
-
-lock = threading.Lock()
-_Engine = create_engine(
-    f"sqlite:///{os.path.join(Config().get_config_path(), 'media.db')}?check_same_thread=False",
-    echo=False,
-    poolclass=QueuePool,
-    pool_pre_ping=True,
-    pool_size=5,
-    pool_recycle=1800,
-    max_overflow=10,
-    pool_timeout=60,
-    connect_args={
-        'timeout': 60,              # 等待数据库锁释放的超时时间
-        'check_same_thread': False  # 允许在不同线程中复用连接
-    }
-)
-_Session = scoped_session(sessionmaker(bind=_Engine,
-                                       autoflush=True,
-                                       autocommit=False))
 
 
 class MediaDb:
 
     @property
     def session(self):
-        return _Session()
+        return DATABASE.session
 
     @staticmethod
     def close_session():
-        _Session.remove()
+        DATABASE.close_session()
 
     @staticmethod
     def init_db():
-        with lock:
-            # Base.metadata.create_all 不会为已有表补充索引。
-            # 先去重，确保旧版 media.db 升级时安全。
-            with _Engine.begin() as conn:
-                try:
-                    conn.execute(text(
-                        "DELETE FROM MEDIASYNC_ITEMS WHERE ID NOT IN "
-                        "(SELECT MIN(ID) FROM MEDIASYNC_ITEMS GROUP BY SERVER, ITEM_ID)"
-                    ))
-                    conn.execute(text(
-                        "CREATE UNIQUE INDEX IF NOT EXISTS UN_INDX_MEDIASYNC_ITEMS_SERVER_ITEM "
-                        "ON MEDIASYNC_ITEMS(SERVER, ITEM_ID)"
-                    ))
-                except Exception:
-                    # 表可能需要在下面首次创建。
-                    pass
-            BaseMedia.metadata.create_all(_Engine)
-            with _Engine.connect() as conn:
-                conn.execute(text("PRAGMA journal_mode=WAL;"))
-                conn.execute(text("PRAGMA SYNCHRONOUS=NORMAL;"))
-                conn.execute(text("PRAGMA wal_autocheckpoint=1000;"))
-        MediaDb.wal_checkpoint()
+        # 兼容旧调用入口；两个逻辑域共享同一 metadata 和 engine。
+        Base.metadata.create_all(DATABASE.engine)
 
     @staticmethod
     def wal_checkpoint():
-        try:
-            with _Engine.connect() as conn:
-                conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE);"))
-        except Exception as e:
-            ExceptionUtils.exception_traceback(e)
+        if DATABASE.backend.name != "sqlite":
+            return
+        with DATABASE.engine.connect() as conn:
+            conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
 
     def insert(self, server_type, iteminfo):
         if not server_type or not iteminfo:
@@ -202,26 +157,20 @@ class MediaDb:
         if not server_type or not title:
             return False
         if tmdbid:
-            count = self.session.query(MEDIASYNCITEMS).filter(MEDIASYNCITEMS.TMDBID == str(tmdbid)).count()
-            if count:
+            match = self.session.query(MEDIASYNCITEMS.ID).filter(
+                MEDIASYNCITEMS.TMDBID == str(tmdbid)).first()
+            if match:
                 return True
+        query = self.session.query(MEDIASYNCITEMS.ID).filter(
+            MEDIASYNCITEMS.SERVER == server_type,
+            MEDIASYNCITEMS.TITLE == title)
         if year:
-            items = self.session.query(MEDIASYNCITEMS).filter(MEDIASYNCITEMS.SERVER == server_type,
-                                                              MEDIASYNCITEMS.TITLE == title,
-                                                              MEDIASYNCITEMS.YEAR == str(year)).all()
-        else:
-            items = self.session.query(MEDIASYNCITEMS).filter(MEDIASYNCITEMS.SERVER == server_type,
-                                                              MEDIASYNCITEMS.TITLE == title).all()
-        if items:
-            if tmdbid:
-                for item in items:
-                    if not item.TMDBID or item.TMDBID == str(tmdbid):
-                        return True
-                return False
-            else:
-                return True
-        else:
-            return False
+            query = query.filter(MEDIASYNCITEMS.YEAR == str(year))
+        if tmdbid:
+            query = query.filter(or_(MEDIASYNCITEMS.TMDBID.is_(None),
+                                     MEDIASYNCITEMS.TMDBID == "",
+                                     MEDIASYNCITEMS.TMDBID == str(tmdbid)))
+        return query.limit(1).first() is not None
 
     def get_statistics(self, server_type):
         if not server_type:
