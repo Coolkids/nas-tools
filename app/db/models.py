@@ -490,13 +490,15 @@ class RECOGNITIONREQUEST(Base):
         Index('IDX_RECOG_BUSINESS_STATUS', 'BUSINESS_STATUS_SUMMARY'),
         Index('IDX_RECOG_REASON_HASH', 'REASON_HASH'),
         Index('IDX_RECOG_BUSINESS_REASON', 'BUSINESS_REASON_HASH'),
+        Index('IDX_RECOG_CREATED_REQUEST', 'CREATED_AT', 'REQUEST_ID'),
+        Index('IDX_RECOG_SOURCE_CREATED_REQUEST', 'SOURCE', 'CREATED_AT', 'REQUEST_ID'),
     )
 
     REQUEST_ID = Column(String(128), primary_key=True)
     ORIGINAL_NAME = Column(Text, index=True)
-    SOURCE = Column(Text, index=True)
+    SOURCE = Column(Text)
     STAGE = Column(Text)
-    CREATED_AT = Column(Text, index=True)
+    CREATED_AT = Column(Text)
     SUMMARY = Column(Text)
     STATUS_SUMMARY = Column(String(64))
     BUSINESS_STATUS_SUMMARY = Column(String(64))
