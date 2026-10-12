@@ -1746,7 +1746,7 @@ def retry_database_restore_restart(job_id):
             or job.get("status") not in {"RESTART_PENDING", "RECOVERY_REQUIRED"}
             or not (job.get("result") or {}).get("restore_validated")):
         return False
-    from app.db.migration import (_current_settings, _fingerprint, _verify_revision)
+    from app.db.migration import _current_settings, _fingerprint
 
     with STORAGE_JOBS.maintenance_lock(exclusive=True):
         job = STORAGE_JOBS.get(job_id)
@@ -1835,6 +1835,7 @@ def _run_database_restore_impl(job_id, settings, fingerprint, upload_path):
                 raise InterruptedError("在修改当前数据库前已取消恢复")
             if source_transaction is not None:
                 source_transaction.rollback()
+                source_transaction = None
             if source_connection is not None:
                 source_connection.close()
                 source_connection = None
