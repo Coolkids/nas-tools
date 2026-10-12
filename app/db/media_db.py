@@ -94,11 +94,8 @@ class MediaDb:
         with self._database_maintenance_batch(metrics=metrics):
             started_at = time.perf_counter()
             try:
-                yield self.session
-                self.session.commit()
-            except Exception:
-                self.session.rollback()
-                raise
+                with DATABASE.transaction() as session:
+                    yield session
             finally:
                 if metrics is not None:
                     metrics["transaction_seconds"] = time.perf_counter() - started_at

@@ -1,6 +1,7 @@
 """延迟创建的统一业务数据库管理器。"""
 
 import copy
+from contextlib import contextmanager
 from threading import RLock
 
 from sqlalchemy import event, text
@@ -12,6 +13,9 @@ from app.db.contracts import DatabaseStatus
 from app.utils.storage_jobs import STORAGE_JOBS
 
 
+TRANSACTION_DEPTH_KEY = "_nas_tools_database_transaction_depth"
+
+
 class DatabaseManager:
     def __init__(self):
         self._lock = RLock()
@@ -20,6 +24,7 @@ class DatabaseManager:
         self._settings = None
         self._session = None
         self._session_class = None
+        self._commit_count = 0
 
     @staticmethod
     def _read_settings():
@@ -169,7 +174,34 @@ class DatabaseManager:
         metadata.create_all(self.engine)
 
     def transaction(self):
-        return self.session.begin()
+        """Own one commit for the outermost unit of work on this scoped session."""
+        @contextmanager
+        def unit_of_work():
+            session = self.session
+            depth = int(session.info.get(TRANSACTION_DEPTH_KEY, 0))
+            session.info[TRANSACTION_DEPTH_KEY] = depth + 1
+            try:
+                yield session
+                if depth == 0:
+                    session.commit()
+                    self._commit_count += 1
+            except Exception:
+                session.rollback()
+                raise
+            finally:
+                if depth:
+                    session.info[TRANSACTION_DEPTH_KEY] = depth
+                else:
+                    session.info.pop(TRANSACTION_DEPTH_KEY, None)
+        return unit_of_work()
+
+    @property
+    def commit_count(self):
+        return self._commit_count
+
+    def record_commit(self):
+        """Count explicit batch commits performed through a compatibility facade."""
+        self._commit_count += 1
 
     def upsert_many(self, model, rows, conflict_columns, update_columns=None):
         return self.backend.upsert_many(

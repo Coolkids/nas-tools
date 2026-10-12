@@ -2,11 +2,10 @@ import logging
 import os
 import threading
 import time
-from contextlib import contextmanager
 from sqlalchemy import MetaData, Table, delete, inspect, text, update
 
 from app.db.models import Base
-from app.db.manager import DATABASE
+from app.db.manager import DATABASE, TRANSACTION_DEPTH_KEY
 from app.utils import ExceptionUtils, PathUtils
 from config import Config
 
@@ -17,7 +16,6 @@ _INITIALIZATION_SQL_FILES = frozenset({
     "update_userpris.sql", "update_userrss.sql", "reset_db_version.sql",
 })
 _db_metrics = {
-    "commits": 0,
     "retries": 0,
 }
 
@@ -179,15 +177,9 @@ class MainDb:
         """按活动数据库方言执行批量 upsert，事务由调用方负责。"""
         return DATABASE.upsert_many(model, rows, conflict_columns, update_columns)
 
-    @contextmanager
     def transaction(self):
-        """成功时只提交一次，失败时回滚整个批次。"""
-        try:
-            yield self.session
-            self.commit()
-        except Exception:
-            self.rollback()
-            raise
+        """使用管理器拥有的外层事务；嵌套调用不提前提交。"""
+        return DATABASE.transaction()
 
     def query(self, *obj):
         """
@@ -212,7 +204,7 @@ class MainDb:
         提交事务
         """
         self.session.commit()
-        _db_metrics["commits"] += 1
+        DATABASE.record_commit()
 
     def rollback(self):
         """
@@ -233,20 +225,21 @@ class DbPersist(object):
 
     def __call__(self, f):
         def persist(*args, **kwargs):
-            last_exception = None
+            session = self.db.session
+            nested = bool(session.info.get(TRANSACTION_DEPTH_KEY, 0))
             for attempt in range(self.retries):
                 try:
-                    ret = f(*args, **kwargs)
-                    self.db.commit()
+                    with DATABASE.transaction():
+                        ret = f(*args, **kwargs)
                     return True if ret is None else ret
                 except Exception as e:
-                    from app.db.manager import DATABASE
-
+                    if nested:
+                        # Preserve the enclosing unit's atomicity and let its owner roll back.
+                        raise
                     if not self.retry_safe or not DATABASE.is_retryable_transaction_error(e):
                         ExceptionUtils.exception_traceback(e)
                         self.db.rollback()
                         return False
-                    last_exception = e
                     _db_metrics["retries"] += 1
                     self.db.rollback()
                     if attempt < self.retries - 1:
@@ -254,8 +247,6 @@ class DbPersist(object):
                     else:
                         ExceptionUtils.exception_traceback(e)
                         return False
-            if last_exception:
-                ExceptionUtils.exception_traceback(last_exception)
             return False
 
         return persist
@@ -263,4 +254,4 @@ class DbPersist(object):
 
 def get_db_metrics():
     """返回用于性能日志和诊断的指标快照。"""
-    return dict(_db_metrics)
+    return {"commits": DATABASE.commit_count, "retries": _db_metrics["retries"]}
