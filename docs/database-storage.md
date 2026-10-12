@@ -78,11 +78,13 @@ SQLite 的文件名和目录由后端固定生成，不能在设置页或 API �
 
 `tests/test_database_filter_priority.py` 验证旧配置中的数字字符串、空值及非数字优先级按稳定顺序读取，结果为 `1 passed`。完整过滤、订阅、用户、搜索历史、转移和媒体同步业务链路仍未在四种引擎上全量联调。
 
+`tests/test_sqlite_file_migration.py` 结果为 `11 passed`。测试覆盖根目录与 `db/` 两种旧双库布局、仅主库、已提交 WAL、缺失主库、两处来源冲突、损坏源库、数据库目录被普通文件占用、无完成标记的新旧库冲突、重复启动，以及媒体域导入失败时不发布部分结果；同时校验固定目标路径、完成标记、旧源保留、媒体代次回填和数据库完整性。只读权限、空间不足、进程级并发、归档中断恢复及完整生产历史版本升级仍待验收。
+
 `tests/test_cache_migration_matrix.py` 通过临时 Valkey 服务覆盖 memory、memory_disk、Redis 客户端和 Valkey 客户端之间的 12 个有向切换，以及两种远程客户端各自换到另一服务实例；结果为 `21 passed`。用例验证数据及原始 TTL 保留、快照后到期条目单独计数、超过 1 MiB 的 AI 载荷完整迁移、任务代次隔离、配置在校验后保存、受控重启调度和启动后目标核验，也覆盖源/目标检查后断网、快照磁盘满、配置保存失败回滚、取消、重启失败待重试及易失缓存排除项。测试发现并修复了 memory_disk 首次遍历命名空间会更新本地 revision、导致迁移误判源变化的问题；同时修正目标探测意外创建活动 `system.sqlite3` 的副作用，改为只检查任务暂存路径。当前环境没有原生 Redis 服务，因此 Redis 客户端路径由 Redis 协议兼容的 Valkey 服务承载；Docker 镜像构建及容器重启仍待 daemon 权限可用后验证。
 
 `tests/test_cache_legacy_migration.py` 注入旧迁移标记删除失败，验证重启后可继续清理，且“旧 CacheLib 数据导入 → 清空 → 重启”不会复活；已知 `cache/migrations/` 删除，邻近 `db_scripts/` 文件不受影响，结果为 `1 passed`。
 
-2026-10-13 本地回归：后端 `349 passed, 43 skipped, 83 subtests passed`；隔离缓存容量压力 `2 passed`；前端 `npm run type-check` 和 `npm run build` 均通过。跳过项包含未注入远程设置和门控压力用例；远程契约、备份归档矩阵、迁移复制矩阵和压力用例另行运行并记录在上文。
+2026-10-13 本地回归：后端 `360 passed, 43 skipped, 83 subtests passed`；隔离缓存容量压力 `2 passed`；前端 `npm run type-check` 和 `npm run build` 均通过。跳过项包含未注入远程设置和门控压力用例；远程契约、备份归档矩阵、迁移复制矩阵和压力用例另行运行并记录在上文。
 
 使用 Google Chrome 154 headless 加本地 mock `/do` 响应加载构建产物，缓存和数据库标签在 360、390、768、1280、1440 px 与浅/深色主题下均无页面横向溢出。此项只验证空数据状态的布局，不覆盖真实 API 联调、含数据表格、软键盘、安全区、放大、键盘/屏幕阅读器或迁移/恢复交互。
 

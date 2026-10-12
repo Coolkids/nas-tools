@@ -377,9 +377,12 @@ def _digest_rows(connection, schema, table, columns, primary_key):
     return count, digest.hexdigest()
 
 
-def _copy_domain(connection, source_path, domain, expected_tables, excluded_tables=()):
+def _copy_domain(connection, source_path, domain, expected_tables, excluded_tables=(),
+                 attached_sources=None):
     alias = f"source_{domain}"
     _execute(connection, f"ATTACH DATABASE ? AS {_quote(alias)}", (source_path,))
+    if attached_sources is not None:
+        attached_sources.append(alias)
     try:
         source_tables = _table_names(connection, alias)
         unknown = source_tables - expected_tables - _RETIRED_TABLES - _VERSION_TABLES
@@ -421,7 +424,8 @@ def _copy_domain(connection, source_path, domain, expected_tables, excluded_tabl
             if (count_before, digest_before) != (count_after, digest_after):
                 raise RuntimeError(f"旧表 {table} 导入后摘要不一致")
     finally:
-        _execute(connection, f"DETACH DATABASE {_quote(alias)}")
+        if attached_sources is None:
+            _execute(connection, f"DETACH DATABASE {_quote(alias)}")
 
 
 def _backfill_recognition_search(connection):
@@ -619,24 +623,33 @@ def _prepare_sqlite_database():
                                connect_args={"timeout": 30})
         try:
             Base.metadata.create_all(engine)
-            with engine.begin() as connection:
-                expected_tables = set(Base.metadata.tables)
-                _copy_domain(connection, user_snapshot, "main", expected_tables)
-                if source.get("media"):
-                    # Sync leases are process control state, not media data. A
-                    # stale legacy lease must never block the first new sync.
-                    _copy_domain(connection, media_snapshot, "media", expected_tables,
-                                 excluded_tables={"MEDIASYNC_SYNC_JOBS"})
-                cleanup_legacy_startup_data(connection)
-                _backfill_recognition_search(connection)
-                head = current_schema_revision()
-                connection.exec_driver_sql(
-                    "CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)")
-                connection.exec_driver_sql("DELETE FROM alembic_version")
-                connection.exec_driver_sql(
-                    "INSERT INTO alembic_version(version_num) VALUES (?)", (head,))
-                raw = connection.connection.driver_connection
-                _write_completion(raw, job_id, source_records)
+            with engine.connect() as connection:
+                attached_sources = []
+                try:
+                    with connection.begin():
+                        expected_tables = set(Base.metadata.tables)
+                        _copy_domain(connection, user_snapshot, "main", expected_tables,
+                                     attached_sources=attached_sources)
+                        if source.get("media"):
+                            # Sync leases are process control state, not media data. A
+                            # stale legacy lease must never block the first new sync.
+                            _copy_domain(connection, media_snapshot, "media", expected_tables,
+                                         excluded_tables={"MEDIASYNC_SYNC_JOBS"},
+                                         attached_sources=attached_sources)
+                        cleanup_legacy_startup_data(connection)
+                        _backfill_recognition_search(connection)
+                        head = current_schema_revision()
+                        connection.exec_driver_sql(
+                            "CREATE TABLE IF NOT EXISTS alembic_version "
+                            "(version_num VARCHAR(32) NOT NULL)")
+                        connection.exec_driver_sql("DELETE FROM alembic_version")
+                        connection.exec_driver_sql(
+                            "INSERT INTO alembic_version(version_num) VALUES (?)", (head,))
+                        raw = connection.connection.driver_connection
+                        _write_completion(raw, job_id, source_records)
+                finally:
+                    for alias in reversed(attached_sources):
+                        _execute(connection, f"DETACH DATABASE {_quote(alias)}")
             with engine.connect() as connection:
                 integrity = connection.exec_driver_sql("PRAGMA integrity_check").scalar_one()
                 if integrity != "ok":
