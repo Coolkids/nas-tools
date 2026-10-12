@@ -74,7 +74,9 @@ SQLite 的文件名和目录由后端固定生成，不能在设置页或 API �
 
 `tests/test_database_migration_contract.py` 通过 `_copy_table`、逐表内容摘要和自增校准验证全部 16 个源/目标引擎组合，远程运行 `16 passed`。每个用例从空隔离库开始，复制含 Unicode、长路径和 JSON 的样例，校验目标摘要并验证新增主键。相同远程实例的用例使用本地 SQLite 快照作为隔离中间库，因为正式流程应拒绝源/目标为同一实例。此项不覆盖 `start_database_migration` 的检查凭证、维护锁、配置提交、重启及故障恢复编排。
 
-2026-10-13 最终本地回归：后端 `322 passed, 43 skipped, 83 subtests passed`；隔离缓存容量压力 `2 passed`；前端 `npm run type-check` 和 `npm run build` 均通过。跳过项包含未注入远程设置和门控压力用例；远程契约、备份归档矩阵、迁移复制矩阵和压力用例另行运行并记录在上文。
+`tests/test_cache_migration_matrix.py` 通过临时 Valkey 服务覆盖 memory、memory_disk、Redis 客户端和 Valkey 客户端之间的 12 个有向切换，以及两种远程客户端各自换到另一服务实例；结果为 `14 passed`。用例验证数据/TTL 保留、任务代次隔离、配置在校验后保存、受控重启调度和启动后目标核验，也确认认证令牌与配置加载缓存被列为排除项。检查时发现并修复了 memory_disk 首次遍历命名空间会更新本地 revision、导致迁移误判源变化的问题。当前环境没有原生 Redis 服务，因此 Redis 客户端路径由 Redis 协议兼容的 Valkey 服务承载；Docker 镜像构建及容器重启仍待 daemon 权限可用后验证。
+
+2026-10-13 本地回归：后端 `337 passed, 43 skipped, 83 subtests passed`；隔离缓存容量压力 `2 passed`；前端 `npm run type-check` 和 `npm run build` 均通过。跳过项包含未注入远程设置和门控压力用例；远程契约、备份归档矩阵、迁移复制矩阵和压力用例另行运行并记录在上文。
 
 使用 Google Chrome 154 headless 加本地 mock `/do` 响应加载构建产物，缓存和数据库标签在 360、390、768、1280、1440 px 与浅/深色主题下均无页面横向溢出。此项只验证空数据状态的布局，不覆盖真实 API 联调、含数据表格、软键盘、安全区、放大、键盘/屏幕阅读器或迁移/恢复交互。
 

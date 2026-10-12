@@ -479,6 +479,21 @@ def _ensure_storage_idle(except_job_id=None):
 
 def _source_summary(except_job_id=None):
     _ensure_storage_idle(except_job_id)
+    initial_status = STORE.status()
+    if initial_status.get("fallback"):
+        raise ValueError("当前缓存后端处于降级状态，无法确认完整源数据")
+    if initial_status.get("restart_required"):
+        raise ValueError("已有缓存后端配置等待重启，请先完成或恢复该次切换")
+    if initial_status.get("maintenance") and not STORAGE_JOBS.owns_exclusive_lock():
+        raise ValueError("已有缓存维护任务正在运行，请等待任务结束")
+    if (initial_status.get("active_backend") == "memory"
+            and not _memory_source_is_single_process()):
+        raise ValueError("无法确认内存缓存是否分布在多个 worker，不能保证完整迁移")
+    namespaces = {}
+    for namespace in CACHE_NAMESPACE_REGISTRY:
+        namespaces[namespace] = STORE.memory_info(namespace).get("entries", 0)
+    # memory_disk 在首次访问命名空间时可能创建 SQLite 结构，并更新本地 revision。
+    # 采样 revision 必须放在统计后，否则迁移会把这次只读检查自身误判为源变化。
     status = STORE.status()
     if status.get("fallback"):
         raise ValueError("当前缓存后端处于降级状态，无法确认完整源数据")
@@ -486,11 +501,11 @@ def _source_summary(except_job_id=None):
         raise ValueError("已有缓存后端配置等待重启，请先完成或恢复该次切换")
     if status.get("maintenance") and not STORAGE_JOBS.owns_exclusive_lock():
         raise ValueError("已有缓存维护任务正在运行，请等待任务结束")
+    if (status.get("active_backend") != initial_status.get("active_backend")
+            or status.get("config_generation") != initial_status.get("config_generation")):
+        raise ValueError("读取缓存统计期间源缓存后端发生变化，不能确认完整源数据")
     if status.get("active_backend") == "memory" and not _memory_source_is_single_process():
         raise ValueError("无法确认内存缓存是否分布在多个 worker，不能保证完整迁移")
-    namespaces = {}
-    for namespace in CACHE_NAMESPACE_REGISTRY:
-        namespaces[namespace] = STORE.memory_info(namespace).get("entries", 0)
     return status, namespaces
 
 
