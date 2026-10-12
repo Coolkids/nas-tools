@@ -1,3 +1,5 @@
+import os
+import shutil
 import time
 import uuid
 from contextlib import contextmanager
@@ -225,6 +227,29 @@ class MediaDb:
         return (statistic.ACTIVE_GENERATION if statistic else MEDIA_SYNC_LEGACY_GENERATION,
                 statistic)
 
+    @staticmethod
+    def _ensure_sync_batch_space(rows):
+        """SQLite 写批次前检查数据库所在卷，并为页、索引和 WAL 留余量。"""
+        if DATABASE.backend.name != "sqlite":
+            return
+        database_path = DATABASE.engine.url.database
+        if not database_path or database_path == ":memory:" or database_path.startswith("file:"):
+            return
+        directory = os.path.dirname(os.path.abspath(database_path)) or "."
+        try:
+            free_bytes = shutil.disk_usage(directory).free
+        except OSError as error:
+            raise RuntimeError("无法检查 SQLite 可用空间，已停止媒体同步批次") from error
+
+        fields = ("SERVER", "GENERATION_ID", "LIBRARY", "ITEM_ID", "ITEM_TYPE",
+                  "TITLE", "ORGIN_TITLE", "YEAR", "TMDBID", "IMDBID", "PATH")
+        payload_bytes = sum(
+            len(str(row.get(field) or "").encode("utf-8")) for row in rows for field in fields)
+        estimated_bytes = 1024 * 1024 + (payload_bytes + len(rows) * 256) * 4
+        if free_bytes < estimated_bytes:
+            raise RuntimeError(
+                f"SQLite 可用空间不足，需至少保留 {estimated_bytes} 字节，已停止媒体同步批次")
+
     def write_sync_batch(self, lease, items):
         """将一批规范化记录写入不可见的代次，事务提交后释放写入机会。"""
         rows = [{
@@ -243,8 +268,8 @@ class MediaDb:
         if not rows:
             return 0
         metrics = {}
-        started_at = time.perf_counter()
         try:
+            self._ensure_sync_batch_space(rows)
             with self.transaction(metrics=metrics) as session:
                 if not self.sync_lease_is_current(lease, session=session):
                     raise RuntimeError("媒体同步租约已过期或已被接管")
@@ -258,7 +283,7 @@ class MediaDb:
             sync_metrics["batch_count"] = sync_metrics.get("batch_count", 0) + 1
             sync_metrics["longest_transaction_seconds"] = max(
                 sync_metrics.get("longest_transaction_seconds", 0.0),
-                metrics.get("transaction_seconds", time.perf_counter() - started_at))
+                metrics.get("transaction_seconds", 0.0))
             sync_metrics["maintenance_lock_wait_seconds"] = (
                 sync_metrics.get("maintenance_lock_wait_seconds", 0.0)
                 + metrics.get("maintenance_lock_wait_seconds", 0.0))

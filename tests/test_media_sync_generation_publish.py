@@ -86,6 +86,23 @@ class MediaSyncGenerationPublishTest(TestCase):
         self.assertFalse(self.media_db.exists("emby", "待发布", None, None))
         self.assertEqual(1, self._count_items())
 
+    def test_low_sqlite_disk_space_rejects_batch_and_preserves_active_generation(self):
+        self.assertTrue(self.media_db.insert("emby", {
+            "id": "active", "type": "Movie", "title": "活动影片"}))
+        lease = self.media_db.acquire_sync_lease("emby")
+
+        with patch("app.db.media_db.shutil.disk_usage",
+                   return_value=SimpleNamespace(free=0)):
+            with self.assertRaisesRegex(RuntimeError, "可用空间不足"):
+                self.media_db.write_sync_batch(lease, [{
+                    "id": "staged", "type": "Movie", "title": "暂存影片"}])
+
+        self.assertTrue(self.media_db.exists("emby", "活动影片", None, None))
+        self.assertFalse(self.media_db.exists("emby", "暂存影片", None, None))
+        self.assertEqual(1, self._count_items())
+        self.assertEqual(1, lease["_sync_metrics"]["batch_count"])
+        self.assertEqual(0.0, lease["_sync_metrics"]["longest_transaction_seconds"])
+
     def test_database_unique_key_rejects_duplicate_ids_across_streamed_batches(self):
         self.assertTrue(self.media_db.insert("emby", {
             "id": "active", "type": "Movie", "title": "活动条目"}))
