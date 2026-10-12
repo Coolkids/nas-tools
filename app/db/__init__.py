@@ -90,7 +90,14 @@ def update_db():
                 versions = [row[0] for row in connection.execute(
                     text("SELECT version_num FROM alembic_version"))]
             if versions != [head]:
-                raise RuntimeError("远程数据库结构版本不受支持，需先执行受控升级")
+                scripts = ScriptDirectory.from_config(alembic_cfg)
+                head_revision = scripts.get_revision(head)
+                if (head_revision is None or not isinstance(head_revision.down_revision, str)
+                        or versions != [head_revision.down_revision]):
+                    raise RuntimeError("远程数据库结构版本不受支持，需先执行受控升级")
+                with engine.connect() as connection:
+                    alembic_cfg.attributes["connection"] = connection
+                    alembic_upgrade(alembic_cfg, head)
         elif tables:
             raise RuntimeError("远程数据库不是空库，拒绝覆盖或直接标记结构版本")
         else:

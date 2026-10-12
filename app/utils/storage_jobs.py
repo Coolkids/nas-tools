@@ -21,7 +21,9 @@ except ImportError:  # pragma: no cover - POSIX
 
 ACTIVE_STATES = {"CHECKING", "READY", "QUIESCING", "SNAPSHOTTING", "MIGRATING",
                  "VALIDATING", "VALIDATED", "SAVING_CONFIG", "RESTART_PENDING",
-                 "VERIFYING_STARTUP", "RECOVERY_REQUIRED"}
+                 "VERIFYING_STARTUP", "RECOVERY_REQUIRED", "PREPARING_TARGET",
+                 "TARGET_BACKED_UP", "RETIRING_SQLITE", "OLD_SQLITE_REMOVED",
+                 "EMPTY_TARGET_READY", "PUBLISHING"}
 TERMINAL_STATES = {"SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"}
 
 
@@ -171,13 +173,26 @@ class StorageJobStore:
             json.dump(gates, stream, ensure_ascii=False, sort_keys=True)
             stream.flush()
             os.fsync(stream.fileno())
+        try:
+            os.chmod(temporary, 0o600)
+        except OSError:
+            pass
         os.replace(temporary, path)
 
     @contextmanager
     def _connection(self):
         path = self._database_path()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        directory = os.path.dirname(path)
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(directory, 0o700)
+        except OSError:
+            pass
         connection = sqlite3.connect(path, timeout=10, isolation_level=None)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=10000")
         try:
@@ -309,7 +324,9 @@ class StorageJobStore:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("SELECT status FROM storage_jobs WHERE job_id=?", (job_id,)).fetchone()
             if row is None or row["status"] in TERMINAL_STATES | {"SAVING_CONFIG", "RESTART_PENDING",
-                                                                  "VERIFYING_STARTUP", "RECOVERY_REQUIRED"}:
+                                                                  "VERIFYING_STARTUP", "RECOVERY_REQUIRED",
+                                                                  "RETIRING_SQLITE", "OLD_SQLITE_REMOVED",
+                                                                  "EMPTY_TARGET_READY", "PUBLISHING"}:
                 connection.rollback()
                 return False
             connection.execute("UPDATE storage_jobs SET cancel_requested=1, updated_at=? WHERE job_id=?",

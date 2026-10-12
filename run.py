@@ -84,6 +84,8 @@ def init_system():
         from app.db.sqlite_files import prepare_sqlite_database
         # 启动结构升级使用跨进程独占锁，避免两个新版本进程同时迁移同一目录。
         with STORAGE_JOBS.maintenance_lock(exclusive=True):
+            from app.db.migration import verify_database_startup
+            verify_database_startup()
             prepare_sqlite_database()
             update_db()
             init_db()
@@ -153,25 +155,38 @@ def monitor_config():
         def __init__(self):
             FileSystemEventHandler.__init__(self)
 
+        @staticmethod
+        def _reload_config(path):
+            if os.path.basename(path) != "config.yaml":
+                return
+            from app.utils.storage_jobs import STORAGE_JOBS
+            if STORAGE_JOBS.maintenance_gates():
+                log.console("存储切换任务尚未完成，暂不热加载配置文件")
+                return
+            # 10秒内只能加载一次；原子替换会产生 moved/created 等不同事件。
+            if ConfigLoadCache.get(path):
+                return
+            ConfigLoadCache.set(path, True)
+            log.console("进程 %s 检测到配置文件已修改，正在重新加载..." % os.getpid())
+            time.sleep(1)
+            Config().init_config()
+            for instance in INSTANCES.values():
+                if hasattr(instance, "init_config"):
+                    instance.init_config()
+            restart_scheduler()
+            restart_monitor()
+
         def on_modified(self, event):
-            if not event.is_directory \
-                    and os.path.basename(event.src_path) == "config.yaml":
-                # 10秒内只能加载一次
-                if ConfigLoadCache.get(event.src_path):
-                    return
-                ConfigLoadCache.set(event.src_path, True)
-                log.console("进程 %s 检测到配置文件已修改，正在重新加载..." % os.getpid())
-                time.sleep(1)
-                # 重新加载配置
-                Config().init_config()
-                # 重载singleton服务
-                for instance in INSTANCES.values():
-                    if hasattr(instance, "init_config"):
-                        instance.init_config()
-                # 重启定时服务
-                restart_scheduler()
-                # 重启监控服务
-                restart_monitor()
+            if not event.is_directory:
+                self._reload_config(event.src_path)
+
+        def on_created(self, event):
+            if not event.is_directory:
+                self._reload_config(event.src_path)
+
+        def on_moved(self, event):
+            if not event.is_directory:
+                self._reload_config(event.dest_path)
 
     # 配置文件监听
     _observer = Observer(timeout=10)

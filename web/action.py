@@ -57,6 +57,10 @@ from version import APP_VERSION
 class WebAction:
     dbhelper = None
     _actions = {}
+    _database_admin_actions = frozenset({
+        "check_database", "prepare_sqlite_migration_target", "start_database_migration",
+        "get_database_job", "cancel_database_job", "retry_database_restart",
+    })
     TvTypes = ['TV', '电视剧']
     # Excel 导入任务保留在内存中。任务不依赖 WebAction 实例，轮询请求可读取同一份状态。
     _rss_import_jobs = {}
@@ -224,12 +228,21 @@ class WebAction:
             "cancel_cache_job": self.__cancel_cache_job,
             "retry_cache_restart": self.__retry_cache_restart,
             "recover_cache_migration": self.__recover_cache_migration,
+            "check_database": self.__check_database,
+            "prepare_sqlite_migration_target": self.__prepare_sqlite_migration_target,
+            "start_database_migration": self.__start_database_migration,
+            "get_database_job": self.__get_database_job,
+            "cancel_database_job": self.__cancel_database_job,
+            "retry_database_restart": self.__retry_database_restart,
             "get_recognition_records": self.__get_recognition_records,
             "get_recognition_record_detail": self.__get_recognition_record_detail,
             "version": self.__version
         }
 
     def action(self, cmd, data=None):
+        if cmd in self._database_admin_actions:
+            if not current_user.is_authenticated or str(current_user.get_id()) != "0":
+                return {"code": 403, "msg": "仅管理员可以管理数据库"}
         func = self._actions.get(cmd)
         if not func:
             return {"code": -1, "msg": "非授权访问！"}
@@ -4892,6 +4905,47 @@ class WebAction:
         if recover_cache_migration((data or {}).get("job_id")):
             return {"code": 0}
         return {"code": 1, "msg": "缓存目标回滚仍未完成，系统继续保持维护状态"}
+
+    @staticmethod
+    def __check_database(data=None):
+        from app.db.migration import check_database
+
+        return check_database(data or {})
+
+    @staticmethod
+    def __prepare_sqlite_migration_target(data=None):
+        from app.db.migration import prepare_sqlite_migration_target
+
+        return prepare_sqlite_migration_target(data or {})
+
+    @staticmethod
+    def __start_database_migration(data=None):
+        from app.db.migration import start_database_migration
+
+        return start_database_migration(data or {})
+
+    @staticmethod
+    def __get_database_job(data=None):
+        from app.db.migration import get_database_job
+
+        job = get_database_job((data or {}).get("job_id"))
+        return {"code": 0, "job": job} if job else {"code": 1, "msg": "数据库任务不存在"}
+
+    @staticmethod
+    def __cancel_database_job(data=None):
+        from app.db.migration import cancel_database_job
+
+        if cancel_database_job((data or {}).get("job_id")):
+            return {"code": 0}
+        return {"code": 1, "msg": "当前阶段不能取消数据库任务"}
+
+    @staticmethod
+    def __retry_database_restart(data=None):
+        from app.db.migration import retry_database_restart
+
+        if retry_database_restart((data or {}).get("job_id")):
+            return {"code": 0}
+        return {"code": 1, "msg": "没有可重试的数据库重启任务"}
 
     @staticmethod
     def __clear_system_cache(data=None):

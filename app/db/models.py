@@ -571,6 +571,17 @@ class MEDIASYNCSTATISTIC(BaseMedia):
     UPDATE_TIME = Column(Text)
 
 
+class DATABASEMIGRATIONMARKER(Base):
+    """保存已验证数据库切换代次，供新进程在开放业务前确认目标。"""
+    __tablename__ = "DATABASE_MIGRATION_MARKERS"
+
+    ID = Column(String(64), primary_key=True)
+    STATUS = Column(String(32), nullable=False)
+    SOURCE_FINGERPRINT = Column(String(64), nullable=False)
+    TARGET_FINGERPRINT = Column(String(64), nullable=False)
+    COMPLETED_AT = Column(Text, nullable=False)
+
+
 # 非唯一全文索引在 MySQL/MariaDB 使用固定前缀，在 PostgreSQL 上不创建可能
 # 因超长路径或标题而失败的 btree 索引；SQLite 继续保留完整索引。
 for _table in Base.metadata.tables.values():

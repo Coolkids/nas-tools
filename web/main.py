@@ -219,9 +219,35 @@ def do():
     except Exception as e:
         ExceptionUtils.exception_traceback(e)
         return {"code": -1, "msg": str(e)}
+    if cmd in WebAction._database_admin_actions and not _is_same_origin_request():
+        return {"code": 403, "msg": "数据库管理请求缺少有效的同源来源信息"}
     if data:
         data = json.loads(data)
     return WebAction().action(cmd, data)
+
+
+def _is_same_origin_request():
+    """敏感表单只接受带有与当前 Host 一致的 Origin 或 Referer。"""
+    source = request.headers.get("Origin")
+    if not source:
+        source = request.headers.get("Referer")
+    if not source:
+        return False
+    try:
+        supplied = parse.urlparse(source)
+        expected = parse.urlparse(request.host_url)
+        if supplied.scheme not in {"http", "https"} or not supplied.hostname:
+            return False
+        supplied_port = supplied.port or (443 if supplied.scheme == "https" else 80)
+        expected_port = request.headers.get("X-Forwarded-Port") or expected.port
+        if expected_port is not None and supplied_port != int(expected_port):
+            return False
+        if expected_port is None and supplied.port is not None and supplied_port not in {80, 443}:
+            return False
+        # 反向代理可能终止 TLS，因此比较域名和可见端口，不比较内部与外部 scheme。
+        return supplied.hostname.lower() == (expected.hostname or "").lower()
+    except ValueError:
+        return False
 
 
 # 目录事件响应

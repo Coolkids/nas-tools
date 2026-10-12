@@ -8,11 +8,12 @@ from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.orm import scoped_session, sessionmaker
+from sqlalchemy.orm import Session, scoped_session, sessionmaker
 
 from app.db.backends import create_backend
 from app.db.contracts import DatabaseStatus
 from app.db.models import portable_key_digest
+from app.utils.storage_jobs import STORAGE_JOBS
 
 
 class DatabaseManager:
@@ -22,6 +23,7 @@ class DatabaseManager:
         self._backend = None
         self._settings = None
         self._session = None
+        self._session_class = None
 
     @staticmethod
     def _read_settings():
@@ -83,8 +85,13 @@ class DatabaseManager:
             self._backend = backend
             self._engine = engine
             self._settings = settings
+            self._session_class = type(f"ManagedDatabaseSession{id(self)}", (Session,), {})
+            event.listen(self._session_class, "do_orm_execute", self._before_orm_execute)
+            event.listen(self._session_class, "before_flush", self._before_flush)
+            event.listen(self._session_class, "after_transaction_end", self._after_transaction_end)
             self._session = scoped_session(sessionmaker(
-                bind=engine, autoflush=True, autocommit=False, expire_on_commit=False))
+                bind=engine, class_=self._session_class, autoflush=True,
+                autocommit=False, expire_on_commit=False))
 
     @property
     def engine(self):
@@ -112,6 +119,34 @@ class DatabaseManager:
             if self._engine is not None:
                 self._engine.dispose()
             self._engine = self._backend = self._settings = self._session = None
+            self._session_class = None
+
+    @staticmethod
+    def _guard_database_session(session):
+        if STORAGE_JOBS.maintenance_gate("database") and not STORAGE_JOBS.owns_exclusive_lock():
+            raise RuntimeError("数据库正在维护，暂时拒绝业务读写")
+        if STORAGE_JOBS.owns_exclusive_lock() or session.info.get("_storage_lock"):
+            return
+        lock = STORAGE_JOBS.maintenance_lock(exclusive=False)
+        lock.__enter__()
+        if STORAGE_JOBS.maintenance_gate("database"):
+            lock.__exit__(None, None, None)
+            raise RuntimeError("数据库正在维护，暂时拒绝业务读写")
+        session.info["_storage_lock"] = lock
+
+    def _before_orm_execute(self, state):
+        self._guard_database_session(state.session)
+
+    def _before_flush(self, session, flush_context, instances):
+        self._guard_database_session(session)
+
+    @staticmethod
+    def _after_transaction_end(session, transaction):
+        if transaction.parent is not None:
+            return
+        lock = session.info.pop("_storage_lock", None)
+        if lock:
+            lock.__exit__(None, None, None)
 
     @property
     def supports_space_reclaim(self):

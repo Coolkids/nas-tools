@@ -68,10 +68,14 @@ class MainDb:
 
     @staticmethod
     def wal_checkpoint():
-        if DATABASE.backend.name != "sqlite":
-            return
-        with DATABASE.engine.connect() as conn:
-            conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+        from app.utils.storage_jobs import STORAGE_JOBS
+        with STORAGE_JOBS.maintenance_lock(exclusive=False):
+            if STORAGE_JOBS.maintenance_gate("database"):
+                return
+            if DATABASE.backend.name != "sqlite":
+                return
+            with DATABASE.engine.connect() as conn:
+                conn.execute(text("PRAGMA wal_checkpoint(PASSIVE)"))
 
     def init_data(self):
         """
