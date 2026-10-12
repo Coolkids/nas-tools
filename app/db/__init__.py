@@ -27,6 +27,11 @@ def init_db():
     """
     log.console('开始初始化数据库...')
     MainDb().init_db()
+    for recovery in MediaDb().recover_stale_sync_jobs():
+        if recovery.get("error"):
+            log.error(f"媒体同步遗留代次清理待重试：{recovery['server']}：{recovery['error']}")
+        else:
+            log.console(f"已恢复媒体同步作业：{recovery['server']}，清理 {recovery['removed_rows']} 条未发布记录")
     log.console('数据库初始化完成')
 
 

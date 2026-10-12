@@ -329,6 +329,37 @@ class MediaDb:
                 job.UPDATED_AT = now
             lease["lease_until"] = next_lease_until
 
+    def recover_stale_sync_jobs(self):
+        """启动时接管已过期的作业并清理未发布代次，活动索引始终保留。"""
+        now = time.time()
+        recoverable = ("FETCHING", "WRITING", "CLEANING", "CLEANUP_PENDING", "FAILED")
+        with self.transaction() as session:
+            servers = [row[0] for row in session.query(MEDIASYNCSYNCJOB.SERVER).filter(
+                MEDIASYNCSYNCJOB.LEASE_UNTIL <= now,
+                MEDIASYNCSYNCJOB.STATUS.in_(recoverable))]
+
+        results = []
+        for server in servers:
+            lease = self.acquire_sync_lease(server, lease_seconds=3600)
+            if not lease:
+                continue
+            try:
+                removed = self.cleanup_sync_generations(lease)
+                status = "INTERRUPTED"
+                error = None
+            except Exception as exception:
+                removed = 0
+                status = "CLEANUP_PENDING"
+                error = str(exception)[:500]
+            try:
+                self.release_sync_lease(lease, status=status)
+            except Exception as exception:
+                error = str(exception)[:500]
+                status = "RECOVERY_REQUIRED"
+            results.append({"server": server, "status": status,
+                            "removed_rows": removed, "error": error})
+        return results
+
     def _assert_server_not_syncing(self, session, server_type):
         job = session.query(MEDIASYNCSYNCJOB).filter(
             MEDIASYNCSYNCJOB.SERVER == server_type).with_for_update().first()
