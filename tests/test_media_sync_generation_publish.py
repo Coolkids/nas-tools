@@ -1,6 +1,8 @@
 """媒体新代次在统计原子发布后可见，旧代次安全清理。"""
 
 import tempfile
+import time
+from threading import Event, Thread
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
@@ -10,6 +12,7 @@ from sqlalchemy import text
 from app.db.manager import DATABASE
 from app.db.media_db import MediaDb
 from app.db.models import Base, MEDIASYNCITEMS
+from app.utils.storage_jobs import STORAGE_JOBS
 
 
 class MediaSyncGenerationPublishTest(TestCase):
@@ -96,3 +99,45 @@ class MediaSyncGenerationPublishTest(TestCase):
         self.media_db.publish_sync_generation(lease, movie_count=1, series_count=0)
         self.assertFalse(self.media_db.exists("emby", "旧片", None, None))
         self.assertTrue(self.media_db.exists("emby", "新片", None, None))
+
+    def test_sync_batch_waits_for_database_maintenance_gate(self):
+        lease = self.media_db.acquire_sync_lease("emby")
+        maintenance_started = Event()
+        release_maintenance = Event()
+        batch_finished = Event()
+        batch_errors = []
+
+        def hold_maintenance():
+            with STORAGE_JOBS.maintenance_lock(exclusive=True):
+                STORAGE_JOBS.set_maintenance_gate("database", "maintenance-test", "TESTING")
+                maintenance_started.set()
+                release_maintenance.wait(timeout=10)
+                STORAGE_JOBS.clear_maintenance_gate("database", "maintenance-test")
+
+        def write_batch():
+            try:
+                self.media_db.write_sync_batch(lease, [{
+                    "id": "after-maintenance", "type": "Movie", "title": "完成后写入"}])
+            except Exception as error:
+                batch_errors.append(error)
+            finally:
+                batch_finished.set()
+
+        maintenance_thread = Thread(target=hold_maintenance)
+        maintenance_thread.start()
+        batch_thread = None
+        try:
+            self.assertTrue(maintenance_started.wait(timeout=5))
+            batch_thread = Thread(target=write_batch)
+            batch_thread.start()
+            time.sleep(0.1)
+            self.assertFalse(batch_finished.is_set())
+        finally:
+            release_maintenance.set()
+            maintenance_thread.join(timeout=5)
+            if batch_thread:
+                batch_thread.join(timeout=5)
+
+        self.assertTrue(batch_finished.is_set())
+        self.assertEqual([], batch_errors)
+        self.assertEqual(1, self._count_items())

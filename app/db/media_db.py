@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from app.db.models import (Base, MEDIA_SYNC_LEGACY_GENERATION, MEDIASYNCITEMS,
                            MEDIASYNCSYNCJOB, MEDIASYNCSTATISTIC)
 from app.db.manager import DATABASE
+from app.utils.storage_jobs import STORAGE_JOBS
 from app.utils import ExceptionUtils
 
 
@@ -64,14 +65,32 @@ class MediaDb:
         return False
 
     @contextmanager
+    def _database_maintenance_batch(self):
+        """在维护闸门开放时持有共享锁，维护期间停在批次边界等待恢复。"""
+        while True:
+            retry = False
+            try:
+                with STORAGE_JOBS.maintenance_lock(exclusive=False, timeout=5):
+                    if STORAGE_JOBS.maintenance_gate("database"):
+                        retry = True
+                    else:
+                        yield
+                        return
+            except TimeoutError:
+                retry = True
+            if retry:
+                time.sleep(0.5)
+
+    @contextmanager
     def transaction(self):
-        """为媒体批量写入提供显式事务接口。"""
-        try:
-            yield self.session
-            self.session.commit()
-        except Exception:
-            self.session.rollback()
-            raise
+        """媒体数据库事务在维护窗口暂停，并在每个事务结束后释放共享锁。"""
+        with self._database_maintenance_batch():
+            try:
+                yield self.session
+                self.session.commit()
+            except Exception:
+                self.session.rollback()
+                raise
 
     @staticmethod
     def _lease_payload(job):
@@ -107,6 +126,7 @@ class MediaDb:
                     "lease_token": int(job.LEASE_TOKEN) + 1 if job else 1,
                     "expected_active_generation": expected_generation,
                     "lease_until": now + max(1.0, float(lease_seconds)),
+                    "lease_seconds": max(1.0, float(lease_seconds)),
                 }
                 if job:
                     job.JOB_ID = payload["job_id"]
@@ -149,10 +169,12 @@ class MediaDb:
                     or int(job.LEASE_TOKEN) != lease.get("lease_token")
                     or float(job.LEASE_UNTIL) <= now):
                 return False
-            renewed_until = now + max(1.0, float(lease_seconds))
+            duration = max(1.0, float(lease_seconds))
+            renewed_until = now + duration
             job.LEASE_UNTIL = renewed_until
             job.UPDATED_AT = now
         lease["lease_until"] = renewed_until
+        lease["lease_seconds"] = duration
         return True
 
     def release_sync_lease(self, lease, status="FAILED"):
@@ -265,9 +287,9 @@ class MediaDb:
                 MEDIASYNCSYNCJOB.SERVER == lease["server"]).with_for_update().one()
             job.STATUS = "CLEANUP_PENDING"
             job.UPDATED_AT = now
-            job.LEASE_UNTIL = now + 60
+            job.LEASE_UNTIL = now + float(lease.get("lease_seconds") or 60)
         lease["published"] = True
-        lease["lease_until"] = now + 60
+        lease["lease_until"] = now + float(lease.get("lease_seconds") or 60)
         return {"generation_id": lease["generation_id"], "total_count": total_count,
                 **actual_counts}
 
@@ -276,7 +298,7 @@ class MediaDb:
         removed = 0
         while True:
             now = time.time()
-            next_lease_until = now + 60
+            next_lease_until = now + float(lease.get("lease_seconds") or 60)
             with self.transaction() as session:
                 if not self.sync_lease_is_current(lease, session=session):
                     raise RuntimeError("媒体同步租约已失效，停止代次清理")

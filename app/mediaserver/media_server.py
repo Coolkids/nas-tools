@@ -16,6 +16,8 @@ server_lock = threading.Lock()
 
 _MEDIA_SYNC_BATCH_ROWS = 500
 _MEDIA_SYNC_BATCH_BYTES = 4 * 1024 * 1024
+_MEDIA_SYNC_LEASE_SECONDS = 3600
+_MEDIA_SYNC_HEARTBEAT_SECONDS = 60
 
 
 def _media_sync_batches(items, max_rows=_MEDIA_SYNC_BATCH_ROWS,
@@ -274,7 +276,8 @@ class MediaServer:
             self.progress.start("mediasync")
             self.progress.update(ptype="mediasync", text="请稍候...")
             try:
-                lease = self.mediadb.acquire_sync_lease(self._server_type.value, lease_seconds=60)
+                lease = self.mediadb.acquire_sync_lease(
+                    self._server_type.value, lease_seconds=_MEDIA_SYNC_LEASE_SECONDS)
             except Exception:
                 log.error("【MediaServer】无法取得媒体同步租约，本次同步未启动")
                 self.progress.update(ptype="mediasync", text="无法开始媒体同步，请稍后重试")
@@ -291,8 +294,9 @@ class MediaServer:
 
             def renew_lease():
                 try:
-                    while not heartbeat_stop.wait(20):
-                        if not self.mediadb.renew_sync_lease(lease, lease_seconds=60):
+                    while not heartbeat_stop.wait(_MEDIA_SYNC_HEARTBEAT_SECONDS):
+                        if not self.mediadb.renew_sync_lease(
+                                lease, lease_seconds=_MEDIA_SYNC_LEASE_SECONDS):
                             heartbeat_lost.set()
                             return
                 except Exception:
@@ -344,7 +348,8 @@ class MediaServer:
                 if written_count != len(all_items):
                     raise RuntimeError("媒体新代次写入条数与拉取快照不一致")
                 if (heartbeat_lost.is_set()
-                        or not self.mediadb.renew_sync_lease(lease, lease_seconds=60)):
+                        or not self.mediadb.renew_sync_lease(
+                            lease, lease_seconds=_MEDIA_SYNC_LEASE_SECONDS)):
                     raise RuntimeError("媒体同步租约已失效，拒绝发布新代次")
                 publish_result = self.mediadb.publish_sync_generation(
                     lease, movie_count=movie_count, series_count=tv_count)
