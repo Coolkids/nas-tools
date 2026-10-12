@@ -29,6 +29,7 @@ from app.utils.storage_jobs import STORAGE_JOBS
 
 _BATCH_SIZE = 500
 _BATCH_BYTES = 8 * 1024 * 1024
+_CHECK_TTL_SECONDS = 600
 _JOB_KIND = "database_migration"
 _PREPARE_KIND = "database_target_prepare"
 _WORKERS = {}
@@ -514,6 +515,11 @@ def prepare_sqlite_migration_target(values):
         check = STORAGE_JOBS.get(check_id) if check_id else None
         if not check or check.get("kind") != _JOB_KIND or check.get("status") != "READY":
             raise ValueError("数据库检查已失效，请重新检查 SQLite 目标")
+        if time.time() - float(check.get("created_at") or 0) > _CHECK_TTL_SECONDS:
+            STORAGE_JOBS.update(check_id, status="CANCELLED", stage="EXPIRED",
+                                message="数据库检查凭证已过期，请重新检查",
+                                expected_status="READY")
+            raise ValueError("数据库检查凭证已过期，请重新检查 SQLite 目标")
         result = check.get("result") or {}
         if not result.get("target_preparation_required"):
             raise ValueError("当前检查结果不需要准备 SQLite 目标")

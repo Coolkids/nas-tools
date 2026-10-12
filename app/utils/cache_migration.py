@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 _WORKERS = {}
 _WORKERS_LOCK = threading.Lock()
+_CHECK_TTL_SECONDS = 600
 _STORAGE_FIELDS = tuple(key for key in DEFAULT_SETTINGS if key != "storage_generation")
 _EXCLUDED_CACHES = [
     {"name": "TokenCache", "reason": "认证令牌只保存在本机内存，重启后重新获取"},
@@ -420,11 +421,20 @@ def check_cache_storage(values):
             "cache_migration", {"fingerprint": fingerprint, "candidate": _safe_candidate(candidate)},
             idempotency_key=fingerprint)
         if not created and job.get("status") == "READY":
-            return {"check_id": job["job_id"], "unchanged": job.get("result", {}).get("unchanged", False),
-                    "same_store": job.get("result", {}).get("same_store", False),
-                    "source": job.get("result", {}).get("source"), "target": job.get("result", {}).get("target"),
-                    "summary": job.get("result", {}).get("summary", []),
-                    "excluded": _EXCLUDED_CACHES}
+            if time.time() - float(job.get("created_at") or 0) > _CHECK_TTL_SECONDS:
+                STORAGE_JOBS.update(job["job_id"], status="CANCELLED", stage="EXPIRED",
+                                    message="缓存目标检查已过期，请重新检查",
+                                    expected_status="READY")
+                job, created = STORAGE_JOBS.create(
+                    "cache_migration",
+                    {"fingerprint": fingerprint, "candidate": _safe_candidate(candidate)},
+                    idempotency_key=fingerprint)
+            else:
+                return {"check_id": job["job_id"], "unchanged": job.get("result", {}).get("unchanged", False),
+                        "same_store": job.get("result", {}).get("same_store", False),
+                        "source": job.get("result", {}).get("source"), "target": job.get("result", {}).get("target"),
+                        "summary": job.get("result", {}).get("summary", []),
+                        "excluded": _EXCLUDED_CACHES}
         if not created and job.get("status") not in TERMINAL_STATES:
             return {"code": 1, "msg": "相同缓存目标的检查任务正在运行"}
         try:
@@ -479,6 +489,11 @@ def start_cache_migration(values):
         job = STORAGE_JOBS.get(check_id) if check_id else None
         if not job or job.get("kind") != "cache_migration" or job.get("status") != "READY":
             raise ValueError("缓存目标检查已失效，请重新检查")
+        if time.time() - float(job.get("created_at") or 0) > _CHECK_TTL_SECONDS:
+            STORAGE_JOBS.update(check_id, status="CANCELLED", stage="EXPIRED",
+                                message="缓存目标检查已过期，请重新检查",
+                                expected_status="READY")
+            raise ValueError("缓存目标检查已过期，请重新检查")
         if not hmac.compare_digest(job["payload"].get("fingerprint", ""), _fingerprint(candidate)):
             raise ValueError("缓存连接参数已变化，请重新检查目标")
         if (job.get("result") or {}).get("unchanged"):
