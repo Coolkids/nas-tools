@@ -180,3 +180,35 @@ class MediaSyncSnapshotTest(TestCase):
         media_db.publish_sync_generation.assert_called_once_with(
             lease, movie_count=501, series_count=0)
         media_db.release_sync_lease.assert_called_once_with(lease, status="SUCCEEDED")
+
+    def test_published_generation_is_kept_when_old_generation_cleanup_stays_pending(self):
+        instance = MediaServer()
+        lease = {"server": "emby", "job_id": "job", "generation_id": "generation",
+                 "lease_token": 1, "expected_active_generation": "legacy"}
+        media_db = Mock()
+        media_db.acquire_sync_lease.return_value = lease
+        media_db.write_sync_batch.side_effect = lambda _lease, batch: len(batch)
+        media_db.publish_sync_generation.return_value = {"total_count": 1}
+        media_db.cleanup_sync_generations.side_effect = [
+            0, OSError("old generation is busy"), OSError("still busy"),
+            OSError("cleanup retry remains pending"),
+        ]
+        with patch.object(instance, "mediadb", media_db), \
+                patch.object(instance, "progress", Mock()), \
+                patch.object(instance, "_server_type", SimpleNamespace(value="emby")), \
+                patch.object(instance, "get_medias_count",
+                             return_value={"MovieCount": 1, "SeriesCount": 0}), \
+                patch.object(instance, "get_libraries",
+                             return_value=[{"id": "movies", "name": "电影"}]), \
+                patch.object(instance, "get_items", return_value=[{
+                    "id": "movie-1", "type": "Movie", "title": "电影 A"}]), \
+                patch("app.mediaserver.media_server.time.sleep"), \
+                patch("app.mediaserver.media_server.log.warn"):
+            instance.sync_mediaserver()
+
+        media_db.publish_sync_generation.assert_called_once_with(
+            lease, movie_count=1, series_count=0)
+        self.assertEqual(4, media_db.cleanup_sync_generations.call_count)
+        self.assertEqual([{}, {}, {}, {}], [call.kwargs
+                                            for call in media_db.cleanup_sync_generations.call_args_list])
+        media_db.release_sync_lease.assert_called_once_with(lease, status="CLEANUP_PENDING")

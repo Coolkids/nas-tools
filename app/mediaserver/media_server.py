@@ -358,7 +358,7 @@ class MediaServer:
                 try:
                     self.mediadb.release_sync_lease(lease, status=status)
                 except Exception:
-                    log.warning("【MediaServer】同步租约释放失败，将在过期后由后续任务接管")
+                    log.warn("【MediaServer】同步租约释放失败，将在过期后由后续任务接管")
 
             def cleanup_generations(**kwargs):
                 nonlocal cleanup_elapsed
@@ -409,7 +409,7 @@ class MediaServer:
                 try:
                     cleanup_generations(generation_id=lease["generation_id"])
                 except Exception:
-                    log.warning("【MediaServer】未发布代次清理失败，将由后续同步恢复")
+                    log.warn("【MediaServer】未发布代次清理失败，将由后续同步恢复")
                 finish_lease("FAILED")
                 log_sync_metrics()
                 self.progress.end("mediasync")
@@ -432,7 +432,7 @@ class MediaServer:
                 try:
                     cleanup_generations(generation_id=lease["generation_id"])
                 except Exception:
-                    log.warning("【MediaServer】未发布代次清理失败，将由后续同步恢复")
+                    log.warn("【MediaServer】未发布代次清理失败，将由后续同步恢复")
                 finish_lease("CLEANUP_PENDING" if published else "FAILED")
                 log_sync_metrics()
                 self.progress.update(ptype="mediasync", text="媒体库同步失败，旧索引保持可用")
@@ -455,7 +455,7 @@ class MediaServer:
                         time.sleep(2 ** attempt)
             if cleanup_error:
                 finish_lease("CLEANUP_PENDING")
-                log.warning("【MediaServer】新代次已发布，旧代次清理失败，保留待恢复状态")
+                log.warn("【MediaServer】新代次已发布，旧代次清理失败，保留待恢复状态")
             else:
                 finish_lease("SUCCEEDED")
             # 结束进度条
