@@ -1651,7 +1651,11 @@ def _import_backup_data(archive_path, connection, job_id, job_status,
         if delete_existing:
             for table in reversed(Base.metadata.sorted_tables):
                 connection.execute(table.delete())
-        expected_digests = {}
+        # Empty tables are part of a complete backup too; their digest is the
+        # SHA-256 of an empty stream and must be compared during restore.
+        expected_digests = {
+            table.name: hashlib.sha256() for table in Base.metadata.sorted_tables
+        }
         for index, table in enumerate(Base.metadata.sorted_tables, start=1):
             details = manifest["tables"][table.name]
             digest = hashlib.sha256()
@@ -1673,7 +1677,6 @@ def _import_backup_data(archive_path, connection, job_id, job_status,
                     encoded = json.dumps(
                         [_normalize_value(row[column.name]) for column in table.columns],
                         ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-                    expected_digests.setdefault(table.name, hashlib.sha256())
                     expected_digests[table.name].update(
                         encoded.encode("utf-8", "surrogatepass") + b"\n")
                     batch.append(row)
