@@ -36,12 +36,12 @@ def sigal_handler(num, stack):
     """
     信号处理
     """
+    log.warn('捕捉到退出信号：%s，开始退出...' % num)
     if SystemUtils.is_docker():
-        log.warn('捕捉到退出信号：%s，开始退出...' % num)
         # 停止虚拟显示
         DisplayHelper().quit()
-        # 退出主进程
-        sys.exit()
+    # 退出主进程；直接运行和容器运行都必须尊重停止/重启信号。
+    sys.exit(0)
 
 
 def get_run_config():
