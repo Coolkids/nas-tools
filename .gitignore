@@ -18,14 +18,11 @@ gen/
 .DS_Store
 config/tmdb.dat
 /config/system.sqlite3*
-/config/cache/system.sqlite3*
 /config/cache/
-
-### Vue3 新前端 (web2) ###
-web2/node_modules
-web2/dist
-web2/.vite
-web2/*.tsbuildinfo
+/config/db/
+/config/temp/
 *.db-shm
 *.db-wal
 /config/.secret_key
+todo.md
+docs/
