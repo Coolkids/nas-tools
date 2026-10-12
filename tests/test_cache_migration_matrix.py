@@ -125,6 +125,8 @@ def test_all_directed_cache_backend_migrations_preserve_data_and_restart_order(
         "TokenCache", "ConfigLoadCache"}
     check_id = checked["check_id"]
     assert config.config["cache"]["backend"] == source_backend
+    if source_backend == "memory" and target_backend == "memory_disk":
+        assert not (tmp_path / "cache" / "system.sqlite3").exists()
 
     started = cache_migration.start_cache_migration({**submitted, "check_id": check_id})
     assert started["code"] == 0, started
@@ -257,10 +259,10 @@ def test_migration_reports_entries_expiring_after_snapshot_and_keeps_large_ai_pa
         return original_manifest(job_id, snapshot_path, source_status)
 
     monkeypatch.setattr(cache_migration, "_write_snapshot_manifest", expire_snapshot_entry)
-    request = cache_migration.check_cache_storage({"backend": "memory_disk"})
-    assert "code" not in request, request
+    checked = cache_migration.check_cache_storage({"backend": "memory_disk"})
+    assert "code" not in checked, checked
     started = cache_migration.start_cache_migration({"backend": "memory_disk",
-                                                     "check_id": request["check_id"]})
+                                                     "check_id": checked["check_id"]})
     assert started["code"] == 0, started
     job_id = started["job_id"]
     deadline = time.monotonic() + 30
@@ -291,3 +293,112 @@ def test_migration_reports_entries_expiring_after_snapshot_and_keeps_large_ai_pa
     assert restored_ai == ("large-ai-response", {"response": large_response}, None)
     assert jobs.get(job_id)["status"] == "SUCCEEDED"
     assert restart_calls == ["scheduled"]
+
+
+def test_config_save_failure_rolls_back_sqlite_target_and_unfreezes_source(
+        tmp_path, monkeypatch, request, cache_migration_environment):
+    config, jobs, restart_calls = cache_migration_environment
+    source_settings = {**DEFAULT_SETTINGS, "backend": "memory"}
+    config.config["cache"] = dict(source_settings)
+    source_store = CacheStore(path=str(tmp_path / "cache"), settings=source_settings)
+    request.addfinalizer(source_store.close)
+    monkeypatch.setattr(cache_migration, "STORE", source_store)
+    monkeypatch.setattr(cache_backend, "STORE", source_store)
+    source_store.initialize()
+    source_store.put("recognition_tmdb", "source-data", {"title": "keep"})
+
+    checked = cache_migration.check_cache_storage({"backend": "memory_disk"})
+    assert "code" not in checked, checked
+
+    def fail_save(_config):
+        raise OSError("injected config save failure")
+
+    monkeypatch.setattr(config, "save_config", fail_save)
+    started = cache_migration.start_cache_migration({"backend": "memory_disk",
+                                                     "check_id": checked["check_id"]})
+    assert started["code"] == 0, started
+    worker = cache_migration._WORKERS.get(started["job_id"])
+    assert worker is not None
+    worker.join(timeout=30)
+
+    job = jobs.get(started["job_id"])
+    assert job["status"] == "FAILED", job
+    assert config.config["cache"]["backend"] == "memory"
+    assert source_store.get("recognition_tmdb", "source-data")[1] == {"title": "keep"}
+    assert not source_store.status()["maintenance"]
+    assert jobs.maintenance_gate("cache") is None
+    assert not (tmp_path / "cache" / "system.sqlite3").exists()
+    assert restart_calls == []
+
+
+def test_restart_request_failure_keeps_committed_configuration_pending_for_retry(
+        tmp_path, monkeypatch, request, cache_migration_environment):
+    config, jobs, _restart_calls = cache_migration_environment
+    source_settings = {**DEFAULT_SETTINGS, "backend": "memory"}
+    config.config["cache"] = dict(source_settings)
+    source_store = CacheStore(path=str(tmp_path / "cache"), settings=source_settings)
+    request.addfinalizer(source_store.close)
+    monkeypatch.setattr(cache_migration, "STORE", source_store)
+    monkeypatch.setattr(cache_backend, "STORE", source_store)
+    source_store.initialize()
+    source_store.put("recognition_tmdb", "source-data", {"title": "keep"})
+
+    checked = cache_migration.check_cache_storage({"backend": "memory_disk"})
+    assert "code" not in checked, checked
+    restart_attempts = []
+
+    def fail_restart():
+        restart_attempts.append("failed")
+        raise OSError("injected restart request failure")
+
+    monkeypatch.setattr(cache_migration, "_schedule_restart", fail_restart)
+    started = cache_migration.start_cache_migration({"backend": "memory_disk",
+                                                     "check_id": checked["check_id"]})
+    assert started["code"] == 0, started
+    worker = cache_migration._WORKERS.get(started["job_id"])
+    assert worker is not None
+    worker.join(timeout=30)
+
+    job = jobs.get(started["job_id"])
+    assert job["status"] == "RESTART_PENDING", job
+    assert config.config["cache"]["backend"] == "memory_disk"
+    assert jobs.maintenance_gate("cache")["job_id"] == started["job_id"]
+    assert source_store.status()["maintenance"]
+    assert restart_attempts == ["failed"]
+
+    retried = []
+    monkeypatch.setattr(cache_migration, "_schedule_restart", lambda: retried.append("scheduled"))
+    assert cache_migration.retry_cache_restart(started["job_id"])
+    assert retried == ["scheduled"]
+
+
+def test_cancellation_before_snapshot_preserves_source_and_releases_maintenance_gate(
+        tmp_path, monkeypatch, request, cache_migration_environment):
+    config, jobs, restart_calls = cache_migration_environment
+    source_settings = {**DEFAULT_SETTINGS, "backend": "memory"}
+    config.config["cache"] = dict(source_settings)
+    source_store = CacheStore(path=str(tmp_path / "cache"), settings=source_settings)
+    request.addfinalizer(source_store.close)
+    monkeypatch.setattr(cache_migration, "STORE", source_store)
+    monkeypatch.setattr(cache_backend, "STORE", source_store)
+    source_store.initialize()
+    source_store.put("recognition_tmdb", "source-data", {"title": "keep"})
+
+    checked = cache_migration.check_cache_storage({"backend": "memory_disk"})
+    assert "code" not in checked, checked
+    monkeypatch.setattr(jobs, "cancel_requested", lambda _job_id: True)
+    started = cache_migration.start_cache_migration({"backend": "memory_disk",
+                                                     "check_id": checked["check_id"]})
+    assert started["code"] == 0, started
+    worker = cache_migration._WORKERS.get(started["job_id"])
+    assert worker is not None
+    worker.join(timeout=30)
+
+    job = jobs.get(started["job_id"])
+    assert job["status"] == "CANCELLED", job
+    assert config.config["cache"]["backend"] == "memory"
+    assert source_store.get("recognition_tmdb", "source-data")[1] == {"title": "keep"}
+    assert jobs.maintenance_gate("cache") is None
+    assert not source_store.status()["maintenance"]
+    assert not (tmp_path / "cache" / "system.sqlite3").exists()
+    assert restart_calls == []

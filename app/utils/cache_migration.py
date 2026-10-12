@@ -600,22 +600,23 @@ def check_cache_storage(values):
                           if candidate["backend"] == "memory_disk" and not same_store else None)
             try:
                 target_status = _probe(candidate, path=probe_path)
+                target_counts = {}
+                if not same_store and not unchanged:
+                    target_settings = dict(candidate)
+                    if candidate["backend"] in {"redis", "valkey"}:
+                        target_settings["storage_generation"] = job["job_id"]
+                    target_store = CacheStore(path=probe_path, settings=target_settings)
+                    try:
+                        for namespace in CACHE_NAMESPACE_REGISTRY:
+                            target_counts[namespace] = target_store.memory_info(namespace).get(
+                                "entries", 0)
+                    finally:
+                        target_store.close()
+                    if any(target_counts.values()):
+                        raise ValueError("目标缓存已有应用数据；请先使用空目标或清理目标缓存")
             finally:
                 if probe_path:
                     shutil.rmtree(_snapshot_directory(job["job_id"]), ignore_errors=True)
-            target_counts = {}
-            if not same_store and not unchanged:
-                target_settings = dict(candidate)
-                if candidate["backend"] in {"redis", "valkey"}:
-                    target_settings["storage_generation"] = job["job_id"]
-                target_store = CacheStore(settings=target_settings)
-                try:
-                    for namespace in CACHE_NAMESPACE_REGISTRY:
-                        target_counts[namespace] = target_store.memory_info(namespace).get("entries", 0)
-                finally:
-                    target_store.close()
-                if any(target_counts.values()):
-                    raise ValueError("目标缓存已有应用数据；请先使用空目标或清理目标缓存")
             summary = [{"namespace": name, "entries": count}
                        for name, count in source_counts.items() if count]
             result = {"unchanged": unchanged, "same_store": same_store, "source": source_status,
@@ -699,13 +700,9 @@ def _run_migration(job_id, candidate):
                 raise ValueError("源缓存代次已变化，请重新检查目标")
             _probe(candidate, path=target_path)
             if not same_store:
-                target_to_check = (CacheStore(settings=candidate)
-                                   if staged_sqlite else target)
                 for namespace in CACHE_NAMESPACE_REGISTRY:
-                    if target_to_check.memory_info(namespace).get("entries", 0):
+                    if target.memory_info(namespace).get("entries", 0):
                         raise ValueError("目标缓存检查后出现新数据，请重新检查目标")
-                if staged_sqlite:
-                    target_to_check.close()
             STORAGE_JOBS.update(job_id, status="SNAPSHOTTING", stage="SNAPSHOTTING",
                                 message="正在冻结并读取缓存快照", progress=0)
             snapshot_path = _snapshot_path(job_id)
