@@ -1,8 +1,5 @@
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
-
 from alembic import context
 
 from app.db.models import Base
@@ -53,11 +50,11 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """Run migrations in 'online' mode.
+    """Use the connection owned by the application database manager.
 
-    In this scenario we need to create an Engine
-    and associate a connection with the context.
-
+    Creating an engine here would bypass the shared pool, connection hooks and
+    maintenance gate, and could silently upgrade a different database from the
+    one used by the running application.
     """
     def run_with_connection(connection):
         context.configure(
@@ -68,17 +65,11 @@ def run_migrations_online() -> None:
             context.run_migrations()
 
     supplied_connection = config.attributes.get("connection")
-    if supplied_connection is not None:
-        run_with_connection(supplied_connection)
-        return
-
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
-    with connectable.connect() as connection:
-        run_with_connection(connection)
+    if supplied_connection is None:
+        raise RuntimeError(
+            "在线数据库升级必须使用 DatabaseManager 提供的活动连接"
+        )
+    run_with_connection(supplied_connection)
 
 
 if context.is_offline_mode():
