@@ -117,8 +117,126 @@ def _target_cache_directory(job_id):
 
 def _snapshot_path(job_id):
     directory = _snapshot_directory(job_id)
-    os.makedirs(directory, exist_ok=True)
+    os.makedirs(os.path.dirname(directory), mode=0o700, exist_ok=True)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    for private_directory in (os.path.dirname(directory), directory):
+        try:
+            os.chmod(private_directory, 0o700)
+        except OSError:
+            pass
     return os.path.join(directory, "snapshot.sqlite3")
+
+
+def _snapshot_manifest_path(job_id):
+    return os.path.join(_snapshot_directory(job_id), "snapshot.complete.json")
+
+
+def _validate_snapshot_database(path):
+    if not os.path.isfile(path):
+        raise ValueError("缓存快照文件缺失")
+    uri = f"file:{os.path.abspath(path)}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, timeout=10)
+    try:
+        check = connection.execute("PRAGMA integrity_check").fetchone()
+        if not check or check[0] != "ok":
+            raise ValueError("缓存快照 SQLite 完整性检查失败")
+        known_namespaces = {row[0] for row in connection.execute(
+            "SELECT DISTINCT namespace FROM cache_entries_v2").fetchall()}
+        if not known_namespaces.issubset(set(CACHE_NAMESPACE_REGISTRY)):
+            raise ValueError("缓存快照包含未知命名空间")
+    except sqlite3.DatabaseError as error:
+        raise ValueError("缓存快照数据库损坏") from error
+    finally:
+        connection.close()
+
+
+def _snapshot_namespace_digest(path, namespace):
+    """Hash every committed snapshot row, including rows that expired since capture."""
+    if not os.path.isfile(path):
+        raise ValueError("缓存快照文件缺失")
+    uri = f"file:{os.path.abspath(path)}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, timeout=10)
+    try:
+        cursor = connection.execute(
+            "SELECT cache_key, payload, expires FROM cache_entries_v2 "
+            "WHERE namespace=? ORDER BY cache_key", (namespace,))
+        def records():
+            while True:
+                rows = cursor.fetchmany(500)
+                if not rows:
+                    break
+                for cache_key, payload, expires in rows:
+                    record = _SQLiteCache._decode(payload)
+                    if (CacheStore._key(record[0]) != cache_key or record[2] != expires):
+                        raise ValueError(f"缓存快照命名空间 {namespace} 的记录结构无效")
+                    yield record
+
+        return _record_digest(records(), now=float("-inf"))
+    except sqlite3.DatabaseError as error:
+        raise ValueError("缓存快照数据库损坏") from error
+    finally:
+        connection.close()
+
+
+def _write_snapshot_manifest(job_id, snapshot_path, source_status):
+    _checkpoint_sqlite(snapshot_path)
+    for suffix in ("-wal", "-shm"):
+        try:
+            os.unlink(snapshot_path + suffix)
+        except FileNotFoundError:
+            pass
+    try:
+        os.chmod(snapshot_path, 0o600)
+    except OSError:
+        pass
+    _validate_snapshot_database(snapshot_path)
+    namespaces = {name: _snapshot_namespace_digest(snapshot_path, name)
+                  for name in CACHE_NAMESPACE_REGISTRY}
+    manifest = {"version": 1, "job_id": job_id,
+                "source": {key: source_status.get(key)
+                           for key in ("active_backend", "generation", "config_generation")},
+                "namespaces": namespaces}
+    path = _snapshot_manifest_path(job_id)
+    temporary = path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as stream:
+        json.dump(manifest, stream, ensure_ascii=False, sort_keys=True)
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        os.chmod(temporary, 0o600)
+    except OSError:
+        pass
+    os.replace(temporary, path)
+    _fsync_directory(os.path.dirname(path))
+    return manifest
+
+
+def _validate_snapshot_manifest(job_id, snapshot_path, expected_source=None):
+    path = _snapshot_manifest_path(job_id)
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            manifest = json.load(stream)
+    except (OSError, ValueError) as error:
+        raise ValueError("缓存完整快照清单缺失或损坏，无法恢复内存缓存") from error
+    if (not isinstance(manifest, dict) or manifest.get("version") != 1
+            or manifest.get("job_id") != job_id
+            or not isinstance(manifest.get("namespaces"), dict)
+            or set(manifest["namespaces"]) != set(CACHE_NAMESPACE_REGISTRY)):
+        raise ValueError("缓存完整快照清单不完整，无法恢复内存缓存")
+    manifest_source = manifest.get("source") or {}
+    if manifest_source.get("active_backend") not in {"memory", "memory_disk", "redis", "valkey"}:
+        raise ValueError("缓存快照来源后端无效")
+    if expected_source:
+        for key in ("active_backend", "generation", "config_generation"):
+            expected = expected_source.get(key)
+            if expected is not None and manifest_source.get(key) != expected:
+                raise ValueError("缓存快照代次与迁移任务不匹配")
+    _validate_snapshot_database(snapshot_path)
+    for namespace in CACHE_NAMESPACE_REGISTRY:
+        actual = _snapshot_namespace_digest(snapshot_path, namespace)
+        if actual != manifest["namespaces"].get(namespace):
+            raise ValueError(f"缓存快照命名空间 {namespace} 不完整")
+    return manifest
 
 
 def _write_snapshot_namespace(path, namespace, records):
@@ -589,6 +707,7 @@ def _run_migration(job_id, candidate):
                     or any(snapshot_status.get(key) != source_status.get(key)
                            for key in ("active_backend", "generation", "config_generation"))):
                 raise ValueError("读取快照期间源缓存后端发生变化，不能确认完整源数据")
+            _write_snapshot_manifest(job_id, snapshot_path, source_status)
             total = sum(snapshot_counts.values())
             STORAGE_JOBS.update(job_id, stage="SNAPSHOTTING",
                                 result={"source": source_status, "snapshot_path": snapshot_path},
@@ -771,6 +890,92 @@ def retry_cache_restart(job_id):
     return True
 
 
+def _job_source_backend(job):
+    result = job.get("result") or {}
+    source = result.get("source")
+    if isinstance(source, dict):
+        return source.get("active_backend"), source
+    return result.get("source_backend"), None
+
+
+def _restore_interrupted_memory_snapshot(job):
+    result = job.get("result") or {}
+    expected_path = os.path.abspath(os.path.join(_snapshot_directory(job["job_id"]),
+                                                  "snapshot.sqlite3"))
+    snapshot_path = result.get("snapshot_path") or expected_path
+    if os.path.abspath(snapshot_path) != expected_path:
+        raise ValueError("缓存快照路径与任务不匹配")
+    source_backend, source_status = _job_source_backend(job)
+    if source_backend != "memory":
+        raise ValueError("缓存迁移源后端信息缺失，无法安全恢复")
+    _validate_snapshot_manifest(job["job_id"], expected_path,
+                                source_status or {"active_backend": source_backend})
+
+    current = STORE.status()
+    if (current.get("fallback") or current.get("active_backend") != "memory"
+            or current.get("configured_backend") != "memory"):
+        raise ValueError("当前缓存配置已变化，无法恢复原内存缓存")
+
+    # Startup runs behind the persistent maintenance gate, so no business writes can
+    # race this exact replacement of the process-local cache contents.
+    for namespace in CACHE_NAMESPACE_REGISTRY:
+        STORE.clear(namespace)
+    for namespace in CACHE_NAMESPACE_REGISTRY:
+        batch = []
+        for key, value, expires in _snapshot_records(expected_path, namespace):
+            if expires is not None and expires <= time.time():
+                continue
+            batch.append((key, value, expires))
+            if len(batch) == 500:
+                STORE.put_many(namespace, batch)
+                batch.clear()
+        if batch:
+            STORE.put_many(namespace, batch)
+
+    for namespace in CACHE_NAMESPACE_REGISTRY:
+        validation_time = time.time()
+        expected = _record_digest(_snapshot_records(expected_path, namespace), validation_time)
+        actual = _record_digest(STORE.iter_records(namespace, strict=True), validation_time)
+        if actual != expected:
+            validation_time = time.time()
+            expected = _record_digest(_snapshot_records(expected_path, namespace), validation_time)
+            actual = _record_digest(STORE.iter_records(namespace, strict=True), validation_time)
+        if actual != expected:
+            raise ValueError(f"恢复后的内存缓存校验失败：{namespace}")
+
+
+def _keep_cache_job_in_recovery(job_id, error, message):
+    gate = STORAGE_JOBS.maintenance_gate("cache")
+    if gate is None:
+        STORAGE_JOBS.set_maintenance_gate("cache", job_id, "RECOVERY_REQUIRED")
+    elif gate.get("job_id") != job_id:
+        raise RuntimeError("缓存维护闸门属于另一项任务，保持维护状态")
+    STORE.freeze()
+    STORAGE_JOBS.update(job_id, status="RECOVERY_REQUIRED", stage="RECOVERY_REQUIRED",
+                        error=_safe_error(error), message=message)
+
+
+def _finish_uncommitted_cache_job(job, terminal_status, message):
+    job_id = job["job_id"]
+    try:
+        _rollback_sqlite_target(job_id, job.get("result") or {})
+        source_backend, _source_status = _job_source_backend(job)
+        if source_backend == "memory":
+            _restore_interrupted_memory_snapshot(job)
+            message = "配置提交前进程中断；已从完整快照恢复原内存缓存"
+        elif source_backend not in {"memory_disk", "redis", "valkey"}:
+            raise ValueError("无法确认缓存迁移源后端，拒绝清理恢复数据")
+    except Exception as error:
+        _keep_cache_job_in_recovery(job_id, error,
+                                    "缓存迁移源数据无法安全恢复，系统保持维护状态")
+        raise RuntimeError("缓存迁移恢复失败，系统保持维护状态") from error
+    STORAGE_JOBS.update(job_id, status=terminal_status, stage=terminal_status,
+                        message=message)
+    _remove_job_staging(job_id)
+    STORAGE_JOBS.clear_maintenance_gate("cache", job_id)
+    STORE.unfreeze()
+
+
 def recover_cache_migration(job_id):
     job = STORAGE_JOBS.get(job_id)
     if not job or job.get("kind") != "cache_migration" or job.get("status") != "RECOVERY_REQUIRED":
@@ -780,6 +985,16 @@ def recover_cache_migration(job_id):
             job = STORAGE_JOBS.get(job_id)
             if not job or job.get("status") != "RECOVERY_REQUIRED":
                 return False
+            source_backend, _source_status = _job_source_backend(job)
+            if source_backend == "memory":
+                _rollback_sqlite_target(job_id, job.get("result") or {})
+                _restore_interrupted_memory_snapshot(job)
+                STORAGE_JOBS.update(job_id, status="INTERRUPTED", stage="INTERRUPTED", error=None,
+                                    message="已从完整快照恢复原内存缓存，迁移任务中断")
+                _remove_job_staging(job_id)
+                STORAGE_JOBS.clear_maintenance_gate("cache", job_id)
+                STORE.unfreeze()
+                return True
             from config import Config
             current = _candidate(Config().get_config("cache") or {})
             expected = (job.get("result") or {}).get("fingerprint")
@@ -811,43 +1026,39 @@ def verify_cache_startup():
                 elif gate.get("job_id") != job["job_id"]:
                     raise RuntimeError("缓存维护闸门属于另一项任务，保持维护状态")
             if job.get("status") not in {"SAVING_CONFIG", "RESTART_PENDING", "VERIFYING_STARTUP"}:
-                try:
-                    _rollback_sqlite_target(job["job_id"], job.get("result") or {})
-                except Exception as error:
-                    STORAGE_JOBS.update(job["job_id"], status="RECOVERY_REQUIRED",
-                                        stage="RECOVERY_REQUIRED", error=_safe_error(error),
-                                        message="旧缓存布局恢复失败，系统保持维护状态")
-                    raise RuntimeError("缓存 SQLite 回滚失败，系统保持维护状态") from error
-                STORAGE_JOBS.update(job["job_id"], status="INTERRUPTED", stage="INTERRUPTED",
-                                    message="配置提交前进程中断；活动配置未确认变化")
-                _remove_job_staging(job["job_id"])
-                STORAGE_JOBS.clear_maintenance_gate("cache", job["job_id"])
+                _finish_uncommitted_cache_job(
+                    job, "INTERRUPTED", "配置提交前进程中断；活动配置未确认变化")
                 continue
             expected_fingerprint = (job.get("result") or {}).get("fingerprint")
             current = _candidate(Config().get_config("cache") or {})
             matches = expected_fingerprint and hmac.compare_digest(expected_fingerprint,
                                                                    _fingerprint(current))
             if not matches and job.get("status") == "SAVING_CONFIG":
-                try:
-                    _rollback_sqlite_target(job["job_id"], job.get("result") or {})
-                except Exception as error:
-                    STORAGE_JOBS.update(job["job_id"], status="RECOVERY_REQUIRED",
-                                        stage="RECOVERY_REQUIRED", error=_safe_error(error),
-                                        message="缓存目标回滚未完成，系统保持维护状态")
-                    raise RuntimeError("缓存 SQLite 回滚失败，系统保持维护状态") from error
-                STORAGE_JOBS.update(job["job_id"], status="FAILED", stage="FAILED",
-                                    message="配置保存前进程中断，活动配置保持原值")
-                _remove_job_staging(job["job_id"])
-                STORAGE_JOBS.clear_maintenance_gate("cache", job["job_id"])
+                _finish_uncommitted_cache_job(
+                    job, "FAILED", "配置保存前进程中断，活动配置保持原值")
                 continue
             if not matches:
                 raise RuntimeError("缓存迁移配置与待重启任务不匹配，保持维护状态")
             STORAGE_JOBS.update(job["job_id"], status="VERIFYING_STARTUP", stage="VERIFYING_STARTUP",
                                 message="新进程正在确认缓存目标")
             result = job.get("result") or {}
-            snapshot_path = result.get("snapshot_path")
-            if not snapshot_path or not os.path.isfile(snapshot_path):
+            expected_snapshot_path = os.path.abspath(os.path.join(
+                _snapshot_directory(job["job_id"]), "snapshot.sqlite3"))
+            snapshot_path = result.get("snapshot_path") or expected_snapshot_path
+            if (os.path.abspath(snapshot_path) != expected_snapshot_path
+                    or not os.path.isfile(snapshot_path)):
                 raise RuntimeError("缓存迁移快照缺失，保持维护状态")
+            source_backend, source_status = _job_source_backend(job)
+            if source_backend not in {"memory", "memory_disk", "redis", "valkey"}:
+                raise RuntimeError("缓存迁移源后端信息缺失，保持维护状态")
+            try:
+                _validate_snapshot_manifest(
+                    job["job_id"], snapshot_path,
+                    source_status or {"active_backend": source_backend})
+            except Exception as error:
+                _keep_cache_job_in_recovery(job["job_id"], error,
+                                            "缓存迁移快照完整性无法确认，系统保持维护状态")
+                raise RuntimeError("缓存迁移快照校验失败，系统保持维护状态") from error
             if current["backend"] == "memory":
                 for namespace in CACHE_NAMESPACE_REGISTRY:
                     batch = []
