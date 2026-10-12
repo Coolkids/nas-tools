@@ -112,6 +112,17 @@ class SQLiteBackend(DatabaseBackend):
         finally:
             connection.close()
 
+    def checkpoint(self, engine, mode="PASSIVE"):
+        mode = str(mode or "PASSIVE").upper()
+        if mode not in {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}:
+            raise ValueError("SQLite WAL checkpoint 模式无效")
+        with engine.connect() as connection:
+            result = connection.exec_driver_sql(
+                f"PRAGMA wal_checkpoint({mode})").one()
+        busy, log_frames, checkpointed_frames = (int(value) for value in result)
+        return {"busy": busy, "log_frames": log_frames,
+                "checkpointed_frames": checkpointed_frames}
+
     def upsert_many(self, session, model, rows, conflict_columns, update_columns=None):
         if not rows:
             return 0

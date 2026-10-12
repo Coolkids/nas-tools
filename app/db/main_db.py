@@ -106,16 +106,8 @@ class MainDb:
         with STORAGE_JOBS.maintenance_lock(exclusive=False):
             if STORAGE_JOBS.maintenance_gate("database"):
                 return
-            if DATABASE.backend.name != "sqlite":
-                return
-            with DATABASE.engine.connect() as conn:
-                busy, log_frames, checkpointed_frames = conn.execute(
-                    text("PRAGMA wal_checkpoint(PASSIVE)")).one()
-                result = {
-                    "busy": int(busy),
-                    "log_frames": int(log_frames),
-                    "checkpointed_frames": int(checkpointed_frames),
-                }
+            result = DATABASE.checkpoint("PASSIVE")
+            if result is not None:
                 if result["busy"] or (
                         result["log_frames"] >= 0
                         and result["checkpointed_frames"] < result["log_frames"]):

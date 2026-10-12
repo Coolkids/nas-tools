@@ -123,6 +123,10 @@ class DatabaseBackend:
     def reclaim_space(self, engine):
         raise NotImplementedError(f"{self.name} 不支持空间回收")
 
+    def checkpoint(self, engine, mode="PASSIVE"):
+        """执行后端支持的低干扰日志维护；默认后端无需处理。"""
+        return None
+
     @staticmethod
     def _portable_rows(session, model, rows, conflict_columns):
         """为跨数据库长唯一键生成确定性摘要，并在碰撞时拒绝覆盖。"""

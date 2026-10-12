@@ -30,10 +30,7 @@ class MediaDb:
 
     @staticmethod
     def wal_checkpoint():
-        if DATABASE.backend.name != "sqlite":
-            return
-        with DATABASE.engine.connect() as conn:
-            conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+        return DATABASE.checkpoint("PASSIVE")
 
     def insert(self, server_type, iteminfo):
         if not server_type or not iteminfo:

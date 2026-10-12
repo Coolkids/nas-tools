@@ -350,6 +350,9 @@ class DatabaseManager:
             raise ValueError("当前数据库不支持空间回收")
         self.backend.reclaim_space(self.engine)
 
+    def checkpoint(self, mode="PASSIVE"):
+        return self.backend.checkpoint(self.engine, mode)
+
     def is_retryable_transaction_error(self, error):
         if not isinstance(error, DBAPIError):
             return False
