@@ -34,7 +34,8 @@ class DbHelper:
 
     @classmethod
     def _json_dumps(cls, value):
-        return json.dumps(value or {}, ensure_ascii=False, default=cls._json_default)
+        return json.dumps({} if value is None else value, ensure_ascii=False,
+                          default=cls._json_default)
 
     @staticmethod
     def recognition_summary(payload):
@@ -72,6 +73,30 @@ class DbHelper:
             "actions": [{key: item.get(key) for key in ("sequence", "action_type", "status")}
                         for item in (payload.get("actions") or [])],
         }
+
+    def _save_recognition_action_index(self, request_id, action_types):
+        action_ids = {action_type: portable_key_digest((request_id, action_type))
+                      for action_type in action_types}
+        identities = {}
+        for action_type, action_id in action_ids.items():
+            identity = (request_id, action_type)
+            previous = identities.setdefault(action_id, identity)
+            if previous != identity:
+                raise ValueError("识别动作摘要冲突，拒绝覆盖不同记录")
+        existing_actions = {row.ID: (row.REQUEST_ID, row.ACTION_TYPE)
+                            for row in self._db.query(RECOGNITIONREQUESTACTION).filter(
+                                RECOGNITIONREQUESTACTION.ID.in_(list(action_ids.values()))).all()}
+        rows = []
+        for action_type, action_id in action_ids.items():
+            existing = existing_actions.get(action_id)
+            if existing and existing != (request_id, action_type):
+                raise ValueError("识别动作摘要冲突，拒绝覆盖不同记录")
+            if existing:
+                continue
+            rows.append(RECOGNITIONREQUESTACTION(
+                ID=action_id, REQUEST_ID=request_id, ACTION_TYPE=action_type,
+                ACTION_HASH=portable_key_digest((action_type,))))
+        self._db.insert_many(RECOGNITIONREQUESTACTION, rows)
 
     @staticmethod
     def release_session():
@@ -244,6 +269,8 @@ class DbHelper:
         if self._db.query(RECOGNITIONREQUEST).filter(
                 RECOGNITIONREQUEST.REQUEST_ID == request_id).first():
             return request_id
+        projection = recognition_search_projection(
+            payload.get("overall_result"), payload.get("actions"))
         request = RECOGNITIONREQUEST(
             REQUEST_ID=request_id,
             ORIGINAL_NAME=payload.get("original_name"),
@@ -251,6 +278,12 @@ class DbHelper:
             STAGE=payload.get("stage"),
             CREATED_AT=payload.get("created_at"),
             SUMMARY=self._json_dumps(self.recognition_summary(payload)),
+            STATUS_SUMMARY=projection["STATUS_SUMMARY"],
+            BUSINESS_STATUS_SUMMARY=projection["BUSINESS_STATUS_SUMMARY"],
+            REASON_SUMMARY=projection["REASON_SUMMARY"],
+            REASON_HASH=projection["REASON_HASH"],
+            BUSINESS_REASON_SUMMARY=projection["BUSINESS_REASON_SUMMARY"],
+            BUSINESS_REASON_HASH=projection["BUSINESS_REASON_HASH"],
             CONTEXT=self._json_dumps(payload.get("context")),
             ACTIONS=self._json_dumps(payload.get("actions")),
             PROVIDER_RESULTS=self._json_dumps(payload.get("provider_results")),
@@ -273,6 +306,7 @@ class DbHelper:
                 ELAPSED_MS=result.get("elapsed_ms"),
             ))
         self._db.insert_many(RECOGNITIONATTEMPT, attempts)
+        self._save_recognition_action_index(request_id, projection["ACTION_TYPES"])
         return request_id
 
     @DbPersist(_db)
@@ -331,6 +365,14 @@ class DbHelper:
         request.PROVIDER_RESULTS = self._json_dumps(attempts)
         request.OVERALL_RESULT = self._json_dumps(overall)
         request.SUMMARY = self._json_dumps(self.recognition_summary(payload))
+        projection = recognition_search_projection(overall, actions)
+        request.STATUS_SUMMARY = projection["STATUS_SUMMARY"]
+        request.BUSINESS_STATUS_SUMMARY = projection["BUSINESS_STATUS_SUMMARY"]
+        request.REASON_SUMMARY = projection["REASON_SUMMARY"]
+        request.REASON_HASH = projection["REASON_HASH"]
+        request.BUSINESS_REASON_SUMMARY = projection["BUSINESS_REASON_SUMMARY"]
+        request.BUSINESS_REASON_HASH = projection["BUSINESS_REASON_HASH"]
+        self._save_recognition_action_index(request_id, projection["ACTION_TYPES"])
 
         if update_ai_error:
             attempt_row = self._db.query(RECOGNITIONATTEMPT).filter(
@@ -354,9 +396,17 @@ class DbHelper:
         if source:
             query = query.filter(RECOGNITIONREQUEST.SOURCE == source)
         if status:
-            query = query.filter(RECOGNITIONREQUEST.OVERALL_RESULT.contains('"status": "' + status + '"'))
+            normalized_status = str(status).casefold()
+            query = query.filter(or_(
+                RECOGNITIONREQUEST.STATUS_SUMMARY == normalized_status,
+                RECOGNITIONREQUEST.BUSINESS_STATUS_SUMMARY == normalized_status))
         if reason:
-            query = query.filter(RECOGNITIONREQUEST.OVERALL_RESULT.contains('"reason": "' + reason + '"'))
+            reason_hash = portable_key_digest((str(reason),))
+            query = query.filter(or_(
+                and_(RECOGNITIONREQUEST.REASON_HASH == reason_hash,
+                     RECOGNITIONREQUEST.REASON_SUMMARY == reason),
+                and_(RECOGNITIONREQUEST.BUSINESS_REASON_HASH == reason_hash,
+                     RECOGNITIONREQUEST.BUSINESS_REASON_SUMMARY == reason)))
         if created_from:
             query = query.filter(RECOGNITIONREQUEST.CREATED_AT >= created_from)
         if created_to:
@@ -375,7 +425,12 @@ class DbHelper:
                 self._db.query(RECOGNITIONATTEMPT.REQUEST_ID)
                 .filter(RECOGNITIONATTEMPT.PROVIDER_ID == provider_id).distinct()))
         if action_type:
-            query = query.filter(RECOGNITIONREQUEST.ACTIONS.contains('"action_type": "' + action_type + '"'))
+            normalized_action = str(action_type).casefold()
+            query = query.filter(RECOGNITIONREQUEST.REQUEST_ID.in_(
+                self._db.query(RECOGNITIONREQUESTACTION.REQUEST_ID)
+                .filter(RECOGNITIONREQUESTACTION.ACTION_HASH ==
+                        portable_key_digest((normalized_action,)),
+                        RECOGNITIONREQUESTACTION.ACTION_TYPE == normalized_action)))
         total = query.count() if include_total else None
         records = query.order_by(RECOGNITIONREQUEST.CREATED_AT.desc(),
                                  RECOGNITIONREQUEST.REQUEST_ID.desc()) \
@@ -415,6 +470,9 @@ class DbHelper:
                 break
             self._db.query(RECOGNITIONATTEMPT).filter(
                 RECOGNITIONATTEMPT.REQUEST_ID.in_(request_ids)).delete(
+                    synchronize_session=False)
+            self._db.query(RECOGNITIONREQUESTACTION).filter(
+                RECOGNITIONREQUESTACTION.REQUEST_ID.in_(request_ids)).delete(
                     synchronize_session=False)
             deleted_count += self._db.query(RECOGNITIONREQUEST).filter(
                 RECOGNITIONREQUEST.REQUEST_ID.in_(request_ids)).delete(
@@ -522,6 +580,9 @@ class DbHelper:
                             return
                         self._db.query(RECOGNITIONATTEMPT).filter(
                             RECOGNITIONATTEMPT.REQUEST_ID.in_(batch_ids)).delete(
+                                synchronize_session=False)
+                        self._db.query(RECOGNITIONREQUESTACTION).filter(
+                            RECOGNITIONREQUESTACTION.REQUEST_ID.in_(batch_ids)).delete(
                                 synchronize_session=False)
                         deleted_count += self._db.query(RECOGNITIONREQUEST).filter(
                             RECOGNITIONREQUEST.REQUEST_ID.in_(batch_ids)).delete(

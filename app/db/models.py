@@ -1,5 +1,6 @@
 # coding: utf-8
 import hashlib
+import json
 
 from sqlalchemy import BigInteger, Column, Float, Index, Integer, String, Text, event, text
 from sqlalchemy.ext.declarative import declarative_base
@@ -24,6 +25,65 @@ def portable_key_digest(values):
         digest.update(len(encoded).to_bytes(8, "big"))
         digest.update(encoded)
     return digest.hexdigest()
+
+
+def recognition_search_projection(overall_result, actions):
+    """从完整结果中提取可索引筛选字段，原始 JSON 保持不变。"""
+    def decoded(value, expected_type):
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, json.JSONDecodeError) as error:
+                raise ValueError("识别记录 JSON 无法解析，拒绝静默丢失筛选数据") from error
+        if value is None:
+            return expected_type()
+        if expected_type is list and value == {}:
+            # 兼容旧版把空动作列表序列化为空对象的记录。
+            return []
+        if not isinstance(value, expected_type):
+            raise ValueError("识别记录 JSON 结构不符合筛选索引格式")
+        return value
+
+    overall = decoded(overall_result, dict)
+    business = overall.get("business_result")
+    if business is None:
+        business = {}
+    elif not isinstance(business, dict):
+        raise ValueError("识别业务结果 JSON 结构不符合筛选索引格式")
+
+    def status_value(value):
+        if value is None:
+            return None
+        result = str(value).casefold()
+        if len(result) > 64:
+            raise ValueError("识别状态超过 64 个字符，无法建立兼容索引")
+        return result
+
+    def reason_value(value):
+        if value is None:
+            return None, None
+        result = str(value)
+        return result, portable_key_digest((result,))
+
+    reason, reason_hash = reason_value(overall.get("reason"))
+    business_reason, business_reason_hash = reason_value(business.get("reason"))
+    action_values = set()
+    for item in decoded(actions, list):
+        if not isinstance(item, dict) or item.get("action_type") is None:
+            raise ValueError("识别动作 JSON 缺少动作类型，无法建立筛选索引")
+        action_type = str(item["action_type"]).casefold()
+        if len(action_type) > 256:
+            raise ValueError("识别动作类型超过 256 个字符，无法建立兼容索引")
+        action_values.add(action_type)
+    return {
+        "STATUS_SUMMARY": status_value(overall.get("status")),
+        "BUSINESS_STATUS_SUMMARY": status_value(business.get("status")),
+        "REASON_SUMMARY": reason,
+        "REASON_HASH": reason_hash,
+        "BUSINESS_REASON_SUMMARY": business_reason,
+        "BUSINESS_REASON_HASH": business_reason_hash,
+        "ACTION_TYPES": action_values,
+    }
 
 
 def _digest_default(*columns):
@@ -410,6 +470,12 @@ class AIRECOGNITIONRECORD(Base):
 class RECOGNITIONREQUEST(Base):
     """One media-name recognition call and its aggregated raw outcomes."""
     __tablename__ = 'RECOGNITION_REQUEST'
+    __table_args__ = (
+        Index('IDX_RECOG_STATUS_SUMMARY', 'STATUS_SUMMARY'),
+        Index('IDX_RECOG_BUSINESS_STATUS', 'BUSINESS_STATUS_SUMMARY'),
+        Index('IDX_RECOG_REASON_HASH', 'REASON_HASH'),
+        Index('IDX_RECOG_BUSINESS_REASON', 'BUSINESS_REASON_HASH'),
+    )
 
     REQUEST_ID = Column(String(128), primary_key=True)
     ORIGINAL_NAME = Column(Text, index=True)
@@ -417,6 +483,12 @@ class RECOGNITIONREQUEST(Base):
     STAGE = Column(Text)
     CREATED_AT = Column(Text, index=True)
     SUMMARY = Column(Text)
+    STATUS_SUMMARY = Column(String(64))
+    BUSINESS_STATUS_SUMMARY = Column(String(64))
+    REASON_SUMMARY = Column(Text)
+    REASON_HASH = Column(String(64))
+    BUSINESS_REASON_SUMMARY = Column(Text)
+    BUSINESS_REASON_HASH = Column(String(64))
     CONTEXT = deferred(Column(LargeText))
     ACTIONS = deferred(Column(LargeText))
     PROVIDER_RESULTS = deferred(Column(LargeText))
@@ -439,6 +511,20 @@ class RECOGNITIONATTEMPT(Base):
     TMDB_RESULTS = Column(LargeText)
     ERROR = Column(LargeText)
     ELAPSED_MS = Column(Integer)
+
+
+class RECOGNITIONREQUESTACTION(Base):
+    """将动作类型单独索引，避免扫描完整请求 JSON。"""
+    __tablename__ = 'RECOGNITION_REQUEST_ACTION'
+    __table_args__ = (
+        Index('IDX_RECOG_ACTION_HASH', 'ACTION_HASH'),
+        Index('IDX_RECOG_ACTION_REQUEST', 'REQUEST_ID'),
+    )
+
+    ID = Column(String(64), primary_key=True)
+    REQUEST_ID = Column(String(128), nullable=False)
+    ACTION_TYPE = Column(String(256), nullable=False)
+    ACTION_HASH = Column(String(64), nullable=False)
 
 
 class SYNCHISTORY(Base):

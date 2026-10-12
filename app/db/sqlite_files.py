@@ -268,7 +268,8 @@ def _upgrade_legacy_media_snapshot(path, config_path):
             known = {revision.revision for revision in script.walk_revisions()}
             if len(versions) != 1 or versions[0] not in known:
                 raise RuntimeError("旧媒体库结构版本无法识别，拒绝猜测升级路径")
-            if versions[0] not in {_MEDIA_UPGRADE_BASE, "f2a3b4c5d6e7", "f3a4b5c6d7e8"}:
+            if versions[0] not in {_MEDIA_UPGRADE_BASE, "f2a3b4c5d6e7", "f3a4b5c6d7e8",
+                                    "f4a5b6c7d8e9"}:
                 raise RuntimeError(f"旧媒体库结构版本不受支持：{versions[0]}")
     finally:
         connection.close()
@@ -395,6 +396,45 @@ def _copy_domain(connection, source_path, domain, expected_tables, excluded_tabl
                 raise RuntimeError(f"旧表 {table} 导入后摘要不一致")
     finally:
         _execute(connection, f"DETACH DATABASE {_quote(alias)}")
+
+
+def _backfill_recognition_search(connection):
+    """合并旧主库后回填识别筛选索引字段。"""
+    if "RECOGNITION_REQUEST" not in _table_names(connection):
+        return
+    from app.db.models import portable_key_digest, recognition_search_projection
+
+    last_request_id = None
+    while True:
+        statement = "SELECT REQUEST_ID, OVERALL_RESULT, ACTIONS FROM RECOGNITION_REQUEST"
+        parameters = ()
+        if last_request_id is not None:
+            statement += " WHERE REQUEST_ID > ?"
+            parameters = (last_request_id,)
+        statement += " ORDER BY REQUEST_ID LIMIT 500"
+        rows = _execute(connection, statement, parameters).fetchall()
+        if not rows:
+            break
+        for request_id, overall_result, actions in rows:
+            projection = recognition_search_projection(overall_result, actions)
+            _execute(connection, """UPDATE RECOGNITION_REQUEST SET
+                STATUS_SUMMARY=?, BUSINESS_STATUS_SUMMARY=?, REASON_SUMMARY=?, REASON_HASH=?,
+                BUSINESS_REASON_SUMMARY=?, BUSINESS_REASON_HASH=? WHERE REQUEST_ID=?""",
+                      (projection["STATUS_SUMMARY"], projection["BUSINESS_STATUS_SUMMARY"],
+                       projection["REASON_SUMMARY"], projection["REASON_HASH"],
+                       projection["BUSINESS_REASON_SUMMARY"],
+                       projection["BUSINESS_REASON_HASH"], request_id))
+            for action_type in projection["ACTION_TYPES"]:
+                action_id = portable_key_digest((request_id, action_type))
+                action_hash = portable_key_digest((action_type,))
+                existing = _execute(connection, """SELECT REQUEST_ID, ACTION_TYPE
+                    FROM RECOGNITION_REQUEST_ACTION WHERE ID=?""", (action_id,)).fetchone()
+                if existing and existing != (request_id, action_type):
+                    raise RuntimeError("识别动作摘要冲突，拒绝覆盖不同记录")
+                _execute(connection, """INSERT OR IGNORE INTO RECOGNITION_REQUEST_ACTION
+                    (ID, REQUEST_ID, ACTION_TYPE, ACTION_HASH) VALUES (?, ?, ?, ?)""",
+                          (action_id, request_id, action_type, action_hash))
+        last_request_id = rows[-1][0]
 
 
 def _write_completion(connection, job_id, sources):
@@ -561,6 +601,7 @@ def _prepare_sqlite_database():
                     # stale legacy lease must never block the first new sync.
                     _copy_domain(connection, media_snapshot, "media", expected_tables,
                                  excluded_tables={"MEDIASYNC_SYNC_JOBS"})
+                _backfill_recognition_search(connection)
                 head = current_schema_revision()
                 connection.exec_driver_sql(
                     "CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)")
