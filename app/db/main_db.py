@@ -2,7 +2,7 @@ import logging
 import os
 import threading
 import time
-from sqlalchemy import MetaData, Table, delete, inspect, text, update
+from sqlalchemy import text
 
 from app.db.models import Base
 from app.db.manager import DATABASE, TRANSACTION_DEPTH_KEY
@@ -67,36 +67,6 @@ class MainDb:
     def init_db():
         with lock:
             engine = DATABASE.engine
-            inspector = inspect(engine)
-            tables = {name.upper(): name for name in inspector.get_table_names()}
-            with engine.begin() as conn:
-                metadata = MetaData()
-                # 站点管理功能已移除，同时清理旧版本留下的数据表。
-                for table in ("SITE_STATISTICS_HISTORY", "SITE_USER_INFO_STATS",
-                              "SITE_USER_SEEDING_INFO", "SITE_FAVICON", "CONFIG_SITE"):
-                    actual_name = tables.get(table)
-                    if actual_name:
-                        Table(actual_name, metadata, autoload_with=conn).drop(conn, checkfirst=True)
-                # 订阅改为只保存索引器列表，清除旧版本保存的私有站点选择。
-                for table in ("RSS_MOVIES", "RSS_TVS"):
-                    actual_name = tables.get(table)
-                    columns = inspector.get_columns(actual_name) if actual_name else []
-                    rss_sites = next((column["name"] for column in columns
-                                      if column["name"].upper() == "RSS_SITES"), None)
-                    if actual_name and rss_sites:
-                        reflected = Table(actual_name, metadata, autoload_with=conn)
-                        conn.execute(update(reflected).values({reflected.c[rss_sites]: None}))
-                system_table = tables.get("SYSTEM_DICT")
-                system_columns = inspector.get_columns(system_table) if system_table else []
-                system_column_names = {column["name"].upper(): column["name"]
-                                       for column in system_columns}
-                if system_table and {"TYPE", "KEY"}.issubset(system_column_names):
-                    # 清理站点自动登录功能曾保存的账户凭据。
-                    reflected = Table(system_table, metadata, autoload_with=conn)
-                    conn.execute(delete(reflected).where(
-                        reflected.c[system_column_names["TYPE"]] == "SystemConfig",
-                        reflected.c[system_column_names["KEY"]].in_(
-                            ("CookieUserInfo", "CookieCloud"))))
             Base.metadata.create_all(engine)
         MainDb.wal_checkpoint()
 
