@@ -212,8 +212,7 @@ class Plex(_IMediaClient):
                            "library": item.librarySectionID,
                            "type": item.type,
                            "title": item.title,
-                           "year": item.year if hasattr(item, 'year') and item.year is not None else 2024,
-                           "json": str(item.__dict__)}
+                           "year": item.year if hasattr(item, 'year') and item.year is not None else 2024}
                 start_index += len(page)
                 if len(page) < page_size:
                     break

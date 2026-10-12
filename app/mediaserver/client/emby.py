@@ -493,8 +493,7 @@ class Emby(_IMediaClient):
                                "year": result.get("ProductionYear"),
                                "tmdbid": provider_ids.get("Tmdb"),
                                "imdbid": provider_ids.get("Imdb"),
-                               "path": result.get("Path"),
-                               "json": str(result)}
+                               "path": result.get("Path")}
                     elif "Folder" in item_type:
                         yield from self.get_items(result.get("Id"))
 

@@ -41,8 +41,8 @@ class MediaClientPaginationTest(TestCase):
         self.assertEqual(1, len(items))
         self.assertEqual({"id": "movie-1", "library": "movies", "type": "Movie",
                           "title": "电影", "originalTitle": None, "year": 2024,
-                          "tmdbid": "1", "imdbid": "tt1", "path": "/movies/film.mkv",
-                          "json": str(second_page[0])}, items[0])
+                          "tmdbid": "1", "imdbid": "tt1", "path": "/movies/film.mkv"},
+                         items[0])
         self.assertEqual(2, response.get_res.call_count)
         first_query = parse_qs(urlparse(response.get_res.call_args_list[0].args[0]).query)
         second_query = parse_qs(urlparse(response.get_res.call_args_list[1].args[0]).query)
