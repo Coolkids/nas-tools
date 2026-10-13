@@ -22,6 +22,15 @@ class DbHelper:
         return None if value is None else str(value)
 
     @staticmethod
+    def _optional_integer(value):
+        if value is None or not str(value).strip():
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    @staticmethod
     def _search_task_query(keyword):
         digest = portable_key_digest((keyword,))
         return DbHelper._db.query(SEARCHTASK).filter(
@@ -148,8 +157,8 @@ class DbHelper:
                     }),
                     RES_ORDER=media_item.res_order,
                     SIZE=StringUtils.str_filesize(int(media_item.size)),
-                    SEEDERS=media_item.seeders,
-                    PEERS=media_item.peers,
+                    SEEDERS=self._optional_integer(media_item.seeders),
+                    PEERS=self._optional_integer(media_item.peers),
                     SITE=media_item.site,
                     SITE_ORDER=media_item.site_order,
                     PAGEURL=media_item.page_url,
@@ -312,7 +321,7 @@ class DbHelper:
                 "NORMALIZED_RESULT": self._json_dumps(result.get("normalized_result")),
                 "TMDB_RESULTS": self._json_dumps(result.get("tmdb_results")),
                 "ERROR": result.get("error"),
-                "ELAPSED_MS": result.get("elapsed_ms"),
+                "ELAPSED_MS": self._optional_integer(result.get("elapsed_ms")),
             })
         return self._persist_recognition_record(
             request_id, request_values, attempts, projection["ACTION_TYPES"])
@@ -1252,14 +1261,14 @@ class DbHelper:
             TMDBID=self._identifier_string(media_info.tmdb_id),
             IMAGE=media_info.get_message_image(),
             SEARCH_SITES=json.dumps(search_sites),
-            OVER_EDITION=over_edition,
+            OVER_EDITION=self._optional_integer(over_edition) or 0,
             FILTER_RESTYPE=filter_restype,
             FILTER_PIX=filter_pix,
-            FILTER_RULE=filter_rule,
+            FILTER_RULE=self._optional_integer(filter_rule),
             FILTER_TEAM=filter_team,
             SAVE_PATH=save_path,
-            DOWNLOAD_SETTING=download_setting,
-            FUZZY_MATCH=fuzzy_match,
+            DOWNLOAD_SETTING=self._optional_integer(download_setting),
+            FUZZY_MATCH=self._optional_integer(fuzzy_match) or 0,
             STATE=state,
             DESC=desc,
             NOTE=note,
@@ -1441,18 +1450,18 @@ class DbHelper:
             TMDBID=self._identifier_string(media_info.tmdb_id),
             IMAGE=media_info.get_message_image(),
             SEARCH_SITES=json.dumps(search_sites),
-            OVER_EDITION=over_edition,
+            OVER_EDITION=self._optional_integer(over_edition) or 0,
             FILTER_RESTYPE=filter_restype,
             FILTER_PIX=filter_pix,
-            FILTER_RULE=filter_rule,
+            FILTER_RULE=self._optional_integer(filter_rule),
             FILTER_TEAM=filter_team,
             SAVE_PATH=save_path,
-            DOWNLOAD_SETTING=download_setting,
-            FUZZY_MATCH=fuzzy_match,
-            TOTAL_EP=total_ep,
-            CURRENT_EP=current_ep,
-            TOTAL=total,
-            LACK=lack,
+            DOWNLOAD_SETTING=self._optional_integer(download_setting),
+            FUZZY_MATCH=self._optional_integer(fuzzy_match) or 0,
+            TOTAL_EP=self._optional_integer(total_ep),
+            CURRENT_EP=self._optional_integer(current_ep),
+            TOTAL=self._optional_integer(total),
+            LACK=self._optional_integer(lack),
             STATE=state,
             DESC=desc,
             NOTE=note,
@@ -1668,17 +1677,18 @@ class DbHelper:
         """
         self._db.query(CONFIGUSERS).filter(CONFIGUSERS.NAME == name).delete()
 
+    def _build_transfer_statistics_query(self, begin_date):
+        day = func.substr(TRANSFERHISTORY.DATE, 1, 10).label("day")
+        return self._db.query(TRANSFERHISTORY.TYPE, day, func.count()).filter(
+            TRANSFERHISTORY.DATE > begin_date
+        ).group_by(TRANSFERHISTORY.TYPE, day).order_by(day, TRANSFERHISTORY.TYPE)
+
     def get_transfer_statistics(self, days=30):
         """
         查询历史记录统计
         """
         begin_date = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-        return self._db.query(TRANSFERHISTORY.TYPE,
-                              func.substr(TRANSFERHISTORY.DATE, 1, 10),
-                              func.count('*')
-                              ).filter(TRANSFERHISTORY.DATE > begin_date).group_by(
-            TRANSFERHISTORY.TYPE, func.substr(TRANSFERHISTORY.DATE, 1, 10)
-        ).order_by(func.substr(TRANSFERHISTORY.DATE, 1, 10), TRANSFERHISTORY.TYPE).all()
+        return self._build_transfer_statistics_query(begin_date).all()
 
     def is_exists_download_history(self, title, tmdbid, mtype=None):
         """
@@ -1940,6 +1950,8 @@ class DbHelper:
 
     @DbPersist(_db)
     def update_userrss_task(self, item):
+        download_setting = self._optional_integer(item.get("download_setting"))
+        over_edition = self._optional_integer(item.get("over_edition")) or 0
         if item.get("id") and self.get_userrss_tasks(item.get("id")):
             self._db.query(CONFIGUSERRSS).filter(CONFIGUSERRSS.ID == int(item.get("id"))).update(
                 {
@@ -1954,9 +1966,9 @@ class DbHelper:
                     "UPDATE_TIME": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())),
                     "STATE": item.get("state"),
                     "SAVE_PATH": item.get("save_path"),
-                    "DOWNLOAD_SETTING": item.get("download_setting"),
+                    "DOWNLOAD_SETTING": download_setting,
                     "RECOGNIZATION": item.get("recognization"),
-                    "OVER_EDITION": int(item.get("over_edition")) if str(item.get("over_edition")).isdigit() else 0,
+                    "OVER_EDITION": over_edition,
                     "SITES": json.dumps({"search_sites": (item.get("sites") or {}).get("search_sites", [])}),
                     "FILTER_ARGS": json.dumps(item.get("filter_args")),
                     "NOTE": ""
@@ -1975,9 +1987,9 @@ class DbHelper:
                 UPDATE_TIME=time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())),
                 STATE=item.get("state"),
                 SAVE_PATH=item.get("save_path"),
-                DOWNLOAD_SETTING=item.get("download_setting"),
+                DOWNLOAD_SETTING=download_setting,
                 RECOGNIZATION=item.get("recognization"),
-                OVER_EDITION=item.get("over_edition"),
+                OVER_EDITION=over_edition,
                 SITES=json.dumps({"search_sites": (item.get("sites") or {}).get("search_sites", [])}),
                 FILTER_ARGS=json.dumps(item.get("filter_args")),
                 PROCESS_COUNT='0'
@@ -2112,8 +2124,8 @@ class DbHelper:
                 SEASON=season,
                 IMAGE=image,
                 DESC=desc,
-                TOTAL=total,
-                START=start,
+                TOTAL=self._optional_integer(total),
+                START=self._optional_integer(start),
                 FINISH_TIME=time.strftime('%Y-%m-%d %H:%M:%S',
                                           time.localtime(time.time()))
             ))
