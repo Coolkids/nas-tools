@@ -85,7 +85,7 @@ SQLite 的文件名和目录由后端固定生成，不能在设置页或 API �
 
 ## 测试环境记录
 
-验证日期：2026-10-13。测试使用 Python 3.14.4、SQLAlchemy 2.1.4、临时 SQLite，以及三个专用且运行前确认为空的远程测试库。远程契约用例结束后再次确认三个测试库均无遗留表。驱动和服务版本仅代表本次验收环境，不构成对其他版本的兼容承诺。
+验证日期：2026-10-13。测试使用 Python 3.14.4、SQLAlchemy 2.1.4、临时 SQLite，以及三个专用且运行前确认为空的远程测试库。凭证从仓库外权限为 `600` 的本机 JSON 文件注入单次测试进程；没有写入仓库或输出到测试日志。远程契约用例结束后再次确认三个测试库均无遗留表或视图。驱动和服务版本仅代表本次验收环境，不构成对其他版本的兼容承诺。
 
 | 后端 | 服务端版本 | 驱动版本 | 启动/重启方式 | 空库 schema 初始化耗时 | 验收日期 |
 | --- | --- | --- | --- | --- | --- |
@@ -93,6 +93,8 @@ SQLite 的文件名和目录由后端固定生成，不能在设置页或 API �
 | PostgreSQL | 18.6 (Ubuntu build) | `psycopg` 3.3.6 | 应用级 SQLAlchemy 契约及 `app_database.update_db()` schema bootstrap；应用进程重启未在该远程配置下测试 | 0.152 秒，34 张应用表 | 2026-10-13 |
 | MySQL | 8.4.11 Community | `PyMySQL` 1.2.3 | 应用级 SQLAlchemy 契约及 `app_database.update_db()` schema bootstrap；应用进程重启未在该远程配置下测试 | 4.527 秒，34 张应用表 | 2026-10-13 |
 | MariaDB | 11.8.9-MariaDB-ubu2404 | `PyMySQL` 1.2.3 | 应用级 SQLAlchemy 契约及 `app_database.update_db()` schema bootstrap；应用进程重启未在该远程配置下测试 | 4.831 秒，34 张应用表 | 2026-10-13 |
+
+本次启用远程配置再次运行 `tests/test_database_engine_contract.py`、`tests/test_database_backup_contract.py`、`tests/test_database_migration_contract.py`，结果为 `45 passed`；随后运行全量后端套件，结果为 `484 passed, 4 skipped, 102 subtests passed`。运行前后均以只读方式确认三个隔离库为空（0 张表、0 个视图）。这补充验证了真实远程引擎上的 CRUD/事务契约、低层 16 组迁移复制和 16 组归档导入；后台迁移/恢复任务全生命周期、生产规模数据、权限不足故障及进程重启仍未覆盖。
 
 `tests/test_database_engine_contract.py` 的隔离远程运行结果为 9 passed。该结果验证 CRUD、事务回滚、批量插入/upsert、唯一约束、分页、自增、非连续主键、会话归还，以及四种后端的空库 metadata 初始化。它不代表执行了跨数据库业务数据迁移，也不代表备份恢复矩阵通过。计时只包括新空库的应用 schema 初始化，不包括跨库导入、备份、恢复或进程重启。
 
@@ -122,7 +124,7 @@ SQLite 的文件名和目录由后端固定生成，不能在设置页或 API �
 
 2026-10-13 隔离内存缓存微基准：单进程写入 10,000 条 128 字节载荷，在 100、1,000、5,000、10,000 条时分段统计写入和 `memory_info()`。分段写入 P50 保持在 0.163–0.175 ms/条、P95 为 0.312–0.352 ms/条；统计中位数为 0.137–0.156 ms；`tracemalloc` 峰值从 0.18 MiB 增至 4.74 MiB，进程最大 RSS 从 98.0 MiB 增至 107.2 MiB。该结果支持在此规模下没有明显的逐次全量扫描退化；它是本机合成负载的一次观测，不代表持久化后端、真实载荷分布或生产负载。
 
-2026-10-13 本地回归：本次后端全量 `445 passed, 43 skipped, 102 subtests passed`；新增迁移/空间回收定向回归 `72 passed, 28 subtests passed`；隔离缓存容量压力此前为 `2 passed`；前端 `npm run build`（含 `vue-tsc --noEmit`）通过。新增数据库状态回归在请求 ORM 会话仍持有连接时检查 schema，并确认会话关闭后连接归还。当前未配置 `NASTOOLS_TEST_DATABASE_SETTINGS`，本次跳过项包含远程数据库连接用例；UID 1000 下只读文件权限用例实际运行通过。既有隔离远程契约和低层跨库矩阵结果另列于上文。
+2026-10-13 本地回归：未启用远程配置时后端全量为 `445 passed, 43 skipped, 102 subtests passed`；启用隔离 PostgreSQL、MariaDB、MySQL 配置后全量为 `484 passed, 4 skipped, 102 subtests passed`，远程契约/迁移/备份定向矩阵为 `45 passed`。新增数据库状态回归在请求 ORM 会话仍持有连接时检查 schema，并确认会话关闭后连接归还；前端 `npm run build`（含 `vue-tsc --noEmit`）通过。UID 1000 下只读文件权限用例实际运行通过。生产数据与完整后台任务生命周期仍待验收。
 
 使用 Google Chrome 154 headless 加本地 mock `/do` 响应加载构建产物，缓存和数据库标签在 360、390、768、1280、1440 px 与浅/深色主题下均无页面横向溢出。此项只验证空数据状态的布局，不覆盖真实 API 联调、含数据表格、软键盘、安全区、放大、键盘/屏幕阅读器或迁移/恢复交互。
 
