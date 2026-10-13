@@ -313,7 +313,12 @@ def get_database_info():
             with engine.connect() as connection:
                 connection.execute(text("SELECT 1")).scalar_one()
                 server_version = engine.dialect.server_version_info
-                available = {name.upper() for name in inspect(engine).get_table_names()}
+                # Reuse the checked-out connection. Inspecting the engine here
+                # checks out another connection while this one is still held;
+                # requests also keep their authenticated ORM session open until
+                # teardown, so that nested checkout can exhaust SQLite's small
+                # pool and stall concurrent API calls.
+                available = {name.upper() for name in inspect(connection).get_table_names()}
                 if "ALEMBIC_VERSION" in available:
                     revisions = [row[0] for row in connection.execute(
                         text("SELECT version_num FROM alembic_version"))]

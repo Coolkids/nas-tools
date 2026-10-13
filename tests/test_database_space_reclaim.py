@@ -271,6 +271,22 @@ class DatabaseSpaceReclaimTest(TestCase):
         self.assertNotIn("MEDIASYNC_ITEMS", database["logical_domains"]["main"])
         self.assertIn("MEDIASYNC_ITEMS", database["logical_domains"]["media"])
 
+    def test_database_statistics_reuse_connection_when_request_session_is_open(self):
+        # An authenticated Flask request holds its ORM connection through the
+        # response teardown. Database status must not check out a third
+        # connection while inspecting the schema under the SQLite 2-connection
+        # pool limit.
+        DATABASE.engine.pool._timeout = 0.2
+        session = DATABASE.session
+        session.execute(text("SELECT 1")).scalar_one()
+
+        response = maintenance.get_database_info()
+
+        self.assertEqual(0, response["code"], response.get("msg"))
+        self.assertEqual(1, DATABASE.engine.pool.checkedout())
+        DATABASE.close_session()
+        self.assertEqual(0, DATABASE.engine.pool.checkedout())
+
     def test_cancel_before_vacuum_reopens_database_without_mutation(self):
         original_check = maintenance._check_checkpoint
 
