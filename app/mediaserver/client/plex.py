@@ -196,7 +196,14 @@ class Plex(_IMediaClient):
         if not self._plex:
             raise RuntimeError("Plex 连接不可用")
         try:
-            section = self._plex.library.sectionByID(parent)
+            # PlexAPI indexes sections by integer ID, while `sections()` exposes
+            # `section.key` as text in the shared media-server interface.
+            section_id = parent
+            try:
+                section_id = int(parent)
+            except (TypeError, ValueError):
+                pass
+            section = self._plex.library.sectionByID(section_id)
             if not section:
                 raise RuntimeError("Plex 媒体库不存在")
             page_size = MEDIA_SYNC_PAGE_SIZE

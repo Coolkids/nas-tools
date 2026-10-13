@@ -116,6 +116,20 @@ class MediaClientPaginationTest(TestCase):
                                       for call in section.all.call_args_list])
         self.assertEqual("last", items[-1]["id"])
 
+    def test_plex_normalizes_string_section_id_from_library_list(self):
+        client = object.__new__(Plex)
+        result = SimpleNamespace(key="movie-1", librarySectionID=14, type="movie",
+                                 title="电影", year=2024)
+        section = Mock()
+        section.all.return_value = [result]
+        library = SimpleNamespace(sectionByID=Mock(return_value=section))
+        client._plex = SimpleNamespace(library=library)
+
+        items = list(client.get_items("14"))
+
+        self.assertEqual(1, len(items))
+        library.sectionByID.assert_called_once_with(14)
+
     def test_plex_page_retries_transient_remote_failure(self):
         client = object.__new__(Plex)
         result = SimpleNamespace(key="movie-1", librarySectionID=1, type="movie",
