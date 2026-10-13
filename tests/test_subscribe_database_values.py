@@ -33,7 +33,10 @@ def test_add_tv_subscription_normalizes_download_setting(download_setting, expec
             year="2025",
             season="1",
             download_setting=download_setting,
+            rssid="42",
         )
 
     assert code == 0
     assert dbhelper.insert_rss_tv.call_args.kwargs["download_setting"] == expected
+    assert dbhelper.insert_rss_tv.call_args.kwargs["rssid"] == "42"
+    dbhelper.delete_rss_tv.assert_not_called()

@@ -1383,23 +1383,18 @@ class DbHelper:
             }
         )
 
-    def is_exists_rss_tv(self, title, year, season=None):
+    def is_exists_rss_tv(self, title, year, season=None, rssid=None):
         """
         判断RSS电视剧是否存在
         """
         if not title:
             return False
+        filters = [RSSTVS.NAME == title, RSSTVS.YEAR == str(year)]
         if season:
-            count = self._db.query(RSSTVS).filter(RSSTVS.NAME == title,
-                                                  RSSTVS.YEAR == str(year),
-                                                  RSSTVS.SEASON == str(season)).count()
-        else:
-            count = self._db.query(RSSTVS).filter(RSSTVS.NAME == title,
-                                                  RSSTVS.YEAR == str(year)).count()
-        if count > 0:
-            return True
-        else:
-            return False
+            filters.append(RSSTVS.SEASON == str(season))
+        if rssid:
+            filters.append(RSSTVS.ID != int(rssid))
+        return self._db.query(RSSTVS).filter(*filters).count() > 0
 
     @DbPersist(_db)
     def insert_rss_tv(self,
@@ -1420,7 +1415,8 @@ class DbHelper:
                       fuzzy_match=0,
                       desc=None,
                       note=None,
-                      keyword=None):
+                      keyword=None,
+                      rssid=None):
         """
         新增RSS电视剧
         """
@@ -1434,8 +1430,10 @@ class DbHelper:
             season_str = ""
         else:
             season_str = media_info.get_season_string()
-        if self.is_exists_rss_tv(media_info.title, media_info.year, season_str):
+        if self.is_exists_rss_tv(media_info.title, media_info.year, season_str, rssid=rssid):
             return 9
+        if rssid:
+            self.delete_rss_tv(rssid=rssid)
         self._db.insert(RSSTVS(
             NAME=media_info.title,
             YEAR=str(media_info.year) if media_info.year is not None else None,

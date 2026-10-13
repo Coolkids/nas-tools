@@ -143,8 +143,6 @@ class Subscribe:
                     lack = total - current_ep - 1
                 else:
                     lack = total
-                if rssid:
-                    self.dbhelper.delete_rss_tv(rssid=rssid)
                 code = self.dbhelper.insert_rss_tv(media_info=media_info,
                                                    total=total,
                                                    lack=lack,
@@ -162,7 +160,8 @@ class Subscribe:
                                                    fuzzy_match=0,
                                                    desc=media_info.overview,
                                                    note=self.gen_rss_note(media_info),
-                                                   keyword=keyword)
+                                                   keyword=keyword,
+                                                   rssid=rssid)
             else:
                 # 电影
                 if rssid:
@@ -205,8 +204,6 @@ class Subscribe:
                                                       fuzzy_match=1,
                                                       keyword=keyword)
             else:
-                if rssid:
-                    self.dbhelper.delete_rss_tv(rssid=rssid)
                 code = self.dbhelper.insert_rss_tv(media_info=media_info,
                                                    total=0,
                                                    lack=0,
@@ -220,7 +217,8 @@ class Subscribe:
                                                    save_path=save_path,
                                                    download_setting=download_setting,
                                                    fuzzy_match=1,
-                                                   keyword=keyword)
+                                                   keyword=keyword,
+                                                   rssid=rssid)
 
         if code == 0:
             return code, "添加订阅成功", media_info
