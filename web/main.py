@@ -120,8 +120,7 @@ def add_header(r):
 @App.teardown_request
 def shutdown_session(exception=None):
     """
-    请求结束时释放 scoped_session，归还连接到连接池，
-    防止连接泄漏导致 QueuePool 耗尽 (size 10 + overflow 100)
+    请求结束时释放 scoped_session，及时归还连接，避免 SQLite 小连接池耗尽。
     """
     close_db()
 
