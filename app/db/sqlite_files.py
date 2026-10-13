@@ -39,6 +39,10 @@ _MEDIA_TABLE_COLUMNS = {
         "ACTIVE_GENERATION",
     },
 }
+_MEDIA_SYNC_JOB_COLUMNS = {
+    "SERVER", "JOB_ID", "GENERATION_ID", "LEASE_TOKEN", "LEASE_UNTIL",
+    "EXPECTED_ACTIVE_GENERATION", "STATUS", "CREATED_AT", "UPDATED_AT",
+}
 _LEGACY_ARCHIVE_RETENTION_SECONDS = 30 * 24 * 60 * 60
 logger = logging.getLogger(__name__)
 
@@ -254,10 +258,18 @@ def _upgrade_legacy_media_snapshot(path, config_path):
                 raise RuntimeError(
                     f"旧媒体库结构指纹不匹配，{actual} 含未识别字段："
                     f"{', '.join(sorted(unexpected_columns))}")
-        allowed = set(_MEDIA_TABLES_REQUIRED) | _VERSION_TABLES
+        allowed = (set(_MEDIA_TABLES_REQUIRED)
+                   | {name.upper() for name in _VERSION_TABLES}
+                   | {"MEDIASYNC_SYNC_JOBS"})
         unknown = set(tables) - allowed
         if unknown:
             raise RuntimeError(f"旧媒体库包含未识别表：{', '.join(sorted(unknown))}")
+        sync_jobs = tables.get("MEDIASYNC_SYNC_JOBS")
+        if sync_jobs:
+            sync_job_columns = {row[1].upper() for row in connection.execute(
+                f"PRAGMA table_info({_quote(sync_jobs)})")}
+            if sync_job_columns != _MEDIA_SYNC_JOB_COLUMNS:
+                raise RuntimeError("旧媒体库同步租约表结构不匹配，拒绝迁移")
         version_table = tables.get("ALEMBIC_VERSION")
         media_version_table = tables.get("ALEMBIC_VERSION_MEDIA")
         for candidate in (version_table, media_version_table):

@@ -504,7 +504,11 @@ def _run_space_reclaim(job_id, fingerprint):
                 raise RuntimeError("仍有业务连接未排空，无法安全回收空间")
             DATABASE.dispose()
 
-            connection = sqlite3.connect(database_path, timeout=60, isolation_level=None)
+            # External SQLite clients do not participate in the app's
+            # maintenance gate. Bound lock waits so a foreign long reader or
+            # writer fails the checkpoint promptly instead of leaving the
+            # maintenance task stuck in QUIESCING for a minute.
+            connection = sqlite3.connect(database_path, timeout=5, isolation_level=None)
             try:
                 _probe_sqlite_write(connection, "空间回收")
                 checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()

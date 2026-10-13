@@ -1,6 +1,7 @@
 """SQLite 整库空间回收的隔离回归测试。"""
 
 import os
+import multiprocessing
 import sqlite3
 import tempfile
 import time
@@ -16,6 +17,35 @@ from app.db.manager import DATABASE
 from app.db.models import Base
 from app.db.schema import LOGICAL_DOMAIN_TABLES, current_schema_revision
 from app.utils.storage_jobs import StorageJobStore
+
+
+def _pause_inside_vacuum(db_path, progress_connection):
+    connection = sqlite3.connect(db_path, timeout=30, isolation_level=None)
+    announced = False
+
+    def report_progress():
+        nonlocal announced
+        if not announced:
+            announced = True
+            progress_connection.send("vacuum-active")
+            progress_connection.recv()
+        return 0
+
+    connection.set_progress_handler(report_progress, 1000)
+    connection.execute("VACUUM")
+    connection.close()
+
+
+def _hold_sqlite_read_transaction(db_path, ready, release):
+    connection = sqlite3.connect(db_path, timeout=30, isolation_level=None)
+    try:
+        connection.execute("BEGIN")
+        connection.execute("SELECT count(*) FROM MEDIASYNC_ITEMS").fetchone()
+        ready.set()
+        release.wait(30)
+        connection.rollback()
+    finally:
+        connection.close()
 
 
 class DatabaseSpaceReclaimTest(TestCase):
@@ -177,6 +207,34 @@ class DatabaseSpaceReclaimTest(TestCase):
         with sqlite3.connect(self.database_path) as connection:
             self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
 
+    def test_other_process_read_lock_blocks_reclaim_before_vacuum(self):
+        context = multiprocessing.get_context("spawn")
+        ready = context.Event()
+        release = context.Event()
+        reader = context.Process(
+            target=_hold_sqlite_read_transaction,
+            args=(self.database_path, ready, release))
+        reader.start()
+        try:
+            self.assertTrue(ready.wait(10), "子进程未能持有 SQLite 读事务")
+            result = start_database_space_reclaim()
+            self.assertEqual(0, result["code"])
+            job = self._wait_for_job(result["job_id"])
+            self.assertEqual("FAILED", job["status"], job.get("error"))
+            self.assertIn("VACUUM 前 WAL checkpoint 未完成", job["error"])
+            self.assertFalse(job["result"]["vacuum_completed"])
+            self.assertIsNone(self.jobs.maintenance_gate("database"))
+        finally:
+            release.set()
+            reader.join(10)
+            if reader.is_alive():
+                reader.terminate()
+                reader.join(5)
+        self.assertEqual(0, reader.exitcode)
+        with sqlite3.connect(self.database_path) as connection:
+            self.assertEqual("ok", connection.execute(
+                "PRAGMA integrity_check").fetchone()[0])
+
     def test_reclaim_preserves_committed_wal_rows_and_restores_wal_mode(self):
         writer = sqlite3.connect(self.database_path, timeout=1, isolation_level=None)
         try:
@@ -290,6 +348,60 @@ class DatabaseSpaceReclaimTest(TestCase):
             self.assertEqual(5, connection.execute(text(
                 "SELECT count(*) FROM MEDIASYNC_ITEMS")).scalar_one())
 
+    def test_process_killed_inside_vacuum_recovers_committed_rows_on_startup(self):
+        from app.db.migration import _current_settings, _fingerprint
+
+        payload = "vacuum-crash-payload-" + "x" * 32768
+        with sqlite3.connect(self.database_path) as connection:
+            connection.executemany(
+                "INSERT INTO MEDIASYNC_ITEMS (ID, SERVER, ITEM_ID, TITLE, JSON) "
+                "VALUES (?, 'server', ?, 'vacuum-crash', ?)",
+                ((item_id, f"crash-{item_id}", payload)
+                 for item_id in range(1000, 2200)))
+            connection.execute(
+                "DELETE FROM MEDIASYNC_ITEMS WHERE ID >= 1000 AND ID % 2 = 0")
+            self.assertGreater(connection.execute("PRAGMA freelist_count").fetchone()[0], 0)
+
+        job, created = self.jobs.create(
+            "database_space_reclaim",
+            {"fingerprint": _fingerprint(_current_settings())},
+            idempotency_key="kill-during-vacuum")
+        self.assertTrue(created)
+        self.jobs.update(job["job_id"], status="VACUUMING", stage="VACUUMING")
+        with self.jobs.maintenance_lock(exclusive=True):
+            self.jobs.set_maintenance_gate("database", job["job_id"], "VACUUMING")
+
+        DATABASE.dispose()
+        context = multiprocessing.get_context("spawn")
+        parent_progress, child_progress = context.Pipe()
+        process = context.Process(
+            target=_pause_inside_vacuum,
+            args=(self.database_path, child_progress))
+        process.start()
+        child_progress.close()
+        try:
+            self.assertTrue(parent_progress.poll(30), "VACUUM 未进入 SQLite 执行进度回调")
+            self.assertEqual("vacuum-active", parent_progress.recv())
+            process.kill()
+            process.join(10)
+        finally:
+            parent_progress.close()
+            if process.is_alive():
+                process.kill()
+                process.join(5)
+        self.assertNotEqual(0, process.exitcode)
+
+        with self.jobs.maintenance_lock(exclusive=True):
+            self.assertTrue(maintenance.verify_database_maintenance_startup(
+                self.jobs.get(job["job_id"])))
+        recovered = self.jobs.get(job["job_id"])
+        self.assertEqual("INTERRUPTED", recovered["status"])
+        self.assertIsNone(self.jobs.maintenance_gate("database"))
+        with sqlite3.connect(self.database_path) as connection:
+            self.assertEqual("ok", connection.execute("PRAGMA integrity_check").fetchone()[0])
+            self.assertEqual(605, connection.execute(
+                "SELECT count(*) FROM MEDIASYNC_ITEMS").fetchone()[0])
+
     def test_read_only_database_keeps_gate_until_database_can_be_opened(self):
         DATABASE.dispose()
         os.chmod(self.database_path, 0o444)
@@ -321,6 +433,35 @@ class DatabaseSpaceReclaimTest(TestCase):
                 result = start_database_space_reclaim(values)
                 self.assertEqual(1, result["code"])
         self.assertIsNone(self.jobs.latest("database_space_reclaim"))
+
+    def test_rejects_remote_database_and_stale_configuration_generation(self):
+        with patch("app.db.maintenance._settings", return_value=(
+                {"type": "postgresql"}, "remote-fingerprint", {"type": "postgresql"})):
+            result = start_database_space_reclaim()
+        self.assertEqual(1, result["code"])
+        self.assertIn("不支持 SQLite", result["msg"])
+        self.assertIsNone(self.jobs.latest("database_space_reclaim"))
+
+        job, created = self.jobs.create(
+            "database_space_reclaim", {"fingerprint": "checked-generation"},
+            idempotency_key="stale-reclaim-configuration")
+        self.assertTrue(created)
+        with patch("app.db.migration._current_settings",
+                   return_value={"type": "sqlite", "path": "changed"}):
+            maintenance._run_space_reclaim(job["job_id"], "checked-generation")
+        stale = self.jobs.get(job["job_id"])
+        self.assertEqual("FAILED", stale["status"])
+        self.assertIn("配置已变化", stale["error"])
+        self.assertIsNone(self.jobs.maintenance_gate("database"))
+
+    def test_duplicate_reclaim_submission_reuses_one_persistent_job(self):
+        first = start_database_space_reclaim()
+        second = start_database_space_reclaim()
+        self.assertEqual(0, first["code"])
+        self.assertEqual(0, second["code"])
+        self.assertEqual(first["job_id"], second["job_id"])
+        self.assertEqual(1, len(self.jobs.active("database_space_reclaim")))
+        self._wait_for_job(first["job_id"])
 
     def test_checkpoint_must_be_complete(self):
         _check_checkpoint((0, 3, 3), "测试")

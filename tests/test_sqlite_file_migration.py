@@ -8,11 +8,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from alembic import command
+from alembic.config import Config as AlembicConfig
 from sqlalchemy import URL, create_engine, text
 
 from app.db.models import Base
-from app.db.schema import LOGICAL_DOMAIN_TABLES
-from app.db.sqlite_files import finalize_sqlite_migration, prepare_sqlite_database
+from app.db.schema import LOGICAL_DOMAIN_TABLES, current_schema_revision
+from app.db.sqlite_files import (finalize_sqlite_migration, prepare_sqlite_database,
+                                 _upgrade_legacy_media_snapshot)
 from app.utils.storage_jobs import StorageJobStore
 
 
@@ -72,6 +75,28 @@ def _create_media_database(path):
         connection.commit()
     finally:
         connection.close()
+
+
+def _advance_media_database_to_revision(path, revision):
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
+        connection.execute("INSERT INTO alembic_version VALUES (?)", (_MEDIA_BASE_REVISION,))
+        connection.commit()
+    finally:
+        connection.close()
+    if revision == _MEDIA_BASE_REVISION:
+        return
+
+    engine = create_engine(URL.create("sqlite", database=str(path)))
+    try:
+        config = AlembicConfig()
+        config.set_main_option("script_location", str(Path(__file__).parents[1] / "db_scripts"))
+        with engine.connect() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, revision)
+    finally:
+        engine.dispose()
 
 
 def _configure_migration(config_dir, monkeypatch):
@@ -192,6 +217,74 @@ def test_old_main_and_media_databases_merge_into_fixed_single_database(
     assert media_path.is_file()
     assert hashlib.sha256(user_path.read_bytes()).hexdigest() == user_hash
     assert hashlib.sha256(media_path.read_bytes()).hexdigest() == media_hash
+
+
+@pytest.mark.parametrize("revision", (
+    "b3c4d5e6f7a8", "f2a3b4c5d6e7", "f3a4b5c6d7e8", "f4a5b6c7d8e9",
+))
+def test_each_supported_legacy_media_revision_upgrades_without_losing_rows(
+        tmp_path, revision):
+    database_path = tmp_path / f"legacy-media-{revision}.sqlite3"
+    _create_media_database(database_path)
+    _advance_media_database_to_revision(database_path, revision)
+
+    _upgrade_legacy_media_snapshot(str(database_path), str(tmp_path))
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            current_schema_revision(),)
+        assert connection.execute(
+            "SELECT ID, ITEM_ID, TITLE, GENERATION_ID FROM MEDIASYNC_ITEMS ORDER BY ID"
+        ).fetchall() == [
+            (31, "movie-31", "旧电影", "legacy"),
+            (32, "series-32", "旧剧集", "legacy"),
+        ]
+        assert connection.execute(
+            "SELECT SERVER, ACTIVE_GENERATION, TOTAL_COUNT FROM MEDIASYNC_STATISTICS"
+        ).fetchone() == ("emby", "legacy", "2")
+        assert connection.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' "
+            "AND name='MEDIASYNC_SYNC_JOBS'").fetchone() == (1,)
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+@pytest.mark.parametrize("revision", ("f3a4b5c6d7e8", "f4a5b6c7d8e9"))
+def test_merge_drops_stale_sync_leases_from_supported_legacy_media_revisions(
+        tmp_path, monkeypatch, revision):
+    user_path = tmp_path / "user.db"
+    media_path = tmp_path / "media.db"
+    _create_user_database(user_path)
+    _create_media_database(media_path)
+    _advance_media_database_to_revision(media_path, revision)
+    with sqlite3.connect(media_path) as connection:
+        connection.execute("""INSERT INTO MEDIASYNC_SYNC_JOBS
+            (SERVER, JOB_ID, GENERATION_ID, LEASE_TOKEN, LEASE_UNTIL,
+             EXPECTED_ACTIVE_GENERATION, STATUS, CREATED_AT, UPDATED_AT)
+            VALUES ('emby', 'stale-job', 'stale-generation', 1, 1.0,
+                    'legacy', 'RUNNING', 1.0, 1.0)""")
+
+    target_path = _configure_migration(tmp_path, monkeypatch)
+    assert prepare_sqlite_database() == str(target_path)
+
+    with sqlite3.connect(target_path) as connection:
+        assert connection.execute("SELECT count(*) FROM MEDIASYNC_ITEMS").fetchone() == (2,)
+        assert connection.execute("SELECT count(*) FROM MEDIASYNC_SYNC_JOBS").fetchone() == (0,)
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+def test_unknown_media_sync_lease_schema_is_rejected_without_mutating_source(tmp_path):
+    database_path = tmp_path / "legacy-media-with-unknown-lease-schema.sqlite3"
+    _create_media_database(database_path)
+    _advance_media_database_to_revision(database_path, "f3a4b5c6d7e8")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "ALTER TABLE MEDIASYNC_SYNC_JOBS ADD COLUMN UNKNOWN_FIELD TEXT")
+
+    original_hash = hashlib.sha256(database_path.read_bytes()).hexdigest()
+    with pytest.raises(RuntimeError, match="同步租约表结构不匹配"):
+        _upgrade_legacy_media_snapshot(str(database_path), str(tmp_path))
+
+    assert hashlib.sha256(database_path.read_bytes()).hexdigest() == original_hash
 
 
 def test_main_database_without_legacy_media_database_migrates(tmp_path, monkeypatch):

@@ -642,7 +642,9 @@ def _lock_sqlite_source(path, timeout=5):
     connection = sqlite3.connect(path, timeout=timeout, isolation_level=None)
     try:
         connection.execute(f"PRAGMA busy_timeout={max(1, int(timeout * 1000))}")
-        connection.execute("BEGIN EXCLUSIVE")
+        # RESERVED excludes other writers while allowing independent integrity
+        # checks and the online backup reader to access a consistent snapshot.
+        connection.execute("BEGIN IMMEDIATE")
         integrity = connection.execute("PRAGMA integrity_check").fetchone()
         if integrity != ("ok",):
             raise RuntimeError(f"待退役 SQLite 文件完整性检查失败：{path}")
@@ -803,8 +805,10 @@ def _run_target_preparation(job_id, candidate):
                 before = _sqlite_file_set_identity(path)
                 _sqlite_integrity(path)
                 backup_path = os.path.join(archive, f"{index}-{os.path.basename(path)}.sqlite3")
-                _snapshot_sqlite_file(
-                    path, backup_path, source_connection=sqlite_locks[index - 1])
+                # Back up through a separate reader connection. SQLite can
+                # return SQLITE_LOCKED when the backup API runs on the same
+                # connection that holds this writer reservation.
+                _snapshot_sqlite_file(path, backup_path)
                 _secure_file(backup_path)
                 after = _sqlite_file_set_identity(path)
                 if before != after:
@@ -1452,7 +1456,8 @@ def _run_migration_impl(job_id, candidate, source_fingerprint, target_fingerprin
             _verify_probe(target_engine)
             _write_migration_marker(target_engine, job_id, source_fingerprint,
                                     target_fingerprint)
-            _validate_source_shape(target_engine, Base.metadata)
+            with target_engine.connect() as validation_connection:
+                _validate_source_shape(validation_connection, Base.metadata)
             if candidate["type"] != "sqlite":
                 target_object_baseline = _remote_target_object_baseline(target_engine)
             target_lock_connection, target_lock_transaction = _lock_target_database(target_engine)
