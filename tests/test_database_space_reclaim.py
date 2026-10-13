@@ -271,6 +271,15 @@ class DatabaseSpaceReclaimTest(TestCase):
         self.assertNotIn("MEDIASYNC_ITEMS", database["logical_domains"]["main"])
         self.assertIn("MEDIASYNC_ITEMS", database["logical_domains"]["media"])
 
+    def test_succeeded_migration_is_not_reported_as_pending(self):
+        job, _created = self.jobs.create("database_migration", {})
+        self.jobs.update(job["job_id"], status="SUCCEEDED", stage="SUCCEEDED")
+
+        response = maintenance.get_database_info()
+
+        self.assertEqual(0, response["code"])
+        self.assertIsNone(response["database"]["pending_database_job"])
+
     def test_database_statistics_reuse_connection_when_request_session_is_open(self):
         # An authenticated Flask request holds its ORM connection through the
         # response teardown. Database status must not check out a third

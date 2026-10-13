@@ -343,6 +343,9 @@ def get_database_info():
         job = STORAGE_JOBS.latest(kind)
         if job:
             maintenance_jobs[kind] = job
+    pending_database_job = STORAGE_JOBS.latest("database_migration")
+    if pending_database_job and pending_database_job.get("status") == "SUCCEEDED":
+        pending_database_job = None
     status = {
         "active": _safe_settings(active_settings or configured),
         "configured": _safe_settings(configured),
@@ -360,7 +363,7 @@ def get_database_info():
         "statistics_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "current_job": STORAGE_JOBS.latest(_RECLAIM_KIND),
         "statistics_job": STORAGE_JOBS.latest(_STATISTICS_KIND),
-        "pending_database_job": STORAGE_JOBS.latest("database_migration"),
+        "pending_database_job": pending_database_job,
         "maintenance_jobs": maintenance_jobs,
         "storage": object_sizes,
     }

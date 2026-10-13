@@ -1689,7 +1689,8 @@ def _run_migration_impl(job_id, candidate, source_fingerprint, target_fingerprin
             STORAGE_JOBS.update(job_id, status="RESTART_PENDING", stage="RESTART_PENDING",
                                 result={**(STORAGE_JOBS.get(job_id).get("result") or {}),
                                         "target_fingerprint": target_fingerprint},
-                                message="数据库配置已保存，等待受控重启", progress=0.99)
+                                message="数据库迁移与校验已完成，配置已保存；现在可以安全重启程序",
+                                progress=0.99)
             schedule_restart()
     except Exception as error:
         current = STORAGE_JOBS.get(job_id) or {}
@@ -1701,7 +1702,7 @@ def _run_migration_impl(job_id, candidate, source_fingerprint, target_fingerprin
         if config_committed:
             STORAGE_JOBS.update(job_id, status="RESTART_PENDING", stage="RESTART_PENDING",
                                 error=_safe_error(error, candidate),
-                                message="配置已提交但重启未完成；维护状态保持，请重试重启")
+                                message="数据库迁移与校验已完成，配置已提交但自动重启未完成；现在可以安全重启程序或重试重启")
         else:
             error_message = "数据库迁移失败；原活动配置保持不变"
             result = current.get("result") or {}

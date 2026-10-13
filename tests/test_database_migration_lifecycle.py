@@ -416,6 +416,7 @@ def test_remote_to_sqlite_migration_publishes_only_after_validation_and_rolls_ba
     else:
         assert result["status"] == "RESTART_PENDING", (
             result["status"], result.get("stage"), result.get("error"), result.get("message"))
+        assert "现在可以安全重启程序" in result["events"][-1]["message"]
         assert result["result"]["rows"] >= 2
         assert result["result"]["tables"]["SYSTEM_DICT"]["rows"] == 1
         assert current["settings"] == candidate
