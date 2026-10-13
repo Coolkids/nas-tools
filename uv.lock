@@ -115,30 +115,30 @@ sdist = { url = "https://files.pythonhosted.org/packages/cf/73/79ed51ed60edbf53c
 
 [[package]]
 name = "boto3"
-version = "1.43.111"
+version = "1.43.112"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "botocore" },
     { name = "jmespath" },
     { name = "s3transfer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/59/d3/fa092ae1c109100d0c5c14c69a316cd6d53c05fb57183fa77b1fcdef86ce/boto3-1.43.111.tar.gz", hash = "sha256:5ae342a16c848909cd42d4be404f69d9082e5705460198d4d3327eca5f6cddcb", size = 112656, upload-time = "2026-10-09T19:27:48.995Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c8/83/bf66a8c094d11db78a6cc19d835460af7b470640df0d0a3a108e1f3cefcd/boto3-1.43.112.tar.gz", hash = "sha256:599548a8c8e93cf0223bcb35b615c82f29d30295e992b94863cfbb2405ee33e5", size = 112667, upload-time = "2026-10-12T19:26:59.963Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f1/3b/bca42f8f7b76e567c66cc39bacc6bf31b353c9edfbb0fb1f5c534fc65369/boto3-1.43.111-py3-none-any.whl", hash = "sha256:c79994619c8d89e45f6fd0edc5c5b5a70c9358f00423f4c99cb64931f89ecf37", size = 140042, upload-time = "2026-10-09T19:27:47.599Z" },
+    { url = "https://files.pythonhosted.org/packages/c1/33/88d5fa546f2b1ec726cfa1b3f9316a28a3c416f44572abc734a0d5f3c2bc/boto3-1.43.112-py3-none-any.whl", hash = "sha256:add1216791e16c4f737676a0f5d6d2fa6240eef61619c6c44df9eeeaf88f24ff", size = 140041, upload-time = "2026-10-12T19:26:58.514Z" },
 ]
 
 [[package]]
 name = "botocore"
-version = "1.43.111"
+version = "1.43.112"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jmespath" },
     { name = "python-dateutil" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6c/43/257e97270ddd6833fd54b11e544a09b441b02f8c731bdeb29b90479be565/botocore-1.43.111.tar.gz", hash = "sha256:44d5e80962ac6cb9e85af72667b77c9586451e3328ab0ce33195380767e213d8", size = 16321685, upload-time = "2026-10-09T19:27:44.19Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0e/49/58187bfb510831e4cdafd7ced8e2a748097da81e8b9799d93f8d6ebf9f61/botocore-1.43.112.tar.gz", hash = "sha256:9ce0d70e09fabbb3a2e1126d3ec79ed67d14c88bb3f064e62ab2881d5eaf3c7b", size = 16351533, upload-time = "2026-10-12T19:26:55.249Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ad/5b/c3ce1b227954eb0313e76e6e7c0b5b24d4c553f0e8a03e5828ff5a5918dc/botocore-1.43.111-py3-none-any.whl", hash = "sha256:f1f4c28cb2a096bf246d0bb24cbb1a01c5cb696ef499fa71b155adda7b94c90b", size = 16018923, upload-time = "2026-10-09T19:27:40.066Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/a7/dd4c7cf9cde38db5cd5a295434e25415d814536704fe084ec7ee73e5658b/botocore-1.43.112-py3-none-any.whl", hash = "sha256:1e67a3dcf4a308c695d880b65463a492a971d5b28761b49add92f71e4322130f", size = 16052210, upload-time = "2026-10-12T19:26:50.658Z" },
 ]
 
 [[package]]
@@ -1095,8 +1095,6 @@ dependencies = [
     { name = "anitopy" },
     { name = "apscheduler" },
     { name = "boddle" },
-    { name = "boto3" },
-    { name = "botocore" },
     { name = "cachelib" },
     { name = "cacheout" },
     { name = "chalice" },
@@ -1134,10 +1132,10 @@ dependencies = [
     { name = "requests" },
     { name = "ruamel-yaml" },
     { name = "selenium" },
-    { name = "slack-sdk" },
+    { name = "slack-bolt" },
     { name = "sqlalchemy" },
     { name = "tenacity" },
-    { name = "typing-extensions" },
+    { name = "transmission-rpc" },
     { name = "undetected-chromedriver" },
     { name = "urllib3" },
     { name = "valkey" },
@@ -1161,8 +1159,6 @@ requires-dist = [
     { name = "anitopy", directory = "third_party/anitopy" },
     { name = "apscheduler", specifier = "==3.11.3" },
     { name = "boddle", specifier = "==0.2.9" },
-    { name = "boto3", specifier = "==1.43.111" },
-    { name = "botocore", specifier = "==1.43.111" },
     { name = "cachelib", specifier = "==0.17.0" },
     { name = "cacheout", specifier = "==0.17.0" },
     { name = "chalice", specifier = "==1.33.0" },
@@ -1184,10 +1180,10 @@ requires-dist = [
     { name = "pikpakapi", specifier = "==0.1.11" },
     { name = "plexapi", specifier = "==4.18.3" },
     { name = "protobuf", specifier = "==7.36.2" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
+    { name = "psycopg", extras = ["binary"], specifier = "==3.3.6" },
     { name = "pycryptodome", specifier = "==3.24.1" },
     { name = "pyjwt", specifier = "==2.15.1" },
-    { name = "pymysql", specifier = ">=1.1,<2" },
+    { name = "pymysql", specifier = "==1.2.3" },
     { name = "pypushdeer", specifier = "==0.0.3" },
     { name = "pyquery", specifier = "==2.1.0" },
     { name = "python-dateutil", specifier = "==2.9.0.post0" },
@@ -1200,10 +1196,10 @@ requires-dist = [
     { name = "requests", specifier = "==2.34.2" },
     { name = "ruamel-yaml", specifier = "==0.19.1" },
     { name = "selenium", specifier = "==4.51.0" },
-    { name = "slack-sdk", specifier = "==3.45.0" },
+    { name = "slack-bolt", specifier = "==1.30.0" },
     { name = "sqlalchemy", specifier = "==2.1.4" },
     { name = "tenacity", specifier = "==9.2.1" },
-    { name = "typing-extensions", specifier = "==4.16.0" },
+    { name = "transmission-rpc", specifier = "==7.0.12" },
     { name = "undetected-chromedriver", specifier = "==3.5.5" },
     { name = "urllib3", specifier = "==2.8.0" },
     { name = "valkey", specifier = "==6.2.0" },
@@ -1922,6 +1918,18 @@ wheels = [
 ]
 
 [[package]]
+name = "slack-bolt"
+version = "1.30.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "slack-sdk" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e3/4f/5ba15533d66da2e7174334cc0e2805142e5390c9f4c5f31633df78b17006/slack_bolt-1.30.0.tar.gz", hash = "sha256:af38258d41f801ad9c74503090e0f39accd66c49f667f7e55c97fcdb0e51b886", size = 131180, upload-time = "2026-07-15T20:47:33.679Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2f/ee/1a7a286cf98fa3f4eeffaabc090e82f58f058ab4812aa1d7421d92c2637a/slack_bolt-1.30.0-py2.py3-none-any.whl", hash = "sha256:81f5bc46e79516d23d5e2a31dded6304dd1b8b6b72c0083f2f31d5d801e262c4", size = 235341, upload-time = "2026-07-15T20:47:32.113Z" },
+]
+
+[[package]]
 name = "slack-sdk"
 version = "3.45.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2007,6 +2015,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/82/9e/497c1c8ebe5a5b5d1d4a7511aea22c0bb1a97e3170d98abdef0e1b34265a/tenacity-9.2.1.tar.gz", hash = "sha256:a606b5c808d0cded4a359d5b9932d867ff2a6a6b64d37350260fd01bbdf83839", size = 58261, upload-time = "2026-10-07T12:13:01.633Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d6/26/1ff2b0721ac66a3ec5b1402b333110b352ab0a8724052ac279a7b82d40c4/tenacity-9.2.1-py3-none-any.whl", hash = "sha256:9e56f17539296baab7beabb08b92f6ee3d7be92d8be72d763360677c2ad6580e", size = 32310, upload-time = "2026-10-07T12:13:00.102Z" },
+]
+
+[[package]]
+name = "transmission-rpc"
+version = "7.0.12"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/bb/9d/c4e24d5bd0a1166935ca146dfb99b7041e54a38a6eed600e6c9798e98f58/transmission_rpc-7.0.12.tar.gz", hash = "sha256:b65f195a26bf3db792f88ee93211929144321fbc3a4f018bf7029996304fcfa5", size = 26897, upload-time = "2026-08-09T14:37:41.519Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/80/9c/edc8ee0d9ab7a05f0cb334fc506ce3749ff869a8d41683108313096ce5ab/transmission_rpc-7.0.12-py3-none-any.whl", hash = "sha256:85e26b7ca13e1e102a695fe19f19f4236bd42bb4920b0edb9e35f6bb46bbe86e", size = 29103, upload-time = "2026-08-09T14:37:40.272Z" },
 ]
 
 [[package]]

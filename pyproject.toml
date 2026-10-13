@@ -8,8 +8,6 @@ dependencies = [
     "anitopy==2.2.0rc2",
     "APScheduler==3.11.3",
     "boddle==0.2.9",
-    "boto3==1.43.111",
-    "botocore==1.43.111",
     "cachelib==0.17.0",
     "cacheout==0.17.0",
     "chalice==1.33.0",
@@ -34,8 +32,8 @@ dependencies = [
     "pycryptodome==3.24.1",
     "PyJWT==2.15.1",
     "pypushdeer==0.0.3",
-    "psycopg[binary]>=3.2,<4",
-    "PyMySQL>=1.1,<2",
+    "psycopg[binary]==3.3.6",
+    "PyMySQL==1.2.3",
     "pyquery==2.1.0",
     "python-dotenv==1.2.4",
     "python_dateutil==2.9.0.post0",
@@ -48,9 +46,7 @@ dependencies = [
     "ruamel.yaml==0.19.1",
     "SQLAlchemy==2.1.4",
     "selenium==4.51.0",
-    "slack_sdk==3.45.0",
     "tenacity==9.2.1",
-    "typing_extensions==4.16.0",
     "undetected_chromedriver==3.5.5",
     "urllib3==2.8.0",
     "valkey==6.2.0",
@@ -59,6 +55,8 @@ dependencies = [
     "Werkzeug==3.1.9",
     "yarl==1.25.1",
     "zhconv==1.4.3",
+    "slack-bolt==1.30.0",
+    "transmission-rpc==7.0.12",
 ]
 
 [dependency-groups]
