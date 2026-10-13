@@ -44,6 +44,12 @@ _MEDIA_SYNC_JOB_COLUMNS = {
     "SERVER", "JOB_ID", "GENERATION_ID", "LEASE_TOKEN", "LEASE_UNTIL",
     "EXPECTED_ACTIVE_GENERATION", "STATUS", "CREATED_AT", "UPDATED_AT",
 }
+_IGNORED_LEGACY_COLUMNS = {
+    # Subscription site selections were retired by the current schema and are
+    # intentionally excluded from imported subscription records.
+    "RSS_MOVIES": {"RSS_SITES"},
+    "RSS_TVS": {"RSS_SITES"},
+}
 _LEGACY_ARCHIVE_RETENTION_SECONDS = 30 * 24 * 60 * 60
 logger = logging.getLogger(__name__)
 
@@ -427,8 +433,11 @@ def _copy_domain(connection, source_path, domain, expected_tables, excluded_tabl
                 connection, f"PRAGMA main.table_info({_quote(table)})").fetchall()
             _validate_target_lengths(connection, alias, table, source_columns, target_info)
             source_only = set(source_columns) - set(target_columns)
-            if source_only:
-                raise RuntimeError(f"旧表 {table} 有未映射字段：{', '.join(sorted(source_only))}")
+            unrecognized_columns = source_only - _IGNORED_LEGACY_COLUMNS.get(
+                table.upper(), set())
+            if unrecognized_columns:
+                raise RuntimeError(
+                    f"旧表 {table} 有未映射字段：{', '.join(sorted(unrecognized_columns))}")
             target_only_required = [row[1] for row in target_info
                                     if row[1] not in source_columns and row[3] and row[4] is None
                                     and not row[5]]

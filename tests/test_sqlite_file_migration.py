@@ -577,6 +577,28 @@ def test_retired_brush_downloader_data_remains_in_legacy_archive(tmp_path, monke
                 "legacy-test", "secret", "/archive-only", "preserved")
 
 
+def test_merge_discards_retired_rss_sites_column_and_keeps_tv_subscription(
+        tmp_path, monkeypatch):
+    user_path = tmp_path / "user.db"
+    _create_user_database(user_path)
+    with sqlite3.connect(user_path) as connection:
+        connection.execute("ALTER TABLE RSS_TVS ADD COLUMN RSS_SITES TEXT")
+        connection.execute("""INSERT INTO RSS_TVS
+            (ID, NAME, YEAR, TMDBID, STATE, RSS_SITES)
+            VALUES (92, 'migration-test-tv', '2025', 'tmdb-migration-test', 'R',
+                    '["retired-site-selection"]')""")
+    target_path = _configure_migration(tmp_path, monkeypatch)
+
+    assert prepare_sqlite_database() == str(target_path)
+
+    with sqlite3.connect(target_path) as connection:
+        assert connection.execute(
+            "SELECT ID, NAME, STATE FROM RSS_TVS WHERE ID=92").fetchone() == (
+                92, "migration-test-tv", "R")
+        assert "RSS_SITES" not in {
+            row[1].upper() for row in connection.execute("PRAGMA table_info(RSS_TVS)")}
+
+
 def test_process_interruption_leaves_no_partial_target_and_next_startup_recovers(
         tmp_path, monkeypatch):
     user_path = tmp_path / "user.db"
