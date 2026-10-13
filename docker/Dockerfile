@@ -20,7 +20,7 @@ LABEL maintainer="Coolkids"
 
 ARG TARGETPLATFORM
 ARG REPO_URL=https://github.com/Coolkids/nas-tools.git
-ARG RUSTFS_CLI_VERSION=0.1.35
+ARG RUSTFS_CLI_VERSION=0.1.36
 
 # 系统运行时依赖 + 编译工具（部分包在 Python 3.14 下可能无预编译 wheel）
 RUN apt-get update && apt-get install -y \
