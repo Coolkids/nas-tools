@@ -548,6 +548,35 @@ def test_read_only_legacy_sources_can_be_snapshotted_without_rewriting_them(tmp_
         assert connection.execute("SELECT count(*) FROM MEDIASYNC_ITEMS").fetchone() == (2,)
 
 
+def test_retired_brush_downloader_data_remains_in_legacy_archive(tmp_path, monkeypatch):
+    user_path = tmp_path / "user.db"
+    _create_user_database(user_path)
+    with sqlite3.connect(user_path) as connection:
+        connection.execute("""CREATE TABLE SITE_BRUSH_DOWNLOADERS (
+            ID INTEGER PRIMARY KEY, NAME TEXT, TYPE TEXT, HOST TEXT, PORT TEXT,
+            USERNAME TEXT, PASSWORD TEXT, SAVE_DIR TEXT, NOTE TEXT)""")
+        connection.execute("""INSERT INTO SITE_BRUSH_DOWNLOADERS
+            (ID, NAME, TYPE, HOST, PORT, USERNAME, PASSWORD, SAVE_DIR, NOTE)
+            VALUES (1, 'legacy-test', 'test', 'localhost', '1', 'user', 'secret',
+                    '/archive-only', 'preserved')""")
+    target_path = _configure_migration(tmp_path, monkeypatch)
+
+    assert prepare_sqlite_database() == str(target_path)
+    finalize_sqlite_migration()
+
+    with sqlite3.connect(target_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+            "AND name='SITE_BRUSH_DOWNLOADERS'").fetchone() == (0,)
+    archive_user = next((tmp_path / "db" / ".legacy-archive").glob(
+        "legacy-merge-*/user.db"))
+    with sqlite3.connect(archive_user) as connection:
+        assert connection.execute(
+            "SELECT NAME, PASSWORD, SAVE_DIR, NOTE FROM SITE_BRUSH_DOWNLOADERS "
+            "WHERE ID=1").fetchone() == (
+                "legacy-test", "secret", "/archive-only", "preserved")
+
+
 def test_process_interruption_leaves_no_partial_target_and_next_startup_recovers(
         tmp_path, monkeypatch):
     user_path = tmp_path / "user.db"
