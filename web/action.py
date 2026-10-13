@@ -631,14 +631,14 @@ class WebAction:
         magnets = data.get("magnets")
         if not files and not magnets:
             return {"code": -1, "msg": "没有种子文件或磁链"}
-        for file_item in files:
+        for file_item in files or []:
             if not file_item:
                 continue
             file_name = file_item.get("upload", {}).get("filename")
             file_path = os.path.join(Config().get_temp_path(), file_name)
             media_info = Media().get_media_info(title=file_name)
             __download(media_info, file_path)
-        for magnet in magnets:
+        for magnet in magnets or []:
             if not magnet:
                 continue
             file_path = None
@@ -779,7 +779,8 @@ class WebAction:
             return {"retcode": 0, "code": 0}
         else:
             retcode = self.dbhelper.delete_transfer_unknown(tids)
-            return {"retcode": retcode, "code": retcode}
+            code = 0 if retcode else 1
+            return {"retcode": code, "code": code}
 
     def __rename(self, data):
         """
@@ -2342,6 +2343,8 @@ class WebAction:
         oper = data.get("oper")
         name = data.get("name")
         if oper == "add":
+            if not data.get("password"):
+                return {"code": -1, "success": False, "message": "新增用户必须设置密码"}
             password = generate_password_hash(str(data.get("password")))
             pris = data.get("pris")
             if isinstance(pris, list):
@@ -3556,9 +3559,11 @@ class WebAction:
 
     def __check_custom_words(self, data):
         try:
-            flag_dict = {"enable": 1, "disable": 0}
+            flag_dict = {"enable": 1, "disable": 0, "1": 1, "0": 0}
             ids_info = data.get("ids_info")
             enabled = flag_dict.get(data.get("flag"))
+            if enabled is None:
+                return {"code": 1, "msg": "识别词状态参数无效"}
             ids = [id_info.split("_")[1] for id_info in ids_info]
             for wid in ids:
                 self.dbhelper.check_custom_word(wid=wid, enabled=enabled)

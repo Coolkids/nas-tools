@@ -1,3 +1,5 @@
+import json
+
 from flask import Blueprint, request
 from flask_restx import Api, reqparse, Resource
 
@@ -139,6 +141,7 @@ class UserManage(ClientResource):
     parser = reqparse.RequestParser()
     parser.add_argument('oper', type=str, help='操作类型（add 新增/del删除）', location='form', required=True)
     parser.add_argument('name', type=str, help='用户名', location='form', required=True)
+    parser.add_argument('password', type=str, help='密码（新增用户时必填）', location='form')
     parser.add_argument('pris', type=str, help='权限', location='form')
 
     @user.doc(parser=parser)
@@ -266,7 +269,7 @@ class SearchResult(ClientResource):
 @download.route('/search')
 class DownloadSearch(ClientResource):
     parser = reqparse.RequestParser()
-    parser.add_argument('id', type=str, help='搜索结果ID', location='form', required=True)
+    parser.add_argument('id', type=int, help='搜索结果ID', location='form', required=True)
     parser.add_argument('dir', type=str, help='保存目录', location='form')
     parser.add_argument('setting', type=str, help='下载设置', location='form')
 
@@ -391,7 +394,7 @@ class DownloadConfigInfo(ClientResource):
 @download.route('/config/update')
 class DownloadConfigUpdate(ClientResource):
     parser = reqparse.RequestParser()
-    parser.add_argument('sid', type=str, help='下载设置ID', location='form', required=True)
+    parser.add_argument('sid', type=str, help='下载设置ID（留空时新增）', location='form')
     parser.add_argument('name', type=str, help='名称', location='form', required=True)
     parser.add_argument('category', type=str, help='分类', location='form')
     parser.add_argument('tags', type=str, help='标签', location='form')
@@ -512,7 +515,7 @@ class UnknownRenameUDF(ClientResource):
 class UnknownRedo(ClientResource):
     parser = reqparse.RequestParser()
     parser.add_argument('flag', type=str, help='类型（unknow/history）', location='form', required=True)
-    parser.add_argument('ids', type=list, help='记录ID', location='form', required=True)
+    parser.add_argument('ids', type=str, action='append', help='记录ID', location='form', required=True)
 
     @organization.doc(parser=parser)
     def post(self):
@@ -525,7 +528,7 @@ class UnknownRedo(ClientResource):
 @organization.route('/history/delete')
 class TransferHistoryDelete(ClientResource):
     parser = reqparse.RequestParser()
-    parser.add_argument('logids', type=list, help='记录IDS', location='form', required=True)
+    parser.add_argument('logids', type=str, action='append', help='记录IDS', location='form', required=True)
 
     @organization.doc(parser=parser)
     def post(self):
@@ -840,7 +843,7 @@ class SubscribeAdd(ClientResource):
     parser.add_argument('rssid', type=int, help='已有订阅ID', location='form')
     parser.add_argument('mediaid', type=str, help='TMDBID/DB:豆瓣ID', location='form')
     parser.add_argument('fuzzy_match', type=int, help='模糊匹配（0-否/1-是）', location='form')
-    parser.add_argument('search_sites', type=list, help='索引器', location='form')
+    parser.add_argument('search_sites', type=str, action='append', help='索引器', location='form')
     parser.add_argument('over_edition', type=int, help='洗版（0-否/1-是）', location='form')
     parser.add_argument('filter_restype', type=str, help='资源类型', location='form')
     parser.add_argument('filter_pix', type=str, help='分辨率', location='form')
@@ -989,9 +992,16 @@ class SubscribeTvList(ClientResource):
 class RecommendList(ClientResource):
     parser = reqparse.RequestParser()
     parser.add_argument('type', type=str,
-                        help='类型（hm/ht/nm/nt/dbom/dbhm/dbht/dbdh/dbnm/dbtop/dbzy/bangumi）',
+                        help='媒体列表类型（MOV/TV/SEARCH/DOWNLOADED/TRENDING/DISCOVER/DOUBANTAG）',
                         location='form', required=True)
+    parser.add_argument('subtype', type=str, help='具体推荐来源或查询模式', location='form')
     parser.add_argument('page', type=int, help='页码', location='form', required=True)
+    parser.add_argument('tmdbid', type=str, help='TMDB ID（相似/推荐列表）', location='form')
+    parser.add_argument('personid', type=str, help='人物 ID', location='form')
+    parser.add_argument('week', type=str, help='Bangumi 周序号', location='form')
+    parser.add_argument('keyword', type=str, help='搜索词', location='form')
+    parser.add_argument('source', type=str, help='搜索源', location='form')
+    parser.add_argument('params', type=json.loads, help='发现条件 JSON', location='form')
 
     @recommend.doc(parser=parser)
     def post(self):
@@ -1170,7 +1180,7 @@ class RssItemHistory(ClientResource):
 class RssItemSet(ClientResource):
     parser = reqparse.RequestParser()
     parser.add_argument('flag', type=str, help='操作类型（set_finished/set_unfinish）', location='form', required=True)
-    parser.add_argument('articles', type=list, help='条目（{title/enclosure}）', location='form', required=True)
+    parser.add_argument('articles', type=json.loads, action='append', help='条目（JSON 条目）', location='form', required=True)
 
     @rss.doc(parser=parser)
     def post(self):
@@ -1184,7 +1194,7 @@ class RssItemSet(ClientResource):
 class RssItemDownload(ClientResource):
     parser = reqparse.RequestParser()
     parser.add_argument('taskid', type=int, help='任务ID', location='form', required=True)
-    parser.add_argument('articles', type=list, help='条目（{title/enclosure}）', location='form', required=True)
+    parser.add_argument('articles', type=json.loads, action='append', help='条目（JSON 条目）', location='form', required=True)
 
     @rss.doc(parser=parser)
     def post(self):
@@ -1198,6 +1208,7 @@ class RssItemDownload(ClientResource):
 class MediaSearch(ClientResource):
     parser = reqparse.RequestParser()
     parser.add_argument('keyword', type=str, help='关键字', location='form', required=True)
+    parser.add_argument('searchtype', type=str, help='搜索源', location='form')
 
     @media.doc(parser=parser)
     def post(self):
@@ -1388,8 +1399,8 @@ class FilterRuleGroupAdd(ClientResource):
 @filterrule.route('/group/restore')
 class FilterRuleGroupRestore(ClientResource):
     parser = reqparse.RequestParser()
-    parser.add_argument('groupids', type=list, help='规则组ID', location='form', required=True)
-    parser.add_argument('init_rulegroups', type=list, help='兼容旧客户端字段', location='form', required=False)
+    parser.add_argument('groupids', type=str, action='append', help='规则组ID', location='form', required=True)
+    parser.add_argument('init_rulegroups', type=str, action='append', help='兼容旧客户端字段', location='form', required=False)
 
     @filterrule.doc(parser=parser)
     def post(self):
@@ -1580,8 +1591,8 @@ class WordItemDelete(ClientResource):
 @words.route('/item/status')
 class WordItemStatus(ClientResource):
     parser = reqparse.RequestParser()
-    parser.add_argument('ids_info', type=list, help='识别词IDS', location='form', required=True)
-    parser.add_argument('flag', type=int, help='状态（1/0）', location='form', required=True)
+    parser.add_argument('ids_info', type=str, action='append', help='识别词IDS', location='form', required=True)
+    parser.add_argument('flag', type=str, help='状态（1/0）', location='form', required=True)
 
     @words.doc(parser=parser)
     def post(self):
@@ -1622,7 +1633,7 @@ class WordItemAnalyse(ClientResource):
 class WordItemImport(ClientResource):
     parser = reqparse.RequestParser()
     parser.add_argument('import_code', type=str, help='识别词代码', location='form', required=True)
-    parser.add_argument('ids_info', type=list, help='识别词IDS', location='form', required=True)
+    parser.add_argument('ids_info', type=str, action='append', help='识别词IDS', location='form', required=True)
 
     @words.doc(parser=parser)
     def post(self):
@@ -1744,7 +1755,7 @@ class MessageClientUpdate(ClientResource):
     parser.add_argument('type', type=str, help='类型（wechat/telegram/serverchan/bark/pushplus/iyuu/slack/gotify）',
                         location='form', required=True)
     parser.add_argument('config', type=str, help='配置项（JSON）', location='form', required=True)
-    parser.add_argument('switchs', type=list, help='开关', location='form', required=True)
+    parser.add_argument('switchs', type=str, action='append', help='开关', location='form', required=True)
     parser.add_argument('interactive', type=int, help='是否开启交互（0/1）', location='form', required=True)
     parser.add_argument('enabled', type=int, help='是否启用（0/1）', location='form', required=True)
 
@@ -1774,6 +1785,7 @@ class MessageClientStatus(ClientResource):
     parser = reqparse.RequestParser()
     parser.add_argument('flag', type=str, help='操作类型（interactive/enable）', location='form', required=True)
     parser.add_argument('cid', type=int, help='ID', location='form', required=True)
+    parser.add_argument('checked', type=int, help='状态（0-否/1-是）', location='form', required=True)
 
     @message.doc(parser=parser)
     def post(self):

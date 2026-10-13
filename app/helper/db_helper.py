@@ -752,8 +752,10 @@ class DbHelper:
         删除RSS的记录
         """
         if enclosure:
-            self._db.query(RSSTORRENTS).filter(RSSTORRENTS.TORRENT_NAME == title,
-                                               RSSTORRENTS.ENCLOSURE == enclosure).delete()
+            # The saved torrent title may be normalized/identified from the
+            # feed title. When an enclosure is available it is the stable
+            # identity, and must be enough to clear the finished marker.
+            self._db.query(RSSTORRENTS).filter(RSSTORRENTS.ENCLOSURE == enclosure).delete()
         else:
             self._db.query(RSSTORRENTS).filter(RSSTORRENTS.TORRENT_NAME == title).delete()
 
@@ -1276,7 +1278,7 @@ class DbHelper:
         ))
         return 0
 
-    @DbPersist(_db)
+    @DbPersist(_db, retry_safe=True)
     def delete_rss_movie(self, title=None, year=None, rssid=None, tmdbid=None):
         """
         删除RSS电影
@@ -1292,7 +1294,7 @@ class DbHelper:
             self._db.query(RSSMOVIES).filter(RSSMOVIES.NAME == title,
                                              RSSMOVIES.YEAR == str(year)).delete()
 
-    @DbPersist(_db)
+    @DbPersist(_db, retry_safe=True)
     def update_rss_movie_state(self, title=None, year=None, rssid=None, state='R'):
         """
         更新电影订阅状态
@@ -2109,7 +2111,7 @@ class DbHelper:
         else:
             return False
 
-    @DbPersist(_db)
+    @DbPersist(_db, retry_safe=True)
     def insert_rss_history(self, rssid, rtype, name, year, tmdbid, image, desc, season=None, total=None, start=None):
         """
         登记RSS历史
