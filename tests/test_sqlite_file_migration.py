@@ -599,6 +599,27 @@ def test_merge_discards_retired_rss_sites_column_and_keeps_tv_subscription(
             row[1].upper() for row in connection.execute("PRAGMA table_info(RSS_TVS)")}
 
 
+def test_merge_digest_accounts_for_legacy_integer_to_text_affinity(tmp_path, monkeypatch):
+    import app.db.sqlite_files as sqlite_files
+
+    user_path = tmp_path / "user.db"
+    _create_user_database(user_path)
+    with sqlite3.connect(user_path) as connection:
+        connection.execute("ALTER TABLE SEARCH_RESULT_INFO RENAME TO search_result_info_new")
+        connection.execute("CREATE TABLE SEARCH_RESULT_INFO (ID INTEGER PRIMARY KEY, SIZE INTEGER)")
+        connection.execute("INSERT INTO SEARCH_RESULT_INFO (ID, SIZE) VALUES (1, 123)")
+        connection.execute("DROP TABLE search_result_info_new")
+    monkeypatch.setattr(sqlite_files, "_upgrade_snapshot", lambda *_args, **_kwargs: None)
+    target_path = _configure_migration(tmp_path, monkeypatch)
+
+    assert prepare_sqlite_database() == str(target_path)
+
+    with sqlite3.connect(target_path) as connection:
+        assert connection.execute(
+            "SELECT SIZE, typeof(SIZE) FROM SEARCH_RESULT_INFO WHERE ID=1").fetchone() \
+            == ("123", "text")
+
+
 def test_process_interruption_leaves_no_partial_target_and_next_startup_recovers(
         tmp_path, monkeypatch):
     user_path = tmp_path / "user.db"

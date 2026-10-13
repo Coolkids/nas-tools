@@ -378,7 +378,20 @@ def _validate_target_lengths(connection, alias, table, source_columns, target_in
             raise RuntimeError(f"旧表 {table}.{name} 有 {count} 条记录超过新字段长度 {limit}，拒绝截断")
 
 
-def _digest_rows(connection, schema, table, columns, primary_key):
+def _sqlite_affinity(declared_type):
+    value = str(declared_type or "").upper()
+    if "INT" in value:
+        return "INTEGER"
+    if any(part in value for part in ("CHAR", "CLOB", "TEXT")):
+        return "TEXT"
+    if not value or "BLOB" in value:
+        return "BLOB"
+    if any(part in value for part in ("REAL", "FLOA", "DOUB")):
+        return "REAL"
+    return "NUMERIC"
+
+
+def _digest_rows(connection, schema, table, columns, primary_key, target_types=None):
     digest = hashlib.sha256()
     selected = ", ".join(_quote(column) for column in columns)
     order = ", ".join(_quote(column) for column in primary_key)
@@ -390,7 +403,15 @@ def _digest_rows(connection, schema, table, columns, primary_key):
         if not rows:
             break
         for row in rows:
-            digest.update(repr(tuple(row)).encode("utf-8", "surrogatepass"))
+            normalized = []
+            for column, value in zip(columns, row):
+                if (_sqlite_affinity((target_types or {}).get(column)) == "TEXT"
+                        and isinstance(value, (int, float))):
+                    # SQLite applies the destination TEXT affinity during
+                    # INSERT ... SELECT, so hash the value in that same form.
+                    value = str(value)
+                normalized.append(value)
+            digest.update(repr(tuple(normalized)).encode("utf-8", "surrogatepass"))
             digest.update(b"\0")
             count += 1
     return count, digest.hexdigest()
@@ -449,13 +470,16 @@ def _copy_domain(connection, source_path, domain, expected_tables, excluded_tabl
             primary_key = [row[1] for row in sorted(target_info, key=lambda item: item[5]) if row[5]]
             if not primary_key:
                 raise RuntimeError(f"旧表 {table} 没有稳定主键，无法校验迁移")
-            count_before, digest_before = _digest_rows(connection, alias, table, columns, primary_key)
+            target_types = {row[1]: row[2] for row in target_info}
+            count_before, digest_before = _digest_rows(
+                connection, alias, table, columns, primary_key, target_types)
             if count_before:
                 joined_columns = ", ".join(_quote(column) for column in columns)
                 _execute(connection,
                     f"INSERT INTO main.{_quote(table)} ({joined_columns}) "
                     f"SELECT {joined_columns} FROM {alias}.{_quote(table)}")
-            count_after, digest_after = _digest_rows(connection, "main", table, columns, primary_key)
+            count_after, digest_after = _digest_rows(
+                connection, "main", table, columns, primary_key, target_types)
             if (count_before, digest_before) != (count_after, digest_after):
                 raise RuntimeError(f"旧表 {table} 导入后摘要不一致")
     finally:
