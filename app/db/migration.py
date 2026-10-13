@@ -15,10 +15,11 @@ import threading
 import time
 import uuid
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import (Column, Index, Integer, MetaData, String, Table, create_engine,
                         func, inspect, insert, select, text, update)
+from sqlalchemy.exc import StatementError
 from sqlalchemy.engine import URL
 
 from app.db.backends import create_backend
@@ -600,7 +601,12 @@ def check_database(values):
 
 
 def _safe_error(error, settings=None):
-    value = str(error)
+    if isinstance(error, StatementError):
+        driver_error = getattr(error, "orig", None)
+        driver_name = type(driver_error).__name__ if driver_error is not None else "database"
+        value = f"数据库语句执行失败（{driver_name}）"
+    else:
+        value = str(error)
     if settings and settings.get("password"):
         value = value.replace(settings["password"], "***")
     return value[:1500]
@@ -975,14 +981,88 @@ def _ordered_table_select(connection, table):
     return create_backend(connection.dialect.name).ordered_select(table)
 
 
-def _table_digest(connection, table):
+def _coerce_transfer_value(value, column):
+    """Normalize SQLite values to the SQLAlchemy destination column type."""
+    if value is None:
+        return None
+    try:
+        expected = column.type.python_type
+    except (AttributeError, NotImplementedError):
+        return value
+
+    def empty_value():
+        if column.nullable:
+            return None
+        raise ValueError(f"表 {column.table.name}.{column.name} 的必填数值为空")
+
+    if expected is str:
+        if isinstance(value, bool):
+            return "1" if value else "0"
+        if isinstance(value, (int, float, Decimal)):
+            return str(value)
+        return value
+    if expected is bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().casefold()
+            if not normalized:
+                return empty_value()
+            if normalized in {"1", "true", "yes", "y"}:
+                return True
+            if normalized in {"0", "false", "no", "n"}:
+                return False
+        if value in (0, 1):
+            return bool(value)
+        raise ValueError(f"表 {column.table.name}.{column.name} 的布尔值格式无效")
+    if expected is int:
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                return empty_value()
+            try:
+                number = Decimal(normalized)
+            except (InvalidOperation, ValueError) as error:
+                raise ValueError(
+                    f"表 {column.table.name}.{column.name} 的整数值格式无效") from error
+            if not number.is_finite() or number != number.to_integral_value():
+                raise ValueError(f"表 {column.table.name}.{column.name} 的整数值格式无效")
+            return int(number)
+        if isinstance(value, float):
+            if not value.is_integer():
+                raise ValueError(f"表 {column.table.name}.{column.name} 的整数值格式无效")
+            return int(value)
+        if isinstance(value, Decimal):
+            if not value.is_finite() or value != value.to_integral_value():
+                raise ValueError(f"表 {column.table.name}.{column.name} 的整数值格式无效")
+            return int(value)
+    if expected is float:
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                return empty_value()
+            try:
+                return float(normalized)
+            except ValueError as error:
+                raise ValueError(
+                    f"表 {column.table.name}.{column.name} 的数值格式无效") from error
+        if isinstance(value, (int, Decimal)):
+            return float(value)
+    return value
+
+
+def _table_digest(connection, table, for_transfer=False):
     digest = hashlib.sha256()
     count = 0
     backend = create_backend(connection.dialect.name)
     for batch in backend.read_batches(connection, table):
         for row in batch:
+            values = [_coerce_transfer_value(row[column.name], column)
+                      if for_transfer else row[column.name] for column in table.columns]
             encoded = json.dumps(
-                [_normalize_value(row[column.name]) for column in table.columns],
+                [_normalize_value(value) for value in values],
                 ensure_ascii=False, separators=(",", ":"), sort_keys=True)
             digest.update(encoded.encode("utf-8", "surrogatepass"))
             digest.update(b"\n")
@@ -1013,6 +1093,8 @@ def _copy_table(source_connection, target_engine, table):
 
     for source_batch in source_backend.read_batches(source_connection, table):
         for mapping in source_batch:
+            mapping = {column.name: _coerce_transfer_value(
+                mapping.get(column.name), column) for column in table.columns}
             for column in table.columns:
                 value = mapping.get(column.name)
                 limit = getattr(column.type, "length", None)
@@ -1490,9 +1572,11 @@ def _run_migration_impl(job_id, candidate, source_fingerprint, target_fingerprin
                                 message="正在逐表校验行数和完整内容摘要", progress=0.72)
             validation = {}
             for index, table in enumerate(tables, start=1):
-                source_count, source_digest = _table_digest(source_connection, table)
+                source_count, source_digest = _table_digest(
+                    source_connection, table, for_transfer=True)
                 with target_engine.connect() as target_connection:
-                    target_count, target_digest = _table_digest(target_connection, table)
+                    target_count, target_digest = _table_digest(
+                        target_connection, table, for_transfer=True)
                 if (source_count, source_digest) != (target_count, target_digest):
                     raise RuntimeError(f"表 {table.name} 的行数或内容摘要不一致")
                 if source_count != expected_counts.get(table.name):
@@ -1524,8 +1608,10 @@ def _run_migration_impl(job_id, candidate, source_fingerprint, target_fingerprin
                 for table in tables:
                     if table is DATABASEMIGRATIONMARKER.__table__:
                         continue
-                    source_count, source_digest = _table_digest(source_connection, table)
-                    target_count, target_digest = _table_digest(target_lock_connection, table)
+                    source_count, source_digest = _table_digest(
+                        source_connection, table, for_transfer=True)
+                    target_count, target_digest = _table_digest(
+                        target_lock_connection, table, for_transfer=True)
                     if (source_count, source_digest) != (target_count, target_digest):
                         raise RuntimeError(f"独占锁定后表 {table.name} 的内容发生变化")
                 marker = target_lock_connection.execute(select(DATABASEMIGRATIONMARKER.__table__).where(

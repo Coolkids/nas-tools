@@ -8,8 +8,9 @@ import sqlalchemy as sa
 
 from app.db.backends import create_backend
 from app.db.manager import DatabaseManager
-from app.db.migration import _calibrate_sequences, _copy_table, _table_digest
-from app.db.models import Base, MEDIASYNCITEMS
+from app.db.migration import (_calibrate_sequences, _coerce_transfer_value, _copy_table,
+                              _safe_error, _table_digest)
+from app.db.models import Base, MEDIASYNCITEMS, RSSTVS
 
 
 @pytest.mark.parametrize("source_type", ("sqlite", "postgresql", "mariadb", "mysql"))
@@ -117,3 +118,48 @@ def test_portable_table_copy_matrix_preserves_data_and_new_ids(
         source_engine.dispose()
         for manager in managers:
             manager.dispose()
+
+
+def test_portable_copy_normalizes_blank_nullable_integer_values(tmp_path):
+    source_engine = sa.create_engine(f"sqlite:///{tmp_path / 'source.sqlite3'}")
+    target_engine = sa.create_engine(f"sqlite:///{tmp_path / 'target.sqlite3'}")
+    try:
+        Base.metadata.create_all(source_engine)
+        Base.metadata.create_all(target_engine)
+        with source_engine.begin() as connection:
+            connection.exec_driver_sql(
+                "INSERT INTO RSS_TVS (ID, DOWNLOAD_SETTING) VALUES (?, ?)",
+                (991, ""))
+
+        with source_engine.connect() as source:
+            expected = _table_digest(source, RSSTVS.__table__, for_transfer=True)
+            assert _copy_table(source, target_engine, RSSTVS.__table__) == 1
+        with target_engine.connect() as target:
+            actual = _table_digest(target, RSSTVS.__table__, for_transfer=True)
+            value = target.exec_driver_sql(
+                "SELECT DOWNLOAD_SETTING FROM RSS_TVS WHERE ID=991").scalar_one()
+
+        assert value is None
+        assert actual == expected
+        assert _coerce_transfer_value("", RSSTVS.__table__.c.DOWNLOAD_SETTING) is None
+    finally:
+        Base.metadata.drop_all(target_engine)
+        Base.metadata.drop_all(source_engine)
+        target_engine.dispose()
+        source_engine.dispose()
+
+
+def test_database_statement_errors_do_not_expose_bound_row_values():
+    from sqlalchemy.exc import StatementError
+
+    error = StatementError(
+        "database statement failed",
+        "INSERT INTO RSS_TVS (NAME) VALUES (?)",
+        [{"NAME": "private-subscription-marker", "PASSWORD": "private-password-marker"}],
+        RuntimeError("driver details private-subscription-marker"))
+
+    safe = _safe_error(error, {"password": "private-password-marker"})
+
+    assert "private-subscription-marker" not in safe
+    assert "private-password-marker" not in safe
+    assert "INSERT INTO" not in safe

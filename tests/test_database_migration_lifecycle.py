@@ -383,8 +383,8 @@ def test_remote_to_sqlite_migration_publishes_only_after_validation_and_rolls_ba
         original_digest = migration._table_digest
         corrupted = []
 
-        def mismatch_target_digest(connection, table):
-            count, digest = original_digest(connection, table)
+        def mismatch_target_digest(connection, table, *args, **kwargs):
+            count, digest = original_digest(connection, table, *args, **kwargs)
             if (connection.engine.url.database != snapshot_path and not corrupted):
                 corrupted.append(table.name)
                 return count, "0" * 64
