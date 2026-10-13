@@ -1,6 +1,7 @@
 """Scheduled jobs must release scoped DB sessions on reused worker threads."""
 
 from datetime import datetime, timedelta
+from concurrent.futures import Future
 from threading import Barrier, Event, Lock
 
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
@@ -12,6 +13,8 @@ import app.db.scheduler as database_scheduler_module
 from app.db.backends.sqlite import SQLiteBackend
 from app.db.manager import DatabaseManager
 from app.db.scheduler import DatabaseSessionBackgroundScheduler
+import app.subscribe as subscribe_module
+from app.subscribe import Subscribe
 
 
 def test_scheduled_jobs_release_connections_after_success_and_failure(
@@ -63,3 +66,42 @@ def test_scheduled_jobs_release_connections_after_success_and_failure(
         if scheduler.running:
             scheduler.shutdown(wait=True)
         manager.dispose()
+
+
+def test_subscribe_search_releases_coordinator_and_worker_sessions_before_fanout(monkeypatch):
+    closed_sessions = []
+
+    class InlineExecutor:
+        def __init__(self, max_workers):
+            self.max_workers = max_workers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def submit(self, function, *args):
+            assert closed_sessions, "coordinator DB session must be released before worker fan-out"
+            future = Future()
+            try:
+                future.set_result(function(*args))
+            except BaseException as error:
+                future.set_exception(error)
+            return future
+
+    monkeypatch.setattr(subscribe_module, "close_db", lambda: closed_sessions.append(True))
+    monkeypatch.setattr(subscribe_module, "ThreadPoolExecutor", InlineExecutor)
+
+    for getter_name, search_name in (
+            ("get_subscribe_movies", "subscribe_search_movie"),
+            ("get_subscribe_tvs", "subscribe_search_tv")):
+        closed_sessions.clear()
+        subscribe = Subscribe.__new__(Subscribe)
+        monkeypatch.setattr(subscribe, getter_name, lambda **kwargs: {
+            "fixture": {"fuzzy_match": True}
+        })
+
+        getattr(subscribe, search_name)(state="R")
+
+        assert len(closed_sessions) == 2

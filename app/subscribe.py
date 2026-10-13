@@ -3,6 +3,7 @@ from threading import Lock
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import log
+from app.db import close_db
 from app.downloader import Downloader
 from app.filter import Filter
 from app.helper import DbHelper, MetaHelper
@@ -16,6 +17,13 @@ from app.utils.types import MediaType, SearchType
 from web.backend.web_utils import WebUtils
 
 lock = Lock()
+
+
+def _run_with_db_cleanup(task, *args):
+    try:
+        return task(*args)
+    finally:
+        close_db()
 
 
 class Subscribe:
@@ -564,6 +572,10 @@ class Subscribe:
             rss_movies = self.get_subscribe_movies(rid=rssid)
         else:
             rss_movies = self.get_subscribe_movies(state=state)
+        # Materialize the subscription rows before fan-out. Keeping the caller's
+        # scoped connection while it waits for worker futures can exhaust the
+        # bounded SQLite pool (particularly while another scheduled job runs).
+        close_db()
         if rss_movies:
             log.info("【Subscribe】共有 %s 个电影订阅需要检索" % len(rss_movies))
 
@@ -636,8 +648,8 @@ class Subscribe:
         with ThreadPoolExecutor(max_workers=2) as pool:
             tasks = []
             for k_rid, v_rss_info in rss_movies.items():
-                tasks.append(pool.submit(subscribe_search_movie_task,
-                                         k_rid,v_rss_info)
+                tasks.append(pool.submit(_run_with_db_cleanup,
+                                         subscribe_search_movie_task, k_rid, v_rss_info)
                 )
 
             for f in as_completed(tasks):
@@ -657,6 +669,9 @@ class Subscribe:
             rss_tvs = self.get_subscribe_tvs(rid=rssid)
         else:
             rss_tvs = self.get_subscribe_tvs(state=state)
+        # Do not hold a database connection in the coordinator thread while it
+        # waits for per-subscription tasks that also need database connections.
+        close_db()
         if rss_tvs:
             log.info("【Subscribe】共有 %s 个电视剧订阅需要检索" % len(rss_tvs))
 
@@ -782,8 +797,8 @@ class Subscribe:
         with ThreadPoolExecutor(max_workers=5) as pool:
             tasks = []
             for k_rid, v_rss_info in rss_tvs.items():
-                tasks.append(pool.submit(subscribe_search_tv_task,
-                                         k_rid, v_rss_info)
+                tasks.append(pool.submit(_run_with_db_cleanup,
+                                         subscribe_search_tv_task, k_rid, v_rss_info)
                              )
 
             for f in as_completed(tasks):
