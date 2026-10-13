@@ -225,17 +225,23 @@ def test_database_check_rejects_external_object_created_after_initial_check(
     engine.dispose()
 
 
-def test_postgresql_target_scan_includes_non_default_user_schemas(monkeypatch):
+def test_postgresql_target_scan_includes_user_objects_and_ignores_extension_members(
+        monkeypatch):
     class InspectorStub:
         default_schema_name = "public"
 
         @staticmethod
         def get_schema_names():
-            return ["public", "custom_data", "information_schema", "pg_catalog", "pg_toast_1"]
+            return ["public", "custom_data", "_timescaledb_catalog",
+                    "information_schema", "pg_catalog", "pg_toast_1"]
 
         @staticmethod
         def get_table_names(schema=None):
-            return ["shadow_data"] if schema == "custom_data" else []
+            if schema == "custom_data":
+                return ["shadow_data"]
+            if schema == "_timescaledb_catalog":
+                return ["bgw_job", "user_extra"]
+            return []
 
         @staticmethod
         def get_view_names(schema=None):
@@ -251,7 +257,11 @@ def test_postgresql_target_scan_includes_non_default_user_schemas(monkeypatch):
 
     engine = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
     monkeypatch.setattr(migration, "inspect", lambda _engine: InspectorStub())
-    assert migration._database_objects(engine) == ["table:custom_data.shadow_data"]
+    monkeypatch.setattr(
+        migration, "_postgres_extension_objects",
+        lambda _engine: {("_timescaledb_catalog", "bgw_job")})
+    assert migration._database_objects(engine) == [
+        "table:_timescaledb_catalog.user_extra", "table:custom_data.shadow_data"]
 
 
 def test_same_remote_database_aliases_are_rejected(tmp_path, monkeypatch):

@@ -85,7 +85,7 @@ SQLite 的文件名和目录由后端固定生成，不能在设置页或 API �
 
 ## 测试环境记录
 
-验证日期：2026-10-13。测试使用 Python 3.14.4、SQLAlchemy 2.1.4、临时 SQLite，以及三个专用且运行前确认为空的远程测试库。凭证从仓库外权限为 `600` 的本机 JSON 文件注入单次测试进程；没有写入仓库或输出到测试日志。远程契约用例结束后再次确认三个测试库均无遗留表或视图。驱动和服务版本仅代表本次验收环境，不构成对其他版本的兼容承诺。
+验证日期：2026-10-13。测试使用 Python 3.14.4、SQLAlchemy 2.1.4、临时 SQLite，以及三个专用远程测试库。运行前后 PostgreSQL 当前应用 schema、MariaDB 和 MySQL 测试数据库均无应用表或视图。PostgreSQL 实例另安装了 TimescaleDB；其扩展明确拥有的系统关系未触碰，扫描仍拒绝扩展未拥有的用户对象。凭证从仓库外权限为 `600` 的本机 JSON 文件注入单次测试进程；没有写入仓库或输出到测试日志。驱动和服务版本仅代表本次验收环境，不构成对其他版本的兼容承诺。
 
 | 后端 | 服务端版本 | 驱动版本 | 启动/重启方式 | 空库 schema 初始化耗时 | 验收日期 |
 | --- | --- | --- | --- | --- | --- |
@@ -94,7 +94,7 @@ SQLite 的文件名和目录由后端固定生成，不能在设置页或 API �
 | MySQL | 8.4.11 Community | `PyMySQL` 1.2.3 | 应用级 SQLAlchemy 契约及 `app_database.update_db()` schema bootstrap；应用进程重启未在该远程配置下测试 | 4.527 秒，34 张应用表 | 2026-10-13 |
 | MariaDB | 11.8.9-MariaDB-ubu2404 | `PyMySQL` 1.2.3 | 应用级 SQLAlchemy 契约及 `app_database.update_db()` schema bootstrap；应用进程重启未在该远程配置下测试 | 4.831 秒，34 张应用表 | 2026-10-13 |
 
-本次启用远程配置再次运行 `tests/test_database_engine_contract.py`、`tests/test_database_backup_contract.py`、`tests/test_database_migration_contract.py`，结果为 `45 passed`；随后运行全量后端套件，结果为 `484 passed, 4 skipped, 102 subtests passed`。运行前后均以只读方式确认三个隔离库为空（0 张表、0 个视图）。这补充验证了真实远程引擎上的 CRUD/事务契约、低层 16 组迁移复制和 16 组归档导入；后台迁移/恢复任务全生命周期、生产规模数据、权限不足故障及进程重启仍未覆盖。
+远程配置下，数据库契约、低层迁移/归档矩阵及真实后台生命周期测试通过；详细结果和最终全量套件统计见下文。测试结束后按应用 schema 复核，三个库均为 0 张应用表、0 个应用视图、0 个未归属已安装扩展的冲突对象。真实远程引擎上的 CRUD/事务契约、低层 16 组迁移复制和 16 组归档导入均通过；生产规模数据、权限不足故障、外部并发写入及操作系统级进程终止仍未覆盖。
 
 `tests/test_database_engine_contract.py` 的隔离远程运行结果为 9 passed。该结果验证 CRUD、事务回滚、批量插入/upsert、唯一约束、分页、自增、非连续主键、会话归还，以及四种后端的空库 metadata 初始化。它不代表执行了跨数据库业务数据迁移，也不代表备份恢复矩阵通过。计时只包括新空库的应用 schema 初始化，不包括跨库导入、备份、恢复或进程重启。
 
@@ -106,7 +106,9 @@ SQLite 的文件名和目录由后端固定生成，不能在设置页或 API �
 
 `tests/test_database_migration_contract.py` 通过 `_copy_table`、逐表内容摘要和自增校准验证全部 16 个源/目标引擎组合，远程运行 `16 passed`。每个用例从空隔离库开始，复制含 Unicode、长路径和 JSON 的样例，校验目标摘要并验证新增主键。相同远程实例的用例使用本地 SQLite 快照作为隔离中间库，因为正式流程应拒绝源/目标为同一实例。此项不覆盖 `start_database_migration` 的检查凭证、维护锁、配置提交、重启及故障恢复编排。
 
-`tests/test_database_migration_lifecycle.py` 覆盖应用级迁移检查凭证与目标确认、凭证过期/复用、同一远程库地址别名、空目标对象扫描及检查后外部写入、配置提交前的复制/摘要/取消/重启故障，以及远程迁回 SQLite 时固定库和旧双库归档、缓存/无关文件保留、身份变化拒绝、部分退役恢复与待 spool 检查。测试使用隔离 SQLite 适配器模拟迁移编排；它不替代远程服务器端到端矩阵。回归还修复了目标 schema 校验在 SQLAlchemy 2.x 下传入 `Engine` 的问题，以及持有 SQLite 写者保留锁时从同一连接执行在线备份导致的 `database is locked`。
+`tests/test_database_migration_lifecycle.py` 覆盖应用级迁移检查凭证与目标确认、凭证过期/复用、同一远程库地址别名、空目标对象扫描及检查后外部写入、配置提交前的复制/摘要/取消/重启故障，以及远程迁回 SQLite 时固定库和旧双库归档、缓存/无关文件保留、身份变化拒绝、部分退役恢复与待 spool 检查。独立的 `tests/test_remote_database_lifecycle.py` 在三个远程后端完成后台备份、上传、检查、事务恢复、启动恢复，以及六个远程异类型迁移方向的真实任务链。回归修复了远程目标身份比对不一致、PostgreSQL 扩展自有关系误判为空库冲突，以及持有 SQLite 写者保留锁时从同一连接执行在线备份导致的 `database is locked`。
+
+`tests/test_remote_database_lifecycle.py` 远程运行结果为 `9 passed`：PostgreSQL、MySQL、MariaDB 各完成一次后台备份到启动恢复的完整链路，六个有向远程异类型迁移均完成复制、摘要校验、目标独占复核、隔离配置提交和启动验证；每条链路均验证恢复/迁移后的读取与新增写入。样例为小型合成数据，不覆盖同类型不同实例、生产规模流式压力、真实进程重启或故障注入。
 
 `tests/test_database_filter_priority.py` 验证旧配置中的数字字符串、空值及非数字优先级按稳定顺序读取，结果为 `1 passed`。完整过滤、订阅、用户、搜索历史、转移和媒体同步业务链路仍未在四种引擎上全量联调。
 
@@ -124,7 +126,7 @@ SQLite 的文件名和目录由后端固定生成，不能在设置页或 API �
 
 2026-10-13 隔离内存缓存微基准：单进程写入 10,000 条 128 字节载荷，在 100、1,000、5,000、10,000 条时分段统计写入和 `memory_info()`。分段写入 P50 保持在 0.163–0.175 ms/条、P95 为 0.312–0.352 ms/条；统计中位数为 0.137–0.156 ms；`tracemalloc` 峰值从 0.18 MiB 增至 4.74 MiB，进程最大 RSS 从 98.0 MiB 增至 107.2 MiB。该结果支持在此规模下没有明显的逐次全量扫描退化；它是本机合成负载的一次观测，不代表持久化后端、真实载荷分布或生产负载。
 
-2026-10-13 本地回归：未启用远程配置时后端全量为 `445 passed, 43 skipped, 102 subtests passed`；启用隔离 PostgreSQL、MariaDB、MySQL 配置后全量为 `484 passed, 4 skipped, 102 subtests passed`，远程契约/迁移/备份定向矩阵为 `45 passed`。新增数据库状态回归在请求 ORM 会话仍持有连接时检查 schema，并确认会话关闭后连接归还；前端 `npm run build`（含 `vue-tsc --noEmit`）通过。UID 1000 下只读文件权限用例实际运行通过。生产数据与完整后台任务生命周期仍待验收。
+2026-10-13 本地回归：未启用远程配置时后端全量为 `445 passed, 43 skipped, 102 subtests passed`；本次启用隔离 PostgreSQL、MariaDB、MySQL 配置后全量为 `493 passed, 4 skipped, 102 subtests passed`（425.85 秒）。远程契约和低层迁移/备份矩阵为 `45 passed`，新增真实后台生命周期矩阵为 `9 passed`。新增数据库状态回归在请求 ORM 会话仍持有连接时检查 schema，并确认会话关闭后连接归还；前端 `npm run build`（含 `vue-tsc --noEmit`）通过。UID 1000 下只读文件权限用例实际运行通过。生产历史数据、生产规模负载、同类型不同实例迁移、真实进程重启/故障演练及人工 UI 交互仍待验收。
 
 使用 Google Chrome 154 headless 加本地 mock `/do` 响应加载构建产物，缓存和数据库标签在 360、390、768、1280、1440 px 与浅/深色主题下均无页面横向溢出。此项只验证空数据状态的布局，不覆盖真实 API 联调、含数据表格、软键盘、安全区、放大、键盘/屏幕阅读器或迁移/恢复交互。
 

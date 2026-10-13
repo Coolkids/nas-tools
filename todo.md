@@ -621,13 +621,13 @@ flowchart TD
 | 数据库 | 测试连接 | 验证安排 |
 | --- | --- | --- |
 | SQLite | 为隔离测试创建临时配置文件目录，活动库固定为 `db/nastools.db`；根目录或 `db/` 中的 `user.db` / `media.db` 仅用于旧版升级夹具 | 覆盖默认后端、固定单库、双库合并升级、两个逻辑域、WAL 和恢复 |
-| PostgreSQL | `10.10.173.54:5432`，用户 `nastools`，数据库 `nastools` | 契约、空库结构初始化及低层迁移/备份矩阵已通过；全量任务编排/恢复和权限故障演练仍待验收 |
-| MariaDB | `10.10.173.54:3306`，用户 `nastools`，数据库 `nastools` | 契约、空库结构初始化及低层迁移/备份矩阵已通过；全量任务编排/恢复和权限故障演练仍待验收 |
-| MySQL | `10.10.173.54:3307`，用户 `nastools`，数据库 `nastools` | 契约、空库结构初始化及低层迁移/备份矩阵已通过；全量任务编排/恢复和权限故障演练仍待验收 |
+| PostgreSQL | `10.10.173.54:5432`，用户 `nastools`，数据库 `nastools` | 契约、空库结构初始化、备份/恢复全任务链及六向迁移矩阵已通过；TimescaleDB 扩展自有关系保持原样，生产规模和故障演练仍待验收 |
+| MariaDB | `10.10.173.54:3306`，用户 `nastools`，数据库 `nastools` | 契约、空库结构初始化、备份/恢复全任务链及六向迁移矩阵已通过；生产规模和故障演练仍待验收 |
+| MySQL | `10.10.173.54:3307`，用户 `nastools`，数据库 `nastools` | 契约、空库结构初始化、备份/恢复全任务链及六向迁移矩阵已通过；生产规模和故障演练仍待验收 |
 
 远程测试密码从仓库外权限为 `600` 的本机 JSON 文件读入单次测试进程环境；不得把密码值写入版本控制的配置、DSN 示例、测试报告或本文档。先检查给定实例的产品、版本、权限和现有数据，再使用隔离测试库；禁止为测试自动清空任何未确认的数据库。
 
-实测服务端/驱动版本、隔离测试范围和初始化耗时见 `docs/database-storage.md`。以上远程测试库不是生产库；所有远程契约测试均要求检测目标为空，并清理本次创建的表。Python 3.14.4 使用项目 `.venv` 解释器。
+实测服务端/驱动版本、隔离测试范围和初始化耗时见 `docs/database-storage.md`。以上远程测试库不是生产库；远程任务测试先拒绝应用 schema 中已有表、视图及 PostgreSQL 扩展未拥有的其他 schema 对象，再清理本次创建的表。TimescaleDB 明确拥有的系统关系不属于应用数据且不会被修改。Python 3.14.4 使用项目 `.venv` 解释器。
 
 - [x] 使用临时配置目录完成当前代码的启动、SQLite 初始化/升级、缓存初始化、健康检查、前端代理登录及 SIGINT 停止验证。
 - [x] `docker compose -f docker/compose.yml config --quiet` 静态配置检查通过。
@@ -666,7 +666,8 @@ flowchart TD
 - [ ] 生产历史数据库样本与部署进程终止环境仍需抽样验收。
 - [x] `_copy_table` 低层复制契约覆盖四种引擎间的全部 16 个源/目标组合，逐表摘要一致，恢复主键校准后可继续新增记录。
 - [x] 隔离应用任务链覆盖检查凭证与目标确认、过期/重复凭证、同库别名、空目标/现存对象复核、远程目标迁回固定 SQLite 的归档准备、取消、失败回滚、配置保存与重启失败恢复（`tests/test_database_migration_lifecycle.py`）。SQLite 适配器隔离夹具验证任务编排，不等同真实远程端到端验收。
-- [ ] 全部 12 个跨类型组合、远程不同实例同类型迁移及双远程实例场景仍需真实后端端到端验收。
+- [x] PostgreSQL、MySQL、MariaDB 之间六个异类型迁移方向通过真实后台任务链，覆盖目标检查、复制、逐表摘要、远程独占复核、配置提交、启动校验和迁移后新增写入（`tests/test_remote_database_lifecycle.py`）。
+- [ ] SQLite 与远程后端间六个方向的真实完整任务链、远程不同实例同类型迁移及双远程实例场景仍需端到端验收。
 - [x] `tests/test_sqlite_file_migration.py` 验证根目录及 `db/` 旧双库可合并到 `<配置文件目录>/db/nastools.db`，以及仅主库与已提交 WAL 升级；覆盖空间不足、无效媒体结构、相同数值 ID 与导入失败保护，并检查完成标记、固定路径、媒体代次回填、内容完整性和旧源保留。
 - [x] 默认缺省配置选择 SQLite，后端始终生成 `<配置目录>/db/nastools.db`，数据库迁移 API 拒绝 `path`、`directory`、`url`、`dsn`、`sqlite_path` 覆盖（`tests/test_database_fixed_sqlite_path.py`）。
 - [ ] 前端没有目录编辑入口，以及切换、重启、恢复后的活动库均在固定路径仍需验收。
@@ -674,7 +675,7 @@ flowchart TD
 - [x] 旧库升级边界覆盖只读快照、不完整暂存清理、进程级并发及同名视图拒绝；已有成功合并、缺失主库、空间不足、无效媒体结构、路径占用、损坏、双位置冲突、未标记目标冲突和重复启动用例（`tests/test_sqlite_file_migration.py`）。只读用例在 UID 1000 下运行；实际部署目录权限仍需部署验收。
 - [x] 在旧库快照进程中断、结构转换、分批导入、内容校验、单库发布、完成标记和旧文件归档边界注入故障或杀进程；确认 main/media WAL 已提交数据、旧源及固定目标完整性，启动清理孤儿暂存并可重试。迁移后业务写入及重复启动不会回退或覆盖单库（`tests/test_sqlite_file_migration.py`）；夹具为小型合成数据。
 - [ ] 生产历史数据的 main/media 关联关系仍待验收；隔离夹具逐源表校验行数和摘要，并覆盖迁移后新增 ID、再次启动读写，不能替代生产数据抽样核对。
-- [x] 隔离目标扫描拒绝零行业务表、`alembic_version`、视图及 PostgreSQL 非默认 schema 用户对象；检查后外部写入会阻止导入。具体权限拒绝和真实服务对象清理仍不由 SQLite 适配器模拟。
+- [x] 目标扫描拒绝零行业务表、`alembic_version`、视图及 PostgreSQL 非默认 schema 用户对象；只排除 PostgreSQL catalog 明确标记为扩展成员的关系，扩展 schema 中未归属扩展的用户对象仍会阻止检查。远程任务通过检查后外部写入会阻止导入；权限拒绝演练仍待补充。
 - [ ] 在真实 PostgreSQL/MySQL/MariaDB 上验证对象权限不足不伪报空库、临时探测对象清理失败以及检查后外部写入。
 - [x] 远程源迁回 SQLite 的目标准备覆盖固定库与旧 `user.db`/`media.db` 备份、逐文件退役、缓存和无关文件保留、文件身份变化拒绝、部分删除恢复及空目标复查；夹具验证配置仍指向源端（`tests/test_database_migration_lifecycle.py`）。
 - [ ] 真实 PostgreSQL/MySQL/MariaDB 迁回、含 WAL/SHM 和生产目录权限的全流程仍待验收。
@@ -693,7 +694,8 @@ flowchart TD
 - [x] 归档校验拒绝损坏 ZIP、缺失清单字段、未来格式、摘要错误、路径穿越、符号链接、重复文件、未知成员、压缩炸弹及清单/条目/体积超限（`tests/test_database_backup_archive_validation.py`）。
 - [x] `tests/test_database_backup_restore_lifecycle.py` 在隔离 SQLite 配置目录跑通后台快照、上传、检查、维护锁、确认恢复、原子发布、逐表校验、待重启及重启重试；同时覆盖业务历史、识别请求、媒体数据恢复及恢复后新增写入。
 - [x] 四种真实数据库间 16 组低层归档导入组合已有隔离用例并校验主键及内容摘要（见 `tests/test_database_backup_contract.py`）。
-- [ ] 其余三个远程后端上的完整后台任务生命周期和生产规模流式备份恢复仍需隔离远程环境端到端验收。
+- [x] PostgreSQL、MySQL、MariaDB 均通过真实后台备份、上传、归档检查、事务恢复和启动恢复生命周期，恢复后可继续写入（`tests/test_remote_database_lifecycle.py`）。
+- [ ] 三个远程后端上的生产规模流式备份/恢复压力及真实故障/进程终止演练仍待隔离环境验收。
 - [x] 注入上传中断和空间不足，确认上传暂存文件被清理且活动数据库数据不变；归档结构及校验拒绝条件由低层验证器测试覆盖。
 - [x] SQLite 恢复已覆盖暂存库 checkpoint、恢复前快照、旧 WAL/SHM 部分移动、原子替换前、任务标记失败与重试，以及发布后校验失败回滚；恢复失败不会提前解除维护闸门（`tests/test_database_backup_restore_lifecycle.py`）。
 - [x] 旧完整双库备份经结构转换后恢复到固定单库；旧设置包和不完整双库包被拒绝，归档校验阻止路径穿越和未知成员，恢复仍经过上传检查及确认流程（`test_legacy_database_backup_conversion.py`、`tests/test_database_backup_restore_lifecycle.py`、`tests/test_database_backup_archive_validation.py`）。

@@ -202,28 +202,66 @@ def _new_engine(settings, sqlite_path=None):
     return engine
 
 
+def _postgres_extension_objects(engine_or_connection):
+    """Return PostgreSQL relations owned by installed extensions.
+
+    Extension catalogs such as TimescaleDB's internal schemas do not make an
+    otherwise empty application database unsafe as a migration target. Other
+    relations in those schemas remain visible to the empty-target scan.
+    """
+    statement = text("""
+        SELECT DISTINCT namespace.nspname, relation.relname
+        FROM pg_depend AS dependency
+        JOIN pg_class AS relation
+          ON dependency.classid = 'pg_class'::regclass
+         AND dependency.objid = relation.oid
+        JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+        JOIN pg_extension AS extension
+          ON dependency.refclassid = 'pg_extension'::regclass
+         AND dependency.refobjid = extension.oid
+        WHERE dependency.deptype = 'e'
+          AND relation.relkind IN ('r', 'p', 'v', 'm', 'S')
+    """)
+    if hasattr(engine_or_connection, "connect"):
+        with engine_or_connection.connect() as connection:
+            rows = connection.execute(statement).all()
+    else:
+        rows = engine_or_connection.execute(statement).all()
+    return {(str(schema), str(name)) for schema, name in rows}
+
+
 def _database_objects(engine):
     inspector = inspect(engine)
     dialect = engine.dialect.name
     schemas = [None]
+    extension_objects = set()
     if dialect == "postgresql":
         schemas = [schema for schema in inspector.get_schema_names()
                    if schema not in {"information_schema", "pg_catalog"}
                    and not schema.startswith("pg_toast")]
+        extension_objects = _postgres_extension_objects(engine)
     objects = []
     for schema in schemas:
         for name in inspector.get_table_names(schema=schema):
+            if (schema, name) in extension_objects:
+                continue
             objects.append(f"table:{schema + '.' if schema else ''}{name}")
         for name in inspector.get_view_names(schema=schema):
+            if (schema, name) in extension_objects:
+                continue
             objects.append(f"view:{schema + '.' if schema else ''}{name}")
         try:
             materialized_views = inspector.get_materialized_view_names(schema=schema)
         except (AttributeError, NotImplementedError):
             materialized_views = []
         for name in materialized_views:
+            if (schema, name) in extension_objects:
+                continue
             objects.append(f"materialized_view:{schema + '.' if schema else ''}{name}")
         try:
             for name in inspector.get_sequence_names(schema=schema):
+                if (schema, name) in extension_objects:
+                    continue
                 objects.append(f"sequence:{schema + '.' if schema else ''}{name}")
         except NotImplementedError:
             if dialect == "postgresql":
@@ -527,7 +565,11 @@ def _database_check(settings, target_prepared=False):
         return {"ok": True, "target_preparation_required": False,
                 "source": source, "target": _safe_settings(settings),
                 "capabilities": capabilities,
-                "target_identity": {"fingerprint": _fingerprint(settings)}}
+                "target_identity": {
+                    "fingerprint": _fingerprint(settings),
+                    "capabilities": capabilities,
+                    "resolved_addresses": _resolved_addresses(settings.get("host")),
+                }}
     finally:
         engine.dispose()
 
@@ -1000,7 +1042,11 @@ def _copy_table(source_connection, target_engine, table):
 
 def _validate_source_shape(connection, metadata):
     inspector = inspect(connection)
-    available = {name.upper() for name in inspector.get_table_names()}
+    extension_objects = (_postgres_extension_objects(connection.engine)
+                         if connection.dialect.name == "postgresql" else set())
+    default_schema = inspector.default_schema_name
+    available = {name.upper() for name in inspector.get_table_names()
+                 if (default_schema, name) not in extension_objects}
     required = {name.upper() for name in metadata.tables}
     missing = required - available
     if missing:
@@ -1008,13 +1054,16 @@ def _validate_source_shape(connection, metadata):
     unexpected = available - required - {"ALEMBIC_VERSION", "__NASTOOLS_DATABASE_LAYOUT"}
     if unexpected:
         raise RuntimeError(f"源数据库含未纳入迁移清单的表：{', '.join(sorted(unexpected))}")
-    views = inspector.get_view_names()
+    views = [name for name in inspector.get_view_names()
+             if (default_schema, name) not in extension_objects]
     if views:
         raise RuntimeError("源数据库含未纳入迁移清单的视图：" + ", ".join(sorted(views)[:100]))
     try:
         materialized_views = inspector.get_materialized_view_names()
     except (AttributeError, NotImplementedError):
         materialized_views = []
+    materialized_views = [name for name in materialized_views
+                          if (default_schema, name) not in extension_objects]
     if materialized_views:
         raise RuntimeError("源数据库含未纳入迁移清单的物化视图："
                            + ", ".join(sorted(materialized_views)[:100]))
@@ -1024,8 +1073,10 @@ def _validate_source_shape(connection, metadata):
             if (schema in {"information_schema", "pg_catalog", default_schema}
                     or schema.startswith("pg_toast")):
                 continue
-            tables = inspector.get_table_names(schema=schema)
-            views = inspector.get_view_names(schema=schema)
+            tables = [name for name in inspector.get_table_names(schema=schema)
+                      if (schema, name) not in extension_objects]
+            views = [name for name in inspector.get_view_names(schema=schema)
+                     if (schema, name) not in extension_objects]
             if tables or views:
                 names = [f"{schema}.{name}" for name in [*tables, *views]]
                 raise RuntimeError("源数据库含未纳入迁移清单的 schema 对象："
