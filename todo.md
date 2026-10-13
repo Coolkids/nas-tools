@@ -659,15 +659,18 @@ flowchart TD
 - [x] 在四种真实引擎上复用同一套 CRUD、事务回滚、批量写入、upsert、冲突、分页排序、自增、会话释放测试；PostgreSQL/MySQL/MariaDB 使用隔离服务，SQLite 使用临时文件。
 - [x] 契约数据覆盖中文/emoji、长路径、NULL/空字符串、长 JSON、重复唯一键和非连续 ID；特殊字符连接密码、大小写差异及不规范旧数据仍需补充验证。
 - [x] SQLite 单元测试覆盖 `get_transfer_statistics()` 按类型/日期分组、稳定排序，以及旧文本规则的数字、空值、非数字优先级顺序（`tests/test_transfer_statistics.py`、`tests/test_database_filter_priority.py`）。
-- [ ] 用户登录、订阅、搜索历史、转移/识别记录及媒体同步仍需跨后端真实业务路径验收。
+- [x] 2026-10-13：在隔离生产数据副本及 MySQL 目标上完成真实登录、TV 订阅/搜索历史检查、SQLite→MySQL 迁移与备份恢复启动校验；TV 订阅 42 条、搜索结果 2,036 条。使用项目 Plex 配置完成一次媒体库同步，发布电影/剧集共 1,910 条。
+- [ ] 转移/识别记录的跨后端完整业务路径仍需真实验收。
 - [x] 四种引擎上的新单库统一 metadata/schema 初始化、结构版本和识别迁移/导出/历史兼容回归通过。
 - [x] 旧主库已知旧修订、未版本化媒体库结构识别、两套旧模型合入、历史数据初始 `legacy` 代次回填及重复启动通过隔离迁移测试；复制第二逻辑域后注入失败时目标不发布（`tests/test_sqlite_file_migration.py`）。
 - [x] 所有已登记媒体历史修订（b3、f2、f3、f4）均有升级用例；覆盖已存在同步租约表的识别/清理、双逻辑域导入回滚、发布前故障及进程中断后恢复（`tests/test_sqlite_file_migration.py`）。
-- [ ] 生产历史数据库样本与部署进程终止环境仍需抽样验收。
+- [x] 2026-10-13：生产历史数据库导出副本完成双库合并升级、SQLite→MySQL 迁移、整库备份恢复及启动校验；原始导出文件保持逐字节不变。
+- [ ] 真实部署环境中在迁移发布各阶段终止进程并恢复仍需验收。
 - [x] `_copy_table` 低层复制契约覆盖四种引擎间的全部 16 个源/目标组合，逐表摘要一致，恢复主键校准后可继续新增记录。
 - [x] 隔离应用任务链覆盖检查凭证与目标确认、过期/重复凭证、同库别名、空目标/现存对象复核、远程目标迁回固定 SQLite 的归档准备、取消、失败回滚、配置保存与重启失败恢复（`tests/test_database_migration_lifecycle.py`）。SQLite 适配器隔离夹具验证任务编排，不等同真实远程端到端验收。
 - [x] PostgreSQL、MySQL、MariaDB 之间六个异类型迁移方向通过真实后台任务链，覆盖目标检查、复制、逐表摘要、远程独占复核、配置提交、启动校验和迁移后新增写入（`tests/test_remote_database_lifecycle.py`）。
-- [ ] SQLite 与远程后端间六个方向的真实完整任务链、远程不同实例同类型迁移及双远程实例场景仍需端到端验收。
+- [x] 2026-10-13：真实 SQLite→MySQL 生产数据迁移任务链完成，包含启动校验及迁移后读写验证。
+- [ ] SQLite 与 PostgreSQL/MariaDB 的迁移方向、MySQL→SQLite 及远程不同实例/双远程实例场景仍需端到端验收。
 - [x] `tests/test_sqlite_file_migration.py` 验证根目录及 `db/` 旧双库可合并到 `<配置文件目录>/db/nastools.db`，以及仅主库与已提交 WAL 升级；覆盖空间不足、无效媒体结构、相同数值 ID 与导入失败保护，并检查完成标记、固定路径、媒体代次回填、内容完整性和旧源保留。
 - [x] 默认缺省配置选择 SQLite，后端始终生成 `<配置目录>/db/nastools.db`，数据库迁移 API 拒绝 `path`、`directory`、`url`、`dsn`、`sqlite_path` 覆盖（`tests/test_database_fixed_sqlite_path.py`）。
 - [ ] 前端没有目录编辑入口，以及切换、重启、恢复后的活动库均在固定路径仍需验收。
@@ -695,7 +698,8 @@ flowchart TD
 - [x] `tests/test_database_backup_restore_lifecycle.py` 在隔离 SQLite 配置目录跑通后台快照、上传、检查、维护锁、确认恢复、原子发布、逐表校验、待重启及重启重试；同时覆盖业务历史、识别请求、媒体数据恢复及恢复后新增写入。
 - [x] 四种真实数据库间 16 组低层归档导入组合已有隔离用例并校验主键及内容摘要（见 `tests/test_database_backup_contract.py`）。
 - [x] PostgreSQL、MySQL、MariaDB 均通过真实后台备份、上传、归档检查、事务恢复和启动恢复生命周期，恢复后可继续写入（`tests/test_remote_database_lifecycle.py`）。
-- [ ] 三个远程后端上的生产规模流式备份/恢复压力及真实故障/进程终止演练仍待隔离环境验收。
+- [x] 2026-10-13：MySQL 真实生产规模数据完成流式备份上传、归档检查、整库恢复和重启后校验。
+- [ ] PostgreSQL/MySQL/MariaDB 三个远程后端的生产规模压力覆盖及真实故障/进程终止演练仍待隔离环境验收。
 - [x] 注入上传中断和空间不足，确认上传暂存文件被清理且活动数据库数据不变；归档结构及校验拒绝条件由低层验证器测试覆盖。
 - [x] SQLite 恢复已覆盖暂存库 checkpoint、恢复前快照、旧 WAL/SHM 部分移动、原子替换前、任务标记失败与重试，以及发布后校验失败回滚；恢复失败不会提前解除维护闸门（`tests/test_database_backup_restore_lifecycle.py`）。
 - [x] 旧完整双库备份经结构转换后恢复到固定单库；旧设置包和不完整双库包被拒绝，归档校验阻止路径穿越和未知成员，恢复仍经过上传检查及确认流程（`test_legacy_database_backup_conversion.py`、`tests/test_database_backup_restore_lifecycle.py`、`tests/test_database_backup_archive_validation.py`）。
@@ -736,7 +740,8 @@ flowchart TD
 - [ ] 在真实服务和长导出负载下复核连接池重建 PRAGMA 与会话回收。
 - [x] 媒体快照覆盖合法空库、拉取错误/`None`、部分分页失败、重复/畸形条目及有界批次；低磁盘空间和批次唯一键失败均保留旧活动索引（`test_media_sync_snapshot.py`、`test_media_sync_generation_publish.py`）。
 - [x] 租约在发布前失效会清理未发布代次；Emby/Jellyfin/Plex 分页对瞬时错误作有限重试，本地失败后成功用例验证；不完整快照、磁盘不足、写入冲突不会发布新索引。
-- [ ] 分页重试仍需在真实媒体服务器上联调。
+- [x] 2026-10-13：使用项目 Plex 配置在真实媒体服务器完成完整电影/剧集库同步，发布 1,910 条记录。
+- [ ] 分页瞬时失败后的重试行为仍需在真实媒体服务器上联调。
 - [x] 新代次发布前不可见、统计与活动代次原子切换、跨服务器 TMDB 匹配语义，以及 fencing token/租约过期保护由 `test_media_sync_generation_publish.py`、`test_media_sync_job_leases.py` 覆盖。
 - [x] 多进程杀停后的过期租约恢复及 SQLite 多语句快照一致性已由 `tests/test_media_sync_job_leases.py` 和 `tests/test_database_snapshot_consistency.py` 验证。
 - [x] 同步租约期间单条插入/empty 操作不能破坏活动索引，维护锁持有期间批次等待，发布后的旧代次清理失败只重试清理并进入 `CLEANUP_PENDING`（媒体同步测试）。
