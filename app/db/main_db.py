@@ -110,8 +110,15 @@ class MainDb:
                 logger.info("跳过历史 SQLite 结构版本重置脚本：%s", basename)
             init_files.append(basename)
         if config_changed:
+            self._calibrate_seed_sequences()
             config['app']['init_files'] = init_files
             Config().save_config(config)
+
+    @staticmethod
+    def _calibrate_seed_sequences():
+        """Explicit seed IDs must not leave PostgreSQL sequences behind."""
+        if DATABASE.backend.name == "postgresql":
+            DATABASE.calibrate_sequences(Base.metadata)
 
     def insert(self, data):
         """

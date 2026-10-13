@@ -59,12 +59,20 @@ def _sanitize_database_job(job):
     if not job:
         return job
 
-    def strip_paths(value):
+    def is_path_field(name):
+        normalized = str(name).lower()
+        return (normalized in {"path", "paths", "files", "target_file_identities"}
+                or normalized.endswith(("_path", "_paths", "_file", "_files",
+                                        "_directory", "_dir")))
+
+    def strip_paths(value, parent_key=None):
         if isinstance(value, dict):
-            return {key: strip_paths(item) for key, item in value.items()
-                    if "path" not in str(key).lower()}
+            if parent_key == "tables":
+                return {key: strip_paths(item, key) for key, item in value.items()}
+            return {key: strip_paths(item, key) for key, item in value.items()
+                    if not is_path_field(key)}
         if isinstance(value, list):
-            return [strip_paths(item) for item in value]
+            return [strip_paths(item, parent_key) for item in value]
         return value
 
     return strip_paths(job)
@@ -1616,10 +1624,17 @@ class WebAction:
                                                                  total_ep=total_ep,
                                                                  current_ep=current_ep,
                                                                  rssid=rssid)
-        if not rssid and media_info:
+        if media_info and code == 0:
             if mtype == MediaType.MOVIE:
                 rssid = self.dbhelper.get_rss_movie_id(
-                    title=name, tmdbid=media_info.tmdb_id)
+                    title=name, year=media_info.year, tmdbid=media_info.tmdb_id)
+            elif rssid:
+                # Updating an existing RSS subscription deletes and recreates
+                # its row, so return the new database ID to REST clients.
+                query_season = media_info.get_season_string()
+                rssid = self.dbhelper.get_rss_tv_id(
+                    title=name, year=media_info.year, season=query_season,
+                    tmdbid=media_info.tmdb_id)
             else:
                 rssid = self.dbhelper.get_rss_tv_id(
                     title=name, tmdbid=media_info.tmdb_id)
@@ -2538,7 +2553,7 @@ class WebAction:
     @staticmethod
     def __rss_detail(data):
         rid = data.get("rssid")
-        mtype = data.get("rsstype")
+        mtype = data.get("rsstype") if data.get("rsstype") is not None else data.get("type")
         if mtype in MovieTypes:
             rssdetail = Subscribe().get_subscribe_movies(rid=rid)
             if not rssdetail:
@@ -3220,7 +3235,9 @@ class WebAction:
             "uses": uses,
             "include": data.get("include"),
             "exclude": data.get("exclude"),
-            "filter_rule": data.get("rule"),
+            # `/do` uses `rule`; the REST parser exposes the same field as
+            # `filterrule`. Accept both so REST updates persist the selection.
+            "filter_rule": data.get("rule") if data.get("rule") is not None else data.get("filterrule"),
             "state": data.get("state"),
             "save_path": data.get("save_path"),
             "download_setting": data.get("download_setting"),

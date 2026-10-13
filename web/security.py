@@ -102,8 +102,15 @@ def login_required(func):
                 "message": "安全认证未通过，请检查Token"
             }
 
-        token = request.headers.get("Authorization", default=None)
-        if not token:
+        authorization = request.headers.get("Authorization", default=None)
+        if not authorization:
+            return auth_failed()
+        auth_parts = authorization.strip().split()
+        if len(auth_parts) == 1:
+            token = auth_parts[0]
+        elif len(auth_parts) == 2 and auth_parts[0].lower() == "bearer":
+            token = auth_parts[1]
+        else:
             return auth_failed()
         latest_token = TokenCache.get(token)
         if not latest_token:

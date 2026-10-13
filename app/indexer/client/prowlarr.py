@@ -47,6 +47,8 @@ class Prowlarr(_IIndexClient):
         获取配置的prowlarr indexer
         :return: indexer 信息 [(indexerId, indexerName, url)]
         """
+        if not self.api_key or not self.host:
+            return []
         indexer_query_url = f"{self.host}api/v1/indexer?apikey={self.api_key}"
         try:
             ret = RequestUtils(timeout=15).get_res(indexer_query_url)

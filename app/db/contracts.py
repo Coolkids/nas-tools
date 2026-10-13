@@ -202,13 +202,60 @@ def _quote_seed_identifiers(sql, backend):
     return "".join(output)
 
 
+def _quote_postgresql_update_identifiers(sql, metadata):
+    """Quote known table and column names in legacy UPDATE seed statements."""
+    match = re.match(
+        r"(?is)^(?P<prefix>\s*UPDATE\s+)(?P<table>[A-Za-z_][A-Za-z0-9_]*)(?P<set>\s+SET\b)",
+        sql,
+    )
+    if not match:
+        return sql
+    table = metadata.tables.get(match.group("table").upper())
+    if table is None:
+        return sql
+    columns = {column.name.upper(): column.name for column in table.columns}
+    output = [match.group("prefix"), f'"{table.name}"', match.group("set")]
+    index = match.end()
+    while index < len(sql):
+        char = sql[index]
+        if char in ("'", '"'):
+            quote = char
+            end = index + 1
+            while end < len(sql):
+                if sql[end] == quote:
+                    if end + 1 < len(sql) and sql[end + 1] == quote:
+                        end += 2
+                        continue
+                    end += 1
+                    break
+                end += 1
+            output.append(sql[index:end])
+            index = end
+            continue
+        if char.isalpha() or char == "_":
+            end = index + 1
+            while end < len(sql) and (sql[end].isalnum() or sql[end] == "_"):
+                end += 1
+            identifier = sql[index:end]
+            column_name = columns.get(identifier.upper())
+            output.append(f'"{column_name}"' if column_name else identifier)
+            index = end
+            continue
+        output.append(char)
+        index += 1
+    return "".join(output)
+
+
 def _adapt_seed_sql(sql, metadata, backend):
     statement = str(sql).strip().rstrip(";").strip()
     if not statement:
         return statement
     statement = re.sub(r"(?i)\bUPDATE\s+main\.", "UPDATE ", statement)
     statement = re.sub(r"(?i)(\bWHERE\s+)1\s*$", r"\1TRUE", statement)
-    statement = _quote_seed_identifiers(statement, backend)
+    if backend == "postgresql":
+        statement = _quote_postgresql_update_identifiers(statement, metadata)
+    else:
+        statement = _quote_seed_identifiers(statement, backend)
     match = re.match(
         r"(?is)^INSERT\s+OR\s+(IGNORE|REPLACE)\s+INTO\s+"
         r"(?P<table>\"[^\"]+\"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_]*)"

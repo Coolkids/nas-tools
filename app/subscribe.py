@@ -194,6 +194,10 @@ class Subscribe:
                                   ai_skip_reason="subscription_fuzzy_match")
             media_info.title = name
             media_info.type = mtype
+            if year:
+                # Fuzzy subscriptions skip metadata lookup, but must retain
+                # the year explicitly supplied by the user.
+                media_info.year = year
             if season:
                 media_info.begin_season = int(season)
             if mtype == MediaType.MOVIE:
