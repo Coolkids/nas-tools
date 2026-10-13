@@ -122,9 +122,11 @@ SQLite 的文件名和目录由后端固定生成，不能在设置页或 API �
 
 2026-10-13 隔离内存缓存微基准：单进程写入 10,000 条 128 字节载荷，在 100、1,000、5,000、10,000 条时分段统计写入和 `memory_info()`。分段写入 P50 保持在 0.163–0.175 ms/条、P95 为 0.312–0.352 ms/条；统计中位数为 0.137–0.156 ms；`tracemalloc` 峰值从 0.18 MiB 增至 4.74 MiB，进程最大 RSS 从 98.0 MiB 增至 107.2 MiB。该结果支持在此规模下没有明显的逐次全量扫描退化；它是本机合成负载的一次观测，不代表持久化后端、真实载荷分布或生产负载。
 
-2026-10-13 本地回归：本次后端全量 `444 passed, 43 skipped, 102 subtests passed`；新增迁移/空间回收定向回归 `72 passed, 28 subtests passed`；隔离缓存容量压力此前为 `2 passed`；前端 `npm run type-check` 和 `npm run build` 通过。当前未配置 `NASTOOLS_TEST_DATABASE_SETTINGS`，本次跳过项包含远程数据库连接用例；UID 1000 下只读文件权限用例实际运行通过。既有隔离远程契约和低层跨库矩阵结果另列于上文。
+2026-10-13 本地回归：本次后端全量 `445 passed, 43 skipped, 102 subtests passed`；新增迁移/空间回收定向回归 `72 passed, 28 subtests passed`；隔离缓存容量压力此前为 `2 passed`；前端 `npm run build`（含 `vue-tsc --noEmit`）通过。新增数据库状态回归在请求 ORM 会话仍持有连接时检查 schema，并确认会话关闭后连接归还。当前未配置 `NASTOOLS_TEST_DATABASE_SETTINGS`，本次跳过项包含远程数据库连接用例；UID 1000 下只读文件权限用例实际运行通过。既有隔离远程契约和低层跨库矩阵结果另列于上文。
 
 使用 Google Chrome 154 headless 加本地 mock `/do` 响应加载构建产物，缓存和数据库标签在 360、390、768、1280、1440 px 与浅/深色主题下均无页面横向溢出。此项只验证空数据状态的布局，不覆盖真实 API 联调、含数据表格、软键盘、安全区、放大、键盘/屏幕阅读器或迁移/恢复交互。
+
+2026-10-13 真实开发代理 smoke：用隔离配置启动 SQLite 后端，通过 Quasar 开发代理登录并读取 `/do get_database_info`，返回连接正常、固定文件名及 34 张表；伪造外站 Origin 被后端拒绝为 403。Headless Chrome 打开真实数据库与缓存页面，390 px 视口无横向溢出，页面显示实际 SQLite 和 `cache/system.sqlite3` 状态。该 smoke 修复并验证了开发代理在同主机下同步后端 Origin 的行为；不覆盖切换、备份、恢复、辅助技术或生产部署环境。
 
 隔离 SQLite 的后台备份/恢复任务链已完成端到端测试，覆盖恢复快照、暂存 checkpoint、旧库辅助文件、原子替换前和恢复任务标记等边界；发布后校验失败会回滚到恢复前副本。PostgreSQL、MySQL、MariaDB 的完整任务链、大数据流式压力、Docker/Supervisor 真实进程重启仍未验收；因此不记录端到端恢复耗时，也不将低层跨库导入结果视为远程后台恢复通过。
 

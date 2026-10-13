@@ -699,6 +699,7 @@ flowchart TD
 - [x] 旧完整双库备份经结构转换后恢复到固定单库；旧设置包和不完整双库包被拒绝，归档校验阻止路径穿越和未知成员，恢复仍经过上传检查及确认流程（`test_legacy_database_backup_conversion.py`、`tests/test_database_backup_restore_lifecycle.py`、`tests/test_database_backup_archive_validation.py`）。
 - [ ] 前端核对数据库/缓存标签、实际连接与待重启状态、统计口径、检查结果、迁移进度、恢复确认、断线重连和管理员权限。
 - [x] 构建产物使用 headless Chrome 和 mock API 检查缓存/数据库空数据页；360/390、768、1280/1440 px 与浅/深色主题下无页面横向溢出（见部署验证记录）。
+- [x] 2026-10-13 使用 headless Chrome、隔离 SQLite 服务及真实 Quasar 代理登录，数据库状态 API 返回 `connected=true` 且显示固定路径；数据库/缓存页在 390 px 下无横向溢出，同主机开发 Origin 可用、伪造外站 Origin 返回 403（只覆盖当前状态展示，不覆盖切换/备份/恢复交互）。
 - [ ] 含数据表格的移动卡片、长路径、软键盘/安全区、浏览器放大及真实 API 状态下的布局仍需人工验收。
 - [ ] 覆盖骨架、空数据、统计未知、降级、检查失败、迁移取消、待重启、重连超时、恢复失败和成功；测试键盘焦点、触控、屏幕阅读名称、页面刷新恢复任务及减少动画偏好。
 - [ ] 在 Docker/Supervisor 与直接运行方式各验证一次切换/恢复后的进程重启；数据库健康验证通过后才恢复服务。
@@ -710,6 +711,7 @@ flowchart TD
 - [x] UID 1000 的非特权本地用户验证只读数据库保持维护闸门；独立子进程持有长读事务时，回收在有界等待后失败、解除闸门且数据库完整性保持通过（`tests/test_database_space_reclaim.py`）。
 - [ ] 实际部署目录的 ACL、挂载选项及第三方进程锁行为仍需部署环境复核。
 - [x] 回归覆盖当前连接事务边界、checkpoint busy 不得假报成功；空间回收成功路径验证数据完整和新写入。
+- [x] `test_database_statistics_reuse_connection_when_request_session_is_open` 验证请求 ORM 会话占用一个连接时，状态接口不再嵌套申请第三条连接；检查完成后请求会话释放，2 连接池不会因 schema inspect 耗尽。
 - [x] 回收后无需重启即可继续业务写入；验证 WAL 模式恢复、长读事务造成的 checkpoint busy、失败后状态与启动中断恢复（`tests/test_database_space_reclaim.py`）。实际其他进程持有 SQLite 文件锁的后台任务场景仍需部署环境复核。
 - [x] 非管理员操作、非 SQLite 后端、非法路径/范围、旧配置指纹及重复回收提交由管理动作和空间回收回归覆盖；迁移/缓存维护互斥及媒体同步批次等待由对应维护锁/媒体同步用例覆盖。
 - [ ] 与真实备份、恢复、升级及外部应用同时操作时的部署并发演练仍待完成。
