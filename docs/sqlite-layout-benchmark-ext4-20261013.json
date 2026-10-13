@@ -1,0 +1,505 @@
+{
+  "cache_note": "first-read timings use best-effort POSIX_FADV_DONTNEED; hot-read percentiles follow explicit warm-up",
+  "load_note": "zero operation intervals offer saturated work; nonzero intervals control offered workload",
+  "note": "synthetic sqlite3 workload; dual/merged legacy-index profiles isolate merge effect; optimized merged profile adds composite indexes; not app pool, production data, or scheduled-sync acceptance",
+  "parameters": {
+    "ai_bytes": 8192,
+    "batch_size": 500,
+    "duration": 15.0,
+    "history_cleanup_interval_ms": 500,
+    "history_items": 5000,
+    "history_write_interval_ms": 100,
+    "media_batch_interval_ms": 0,
+    "media_items": 50000,
+    "output": null,
+    "reader_interval_ms": 10,
+    "readers": 4,
+    "subscription_update_interval_ms": 500
+  },
+  "python": "3.14.4",
+  "results": [
+    {
+      "completed_media_sync_passes": 15,
+      "cpu_seconds": 28.108,
+      "database_bytes_after_checkpoint": 62496768,
+      "duration_seconds": 15.073,
+      "errors": {
+        "busy": 0,
+        "other": 0
+      },
+      "file_cache_drop_requested": {
+        "history_page": true,
+        "media_page": true
+      },
+      "first_read_after_cache_drop_request_ms": {
+        "history_page": 125.687,
+        "media_page": 0.906
+      },
+      "io_bytes_delta": {
+        "read_bytes": 50036736,
+        "write_bytes": 222720000
+      },
+      "layout": "dual_legacy_index",
+      "media_sync_validation": {
+        "content_match": true,
+        "source_rows": 50000,
+        "target_rows": 50000
+      },
+      "operation_intervals_ms": {
+        "history_cleanup": 500,
+        "history_write": 100,
+        "media_batch": 0,
+        "reader": 10,
+        "subscription_update": 500
+      },
+      "operations": {
+        "history_cleanup": {
+          "count": 30,
+          "max_ms": 50.436,
+          "p50_ms": 1.305,
+          "p95_ms": 3.237,
+          "p99_ms": 36.967,
+          "per_second": 1.99
+        },
+        "history_export": {
+          "count": 106,
+          "max_ms": 201.062,
+          "p50_ms": 89.079,
+          "p95_ms": 119.417,
+          "p99_ms": 122.126,
+          "per_second": 7.03
+        },
+        "history_page": {
+          "count": 2337,
+          "max_ms": 15.525,
+          "p50_ms": 1.91,
+          "p95_ms": 4.334,
+          "p99_ms": 6.65,
+          "per_second": 155.05
+        },
+        "history_write": {
+          "count": 148,
+          "max_ms": 68.85,
+          "p50_ms": 0.285,
+          "p95_ms": 1.785,
+          "p99_ms": 8.276,
+          "per_second": 9.82
+        },
+        "media_page": {
+          "count": 1727,
+          "max_ms": 20.182,
+          "p50_ms": 6.217,
+          "p95_ms": 12.851,
+          "p99_ms": 15.288,
+          "per_second": 114.58
+        },
+        "media_sync_batch": {
+          "count": 1566,
+          "max_ms": 64.399,
+          "p50_ms": 6.189,
+          "p95_ms": 20.256,
+          "p99_ms": 32.19,
+          "per_second": 103.9
+        },
+        "subscription_update": {
+          "count": 30,
+          "max_ms": 19.289,
+          "p50_ms": 0.192,
+          "p95_ms": 1.978,
+          "p99_ms": 14.484,
+          "per_second": 1.99
+        }
+      },
+      "peak_wal_bytes_observed": 5562032,
+      "query_plans": {
+        "history_page": [
+          "SEARCH RECOGNITION_REQUEST USING INDEX IDX_RECOG_SOURCE (SOURCE=?)",
+          "USE TEMP B-TREE FOR ORDER BY"
+        ],
+        "media_page": [
+          "SEARCH MEDIASYNC_ITEMS USING INDEX IDX_MEDIASYNC_SERVER_TITLE (SERVER=?)"
+        ]
+      },
+      "readers": 4,
+      "rss_bytes_after": 35119104,
+      "rss_bytes_before": 24555520,
+      "wal_bytes_after_checkpoint": 0,
+      "write_transactions": {
+        "history_cleanup": {
+          "count": 30,
+          "lock_wait_ms": {
+            "max": 9.53,
+            "p50": 0.126,
+            "p95": 0.781
+          },
+          "transaction_ms": {
+            "max": 32.877,
+            "p50": 1.026,
+            "p95": 2.738
+          }
+        },
+        "history_write": {
+          "count": 148,
+          "lock_wait_ms": {
+            "max": 56.086,
+            "p50": 0.045,
+            "p95": 0.328
+          },
+          "transaction_ms": {
+            "max": 12.366,
+            "p50": 0.19,
+            "p95": 1.471
+          }
+        },
+        "media_sync_batch": {
+          "count": 1566,
+          "lock_wait_ms": {
+            "max": 0.893,
+            "p50": 0.008,
+            "p95": 0.047
+          },
+          "transaction_ms": {
+            "max": 63.419,
+            "p50": 4.613,
+            "p95": 14.757
+          }
+        },
+        "subscription_update": {
+          "count": 30,
+          "lock_wait_ms": {
+            "max": 0.741,
+            "p50": 0.045,
+            "p95": 0.385
+          },
+          "transaction_ms": {
+            "max": 16.029,
+            "p50": 0.131,
+            "p95": 1.763
+          }
+        }
+      }
+    },
+    {
+      "completed_media_sync_passes": 13,
+      "cpu_seconds": 28.049,
+      "database_bytes_after_checkpoint": 62504960,
+      "duration_seconds": 15.05,
+      "errors": {
+        "busy": 0,
+        "other": 0
+      },
+      "file_cache_drop_requested": {
+        "history_page": true,
+        "media_page": true
+      },
+      "first_read_after_cache_drop_request_ms": {
+        "history_page": 132.464,
+        "media_page": 3.126
+      },
+      "io_bytes_delta": {
+        "read_bytes": 50270208,
+        "write_bytes": 236302336
+      },
+      "layout": "merged_legacy_index",
+      "media_sync_validation": {
+        "content_match": true,
+        "source_rows": 50000,
+        "target_rows": 50000
+      },
+      "operation_intervals_ms": {
+        "history_cleanup": 500,
+        "history_write": 100,
+        "media_batch": 0,
+        "reader": 10,
+        "subscription_update": 500
+      },
+      "operations": {
+        "history_cleanup": {
+          "count": 29,
+          "max_ms": 166.695,
+          "p50_ms": 7.56,
+          "p95_ms": 103.154,
+          "p99_ms": 157.441,
+          "per_second": 1.93
+        },
+        "history_export": {
+          "count": 96,
+          "max_ms": 339.296,
+          "p50_ms": 101.684,
+          "p95_ms": 130.44,
+          "p99_ms": 144.248,
+          "per_second": 6.38
+        },
+        "history_page": {
+          "count": 2125,
+          "max_ms": 20.697,
+          "p50_ms": 3.181,
+          "p95_ms": 6.305,
+          "p99_ms": 8.784,
+          "per_second": 141.2
+        },
+        "history_write": {
+          "count": 102,
+          "max_ms": 840.259,
+          "p50_ms": 4.864,
+          "p95_ms": 180.813,
+          "p99_ms": 737.093,
+          "per_second": 6.78
+        },
+        "media_page": {
+          "count": 1626,
+          "max_ms": 36.566,
+          "p50_ms": 7.903,
+          "p95_ms": 14.605,
+          "p99_ms": 17.01,
+          "per_second": 108.04
+        },
+        "media_sync_batch": {
+          "count": 1342,
+          "max_ms": 200.256,
+          "p50_ms": 9.571,
+          "p95_ms": 21.467,
+          "p99_ms": 32.475,
+          "per_second": 89.17
+        },
+        "subscription_update": {
+          "count": 26,
+          "max_ms": 2042.743,
+          "p50_ms": 4.332,
+          "p95_ms": 174.206,
+          "p99_ms": 1587.026,
+          "per_second": 1.73
+        }
+      },
+      "peak_wal_bytes_observed": 11997472,
+      "query_plans": {
+        "history_page": [
+          "SEARCH RECOGNITION_REQUEST USING INDEX IDX_RECOG_SOURCE (SOURCE=?)",
+          "USE TEMP B-TREE FOR ORDER BY"
+        ],
+        "media_page": [
+          "SEARCH MEDIASYNC_ITEMS USING INDEX IDX_MEDIASYNC_SERVER_TITLE (SERVER=?)"
+        ]
+      },
+      "readers": 4,
+      "rss_bytes_after": 34144256,
+      "rss_bytes_before": 24530944,
+      "wal_bytes_after_checkpoint": 0,
+      "write_transactions": {
+        "history_cleanup": {
+          "count": 29,
+          "lock_wait_ms": {
+            "max": 132.56,
+            "p50": 5.281,
+            "p95": 60.245
+          },
+          "transaction_ms": {
+            "max": 101.906,
+            "p50": 1.059,
+            "p95": 3.158
+          }
+        },
+        "history_write": {
+          "count": 102,
+          "lock_wait_ms": {
+            "max": 839.569,
+            "p50": 4.377,
+            "p95": 180.346
+          },
+          "transaction_ms": {
+            "max": 60.035,
+            "p50": 0.19,
+            "p95": 1.435
+          }
+        },
+        "media_sync_batch": {
+          "count": 1342,
+          "lock_wait_ms": {
+            "max": 189.59,
+            "p50": 0.011,
+            "p95": 0.311
+          },
+          "transaction_ms": {
+            "max": 47.706,
+            "p50": 6.994,
+            "p95": 15.949
+          }
+        },
+        "subscription_update": {
+          "count": 26,
+          "lock_wait_ms": {
+            "max": 2041.528,
+            "p50": 4.222,
+            "p95": 161.762
+          },
+          "transaction_ms": {
+            "max": 12.287,
+            "p50": 0.19,
+            "p95": 2.928
+          }
+        }
+      }
+    },
+    {
+      "completed_media_sync_passes": 15,
+      "cpu_seconds": 18.211,
+      "database_bytes_after_checkpoint": 63926272,
+      "duration_seconds": 15.026,
+      "errors": {
+        "busy": 0,
+        "other": 0
+      },
+      "file_cache_drop_requested": {
+        "history_page": true,
+        "media_page": true
+      },
+      "first_read_after_cache_drop_request_ms": {
+        "history_page": 14.029,
+        "media_page": 6.969
+      },
+      "io_bytes_delta": {
+        "read_bytes": 53202944,
+        "write_bytes": 188882944
+      },
+      "layout": "merged_optimized",
+      "media_sync_validation": {
+        "content_match": true,
+        "source_rows": 50000,
+        "target_rows": 50000
+      },
+      "operation_intervals_ms": {
+        "history_cleanup": 500,
+        "history_write": 100,
+        "media_batch": 0,
+        "reader": 10,
+        "subscription_update": 500
+      },
+      "operations": {
+        "history_cleanup": {
+          "count": 30,
+          "max_ms": 83.448,
+          "p50_ms": 3.43,
+          "p95_ms": 57.018,
+          "p99_ms": 75.925,
+          "per_second": 2.0
+        },
+        "history_export": {
+          "count": 104,
+          "max_ms": 158.356,
+          "p50_ms": 94.383,
+          "p95_ms": 111.463,
+          "p99_ms": 121.497,
+          "per_second": 6.92
+        },
+        "history_page": {
+          "count": 2464,
+          "max_ms": 13.144,
+          "p50_ms": 1.084,
+          "p95_ms": 4.519,
+          "p99_ms": 6.792,
+          "per_second": 163.98
+        },
+        "history_write": {
+          "count": 133,
+          "max_ms": 134.991,
+          "p50_ms": 4.333,
+          "p95_ms": 56.45,
+          "p99_ms": 125.983,
+          "per_second": 8.85
+        },
+        "media_page": {
+          "count": 2374,
+          "max_ms": 88.55,
+          "p50_ms": 1.654,
+          "p95_ms": 4.275,
+          "p99_ms": 6.828,
+          "per_second": 157.99
+        },
+        "media_sync_batch": {
+          "count": 1597,
+          "max_ms": 76.134,
+          "p50_ms": 5.464,
+          "p95_ms": 20.928,
+          "p99_ms": 25.247,
+          "per_second": 106.28
+        },
+        "subscription_update": {
+          "count": 29,
+          "max_ms": 132.435,
+          "p50_ms": 3.878,
+          "p95_ms": 81.815,
+          "p99_ms": 118.464,
+          "per_second": 1.93
+        }
+      },
+      "peak_wal_bytes_observed": 6439592,
+      "query_plans": {
+        "history_page": [
+          "SEARCH RECOGNITION_REQUEST USING INDEX IDX_RECOG_SOURCE_CREATED_REQUEST (SOURCE=?)"
+        ],
+        "media_page": [
+          "SEARCH MEDIASYNC_ITEMS USING INDEX IDX_MEDIASYNC_SERVER_GENERATION_TITLE (SERVER=? AND GENERATION_ID=?)"
+        ]
+      },
+      "readers": 4,
+      "rss_bytes_after": 32960512,
+      "rss_bytes_before": 24510464,
+      "wal_bytes_after_checkpoint": 0,
+      "write_transactions": {
+        "history_cleanup": {
+          "count": 30,
+          "lock_wait_ms": {
+            "max": 82.052,
+            "p50": 2.601,
+            "p95": 56.09
+          },
+          "transaction_ms": {
+            "max": 21.388,
+            "p50": 0.697,
+            "p95": 3.062
+          }
+        },
+        "history_write": {
+          "count": 133,
+          "lock_wait_ms": {
+            "max": 134.605,
+            "p50": 3.987,
+            "p95": 55.881
+          },
+          "transaction_ms": {
+            "max": 4.828,
+            "p50": 0.193,
+            "p95": 1.697
+          }
+        },
+        "media_sync_batch": {
+          "count": 1597,
+          "lock_wait_ms": {
+            "max": 34.861,
+            "p50": 0.008,
+            "p95": 0.225
+          },
+          "transaction_ms": {
+            "max": 33.357,
+            "p50": 3.855,
+            "p95": 14.284
+          }
+        },
+        "subscription_update": {
+          "count": 29,
+          "lock_wait_ms": {
+            "max": 132.362,
+            "p50": 3.772,
+            "p95": 81.733
+          },
+          "transaction_ms": {
+            "max": 10.328,
+            "p50": 0.069,
+            "p95": 2.03
+          }
+        }
+      }
+    }
+  ],
+  "sqlite": "3.46.1"
+}
