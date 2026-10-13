@@ -4,11 +4,11 @@ import traceback
 
 import jsonpath
 from apscheduler.executors.pool import ThreadPoolExecutor
-from apscheduler.schedulers.background import BackgroundScheduler
 from lxml import etree
 
 import log
 from app.downloader import Downloader
+from app.db.scheduler import DatabaseSessionBackgroundScheduler
 from app.filter import Filter
 from app.helper import DbHelper
 from app.media import Media
@@ -135,7 +135,7 @@ class RssChecker(object):
             rss_workers = max(1, int(Config().get_config("pt").get("rss_concurrency", 10)))
         except (TypeError, ValueError):
             rss_workers = 10
-        self._scheduler = BackgroundScheduler(timezone=Config().get_timezone(),
+        self._scheduler = DatabaseSessionBackgroundScheduler(timezone=Config().get_timezone(),
                                               executors={
                                                   'default': ThreadPoolExecutor(rss_workers)
                                               },

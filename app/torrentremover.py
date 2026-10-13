@@ -1,8 +1,7 @@
 import json
 from threading import Lock
 
-from apscheduler.schedulers.background import BackgroundScheduler
-
+from app.db.scheduler import DatabaseSessionBackgroundScheduler
 import log
 from app.conf import ModuleConf
 from app.downloader import Downloader
@@ -59,7 +58,7 @@ class TorrentRemover(object):
         if not self._remove_tasks:
             return
         # 启动删种任务
-        self._scheduler = BackgroundScheduler(timezone=Config().get_timezone())
+        self._scheduler = DatabaseSessionBackgroundScheduler(timezone=Config().get_timezone())
         remove_flag = False
         for task in self._remove_tasks.values():
             if task.get("enabled") and task.get("interval") and task.get("config"):

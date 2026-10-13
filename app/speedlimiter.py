@@ -5,7 +5,7 @@ from app.utils import ExceptionUtils
 from app.utils.commons import singleton
 from app.utils.types import DownloaderType, MediaServerType
 from app.helper.security_helper import SecurityHelper
-from apscheduler.schedulers.background import BackgroundScheduler
+from app.db.scheduler import DatabaseSessionBackgroundScheduler
 from config import Config
 
 import log
@@ -88,7 +88,7 @@ class SpeedLimiter:
             ExceptionUtils.exception_traceback(e)
         # 启动限速任务
         if self.limit_enabled:
-            self._scheduler = BackgroundScheduler(timezone=Config().get_timezone())
+            self._scheduler = DatabaseSessionBackgroundScheduler(timezone=Config().get_timezone())
             self._scheduler.add_job(func=self.__check_playing_sessions,
                                     args=[self.mediaserver.get_type(), True],
                                     trigger='interval',
@@ -204,7 +204,6 @@ class SpeedLimiter:
                 self.__stop()
             else:
                 pass
-
 
 
 

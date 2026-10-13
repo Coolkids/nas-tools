@@ -2,9 +2,8 @@ import datetime
 import traceback
 
 from apscheduler.executors.pool import ThreadPoolExecutor
-from apscheduler.schedulers.background import BackgroundScheduler
-
 import log
+from app.db.scheduler import DatabaseSessionBackgroundScheduler
 from app.db.main_db import MainDb
 from app.db.media_db import MediaDb
 from app.doubansync import DoubanSync
@@ -42,7 +41,7 @@ class Scheduler:
         """
         读取配置，启动定时服务
         """
-        self.SCHEDULER = BackgroundScheduler(timezone=Config().get_timezone(),
+        self.SCHEDULER = DatabaseSessionBackgroundScheduler(timezone=Config().get_timezone(),
                                              executors={
                                                  'default': ThreadPoolExecutor(20)
                                              },

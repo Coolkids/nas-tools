@@ -27,7 +27,7 @@ import log
 from web.main import App
 from app.utils import SystemUtils, ConfigLoadCache, Torrent
 from app.utils.commons import INSTANCES
-from app.db import init_db, update_db, init_data
+from app.db import close_db, init_db, update_db, init_data
 from app.helper import DisplayHelper, ChromeHelper
 from app.rsschecker import RssChecker
 from app.scheduler import run_scheduler, restart_scheduler
@@ -131,6 +131,9 @@ def init_system():
         SearchTaskPool.recover_crashed_tasks()
     except Exception as e:
         log.error(f"恢复搜索任务失败：{e}")
+    # Startup runs on the long-lived main thread. Do not carry its read
+    # transaction into the schedulers or web server after initialization.
+    close_db()
 
 
 def start_service():
@@ -150,6 +153,8 @@ def start_service():
     # 初始化浏览器
     if not is_windows_exe:
         ChromeHelper().init_driver()
+    # Service initializers read database-backed configuration on this thread.
+    close_db()
 
 
 def monitor_config():
@@ -173,14 +178,19 @@ def monitor_config():
             if ConfigLoadCache.get(path):
                 return
             ConfigLoadCache.set(path, True)
-            log.console("进程 %s 检测到配置文件已修改，正在重新加载..." % os.getpid())
-            time.sleep(1)
-            Config().init_config()
-            for instance in INSTANCES.values():
-                if hasattr(instance, "init_config"):
-                    instance.init_config()
-            restart_scheduler()
-            restart_monitor()
+            try:
+                log.console("进程 %s 检测到配置文件已修改，正在重新加载..." % os.getpid())
+                time.sleep(1)
+                Config().init_config()
+                for instance in INSTANCES.values():
+                    if hasattr(instance, "init_config"):
+                        instance.init_config()
+                restart_scheduler()
+                restart_monitor()
+            finally:
+                # The watchdog thread is long-lived too; release sessions
+                # opened by config reload hooks before its next event.
+                close_db()
 
         def on_modified(self, event):
             if not event.is_directory:
