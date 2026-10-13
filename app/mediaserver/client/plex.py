@@ -184,6 +184,8 @@ class Plex(_IMediaClient):
             return []
         libraries = []
         for library in self._libraries:
+            if library.type not in {"movie", "show"}:
+                continue
             libraries.append({"id": library.key, "name": library.title})
         return libraries
 

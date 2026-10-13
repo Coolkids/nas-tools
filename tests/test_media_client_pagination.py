@@ -130,6 +130,21 @@ class MediaClientPaginationTest(TestCase):
         self.assertEqual(1, len(items))
         library.sectionByID.assert_called_once_with(14)
 
+    def test_plex_sync_libraries_exclude_music_and_other_section_types(self):
+        client = object.__new__(Plex)
+        sections = [
+            SimpleNamespace(key="1", title="movie section", type="movie"),
+            SimpleNamespace(key="14", title="series section", type="show"),
+            SimpleNamespace(key="27", title="music section", type="artist"),
+        ]
+        client._plex = SimpleNamespace(
+            library=SimpleNamespace(sections=Mock(return_value=sections)))
+
+        libraries = client.get_libraries()
+
+        self.assertEqual([{"id": "1", "name": "movie section"},
+                          {"id": "14", "name": "series section"}], libraries)
+
     def test_plex_page_retries_transient_remote_failure(self):
         client = object.__new__(Plex)
         result = SimpleNamespace(key="movie-1", librarySectionID=1, type="movie",
