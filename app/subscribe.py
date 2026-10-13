@@ -650,17 +650,21 @@ class Subscribe:
                 self.dbhelper.update_rss_movie_state(rssid=rssid, state='R')
 
         with ThreadPoolExecutor(max_workers=2) as pool:
-            tasks = []
+            tasks = {}
             for k_rid, v_rss_info in rss_movies.items():
-                tasks.append(pool.submit(_run_with_db_cleanup,
-                                         subscribe_search_movie_task, k_rid, v_rss_info)
-                )
+                task = pool.submit(_run_with_db_cleanup,
+                                   subscribe_search_movie_task, k_rid, v_rss_info)
+                tasks[task] = v_rss_info.get("id")
 
             for f in as_completed(tasks):
                 try:
                     f.result()
                 except Exception as e:
-                    log.error("【Subscribe】检索电影RSS子任务发生错误", e)
+                    try:
+                        self.dbhelper.update_rss_movie_state(rssid=tasks[f], state='R')
+                    except Exception as state_error:
+                        log.error("【Subscribe】电影订阅检索失败且状态回退失败：%s" % state_error)
+                    log.error("【Subscribe】检索电影RSS子任务发生错误：%s" % e)
 
 
     def subscribe_search_tv(self, rssid=None, state="D"):
@@ -799,17 +803,21 @@ class Subscribe:
                                               seasoninfo=no_exists.get(media_info.tmdb_id))
 
         with ThreadPoolExecutor(max_workers=5) as pool:
-            tasks = []
+            tasks = {}
             for k_rid, v_rss_info in rss_tvs.items():
-                tasks.append(pool.submit(_run_with_db_cleanup,
-                                         subscribe_search_tv_task, k_rid, v_rss_info)
-                             )
+                task = pool.submit(_run_with_db_cleanup,
+                                   subscribe_search_tv_task, k_rid, v_rss_info)
+                tasks[task] = v_rss_info.get("id")
 
             for f in as_completed(tasks):
                 try:
                     f.result()
                 except Exception as e:
-                    log.error("【Subscribe】检索电视剧RSS子任务发生错误", e)
+                    try:
+                        self.dbhelper.update_rss_tv_state(rssid=tasks[f], state='R')
+                    except Exception as state_error:
+                        log.error("【Subscribe】电视剧订阅检索失败且状态回退失败：%s" % state_error)
+                    log.error("【Subscribe】检索电视剧RSS子任务发生错误：%s" % e)
 
     def update_rss_state(self, rtype, rssid, state):
         """

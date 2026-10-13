@@ -692,7 +692,11 @@ class MEDIASYNCSYNCJOB(BaseMedia):
     JOB_ID = Column(String(64), nullable=False)
     GENERATION_ID = Column(String(64), nullable=False)
     LEASE_TOKEN = Column(BigInteger, nullable=False)
-    LEASE_UNTIL = Column(Float, nullable=False)
+    # A MySQL FLOAT only retains ~7 decimal digits; Unix epoch seconds are
+    # therefore rounded by minutes and can make an active lease appear stale.
+    # Precision 53 selects DOUBLE on MySQL/MariaDB and double precision on
+    # PostgreSQL while preserving SQLite's normal REAL affinity.
+    LEASE_UNTIL = Column(Float(precision=53), nullable=False)
     EXPECTED_ACTIVE_GENERATION = Column(String(64))
     STATUS = Column(String(32), nullable=False)
     CREATED_AT = Column(Float, nullable=False)

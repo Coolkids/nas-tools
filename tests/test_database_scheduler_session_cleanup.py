@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta
 from concurrent.futures import Future
 from threading import Barrier, Event, Lock
+from types import SimpleNamespace
 
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
 from apscheduler.executors.pool import ThreadPoolExecutor
@@ -105,3 +106,50 @@ def test_subscribe_search_releases_coordinator_and_worker_sessions_before_fanout
         getattr(subscribe, search_name)(state="R")
 
         assert len(closed_sessions) == 2
+
+
+def test_subscribe_search_failures_return_movie_and_tv_rows_to_ready_state(monkeypatch):
+    class InlineExecutor:
+        def __init__(self, max_workers):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def submit(self, function, *args):
+            future = Future()
+            try:
+                future.set_result(function(*args))
+            except BaseException as error:
+                future.set_exception(error)
+            return future
+
+    updates = []
+    errors = []
+    subscribe = Subscribe.__new__(Subscribe)
+    subscribe.dbhelper = SimpleNamespace(
+        update_rss_movie_state=lambda rssid, state: updates.append(("movie", rssid, state)),
+        update_rss_tv_state=lambda rssid, state: updates.append(("tv", rssid, state)))
+    subscribe.get_subscribe_movies = lambda **kwargs: {
+        "11": {"id": 11, "name": "failed movie", "fuzzy_match": False}}
+    subscribe.get_subscribe_tvs = lambda **kwargs: {
+        "21": {"id": 21, "name": "failed TV", "fuzzy_match": False}}
+
+    def fail_media_lookup(*args, **kwargs):
+        raise RuntimeError("fixture metadata failure")
+
+    monkeypatch.setattr(subscribe_module, "ThreadPoolExecutor", InlineExecutor)
+    monkeypatch.setattr(subscribe_module, "close_db", lambda: None)
+    monkeypatch.setattr(subscribe_module.log, "error",
+                        lambda message, module=None: errors.append(message))
+    monkeypatch.setattr(Subscribe, "_Subscribe__get_media_info", fail_media_lookup)
+
+    subscribe.subscribe_search_movie(state="R")
+    subscribe.subscribe_search_tv(state="R")
+
+    assert updates == [("movie", 11, "S"), ("movie", 11, "R"),
+                       ("tv", 21, "S"), ("tv", 21, "R")]
+    assert len(errors) == 2

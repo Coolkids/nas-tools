@@ -20,6 +20,12 @@ LEASE_SPEC = importlib.util.spec_from_file_location("media_sync_job_lease_migrat
                                                    LEASE_MIGRATION_PATH)
 LEASE_MIGRATION = importlib.util.module_from_spec(LEASE_SPEC)
 LEASE_SPEC.loader.exec_module(LEASE_MIGRATION)
+LEASE_PRECISION_MIGRATION_PATH = Path(__file__).resolve().parents[1] / "db_scripts" / "versions" / \
+    "f9c0d1e2f3a4_media_sync_lease_precision.py"
+LEASE_PRECISION_SPEC = importlib.util.spec_from_file_location(
+    "media_sync_lease_precision_migration", LEASE_PRECISION_MIGRATION_PATH)
+LEASE_PRECISION_MIGRATION = importlib.util.module_from_spec(LEASE_PRECISION_SPEC)
+LEASE_PRECISION_SPEC.loader.exec_module(LEASE_PRECISION_MIGRATION)
 
 
 class MediaSyncGenerationMigrationTest(TestCase):
@@ -89,4 +95,29 @@ class MediaSyncGenerationMigrationTest(TestCase):
                               "LEASE_UNTIL", "EXPECTED_ACTIVE_GENERATION", "STATUS",
                               "CREATED_AT", "UPDATED_AT"}, columns)
             self.assertTrue(indexes["UN_INDX_MEDIASYNC_SYNC_JOBS_JOB_ID"]["unique"])
+        engine.dispose()
+
+    def test_job_lease_precision_upgrade_preserves_existing_deadlines(self):
+        engine = sa.create_engine("sqlite:///:memory:")
+        deadline = 1_791_912_069.25
+        with engine.begin() as connection:
+            connection.exec_driver_sql("""CREATE TABLE MEDIASYNC_SYNC_JOBS (
+                SERVER VARCHAR(128) PRIMARY KEY, JOB_ID VARCHAR(64) NOT NULL,
+                GENERATION_ID VARCHAR(64) NOT NULL, LEASE_TOKEN BIGINT NOT NULL,
+                LEASE_UNTIL FLOAT NOT NULL, EXPECTED_ACTIVE_GENERATION VARCHAR(64),
+                STATUS VARCHAR(32) NOT NULL, CREATED_AT FLOAT NOT NULL,
+                UPDATED_AT FLOAT NOT NULL)""")
+            connection.exec_driver_sql("""INSERT INTO MEDIASYNC_SYNC_JOBS
+                (SERVER, JOB_ID, GENERATION_ID, LEASE_TOKEN, LEASE_UNTIL, STATUS,
+                 CREATED_AT, UPDATED_AT)
+                VALUES ('Emby', 'job', 'generation', 1, ?, 'FETCHING', 1, 1)""",
+                (deadline,))
+
+            with Operations.context(MigrationContext.configure(connection)):
+                LEASE_PRECISION_MIGRATION.upgrade()
+                LEASE_PRECISION_MIGRATION.upgrade()
+
+            value = connection.exec_driver_sql(
+                "SELECT LEASE_UNTIL FROM MEDIASYNC_SYNC_JOBS WHERE SERVER='Emby'").scalar_one()
+            self.assertAlmostEqual(deadline, value)
         engine.dispose()

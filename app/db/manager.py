@@ -61,7 +61,13 @@ class DatabaseManager:
         if not isinstance(value, dict):
             raise ValueError("database 配置必须是对象")
         settings = copy.deepcopy(value)
-        settings.setdefault("type", "sqlite")
+        kind = str(settings.get("type") or "sqlite").strip().lower()
+        settings["type"] = kind
+        if kind != "sqlite":
+            settings["port"] = int(settings.get("port") or (
+                5432 if kind == "postgresql" else 3306))
+            settings["connect_timeout"] = int(settings.get("connect_timeout") or 5)
+            settings["ssl"] = copy.deepcopy(settings.get("ssl") or {})
         return settings
 
     @staticmethod

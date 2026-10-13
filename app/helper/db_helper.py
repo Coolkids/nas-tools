@@ -1191,7 +1191,7 @@ class DbHelper:
             "DESC": desc
         })
 
-    @DbPersist(_db)
+    @DbPersist(_db, retry_safe=True)
     def update_rss_filter_order(self, rtype, rssid, res_order):
         """
         更新订阅命中的过滤规则优先级
@@ -1471,7 +1471,7 @@ class DbHelper:
         ))
         return 0
 
-    @DbPersist(_db)
+    @DbPersist(_db, retry_safe=True)
     def update_rss_tv_lack(self, title=None, year=None, season=None, rssid=None, lack_episodes: list = None):
         """
         更新电视剧缺失的集数
@@ -1498,7 +1498,7 @@ class DbHelper:
                 }
             )
 
-    @DbPersist(_db)
+    @DbPersist(_db, retry_safe=True)
     def delete_rss_tv(self, title=None, season=None, rssid=None, tmdbid=None):
         """
         删除RSS电视剧
@@ -1524,7 +1524,7 @@ class DbHelper:
         else:
             return False
 
-    @DbPersist(_db)
+    @DbPersist(_db, retry_safe=True)
     def update_rss_tv_episodes(self, rid, episodes):
         """
         插入或更新电视剧订阅缺失剧集
@@ -1571,7 +1571,7 @@ class DbHelper:
         self._db.query(RSSTVEPISODES).filter(
             RSSTVEPISODES.RSSID == self._identifier_string(rid)).delete()
 
-    @DbPersist(_db)
+    @DbPersist(_db, retry_safe=True)
     def update_rss_tv_state(self, title=None, year=None, season=None, rssid=None, state='R'):
         """
         更新电视剧订阅状态
@@ -2098,14 +2098,17 @@ class DbHelper:
             .offset((int(page) - 1) * int(page_size)).limit(int(page_size)).all()
         return records, total
 
-    def is_exists_rss_history(self, rssid):
+    def is_exists_rss_history(self, rssid, rtype=None):
         """
-        判断RSS历史是否存在
+        判断指定订阅类型的RSS历史是否存在。
         """
         if not rssid:
             return False
-        count = self._db.query(RSSHISTORY).filter(
-            RSSHISTORY.RSSID == self._identifier_string(rssid)).count()
+        query = self._db.query(RSSHISTORY).filter(
+            RSSHISTORY.RSSID == self._identifier_string(rssid))
+        if rtype:
+            query = query.filter(RSSHISTORY.TYPE == rtype)
+        count = query.count()
         if count > 0:
             return True
         else:
@@ -2116,7 +2119,7 @@ class DbHelper:
         """
         登记RSS历史
         """
-        if not self.is_exists_rss_history(rssid):
+        if not self.is_exists_rss_history(rssid, rtype=rtype):
             self._db.insert(RSSHISTORY(
                 TYPE=rtype,
                 RSSID=self._identifier_string(rssid),

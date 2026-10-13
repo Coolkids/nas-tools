@@ -15,3 +15,12 @@ def test_parallel_subscribe_movie_writes_are_safe_to_retry():
                    DbHelper.update_rss_movie_state,
                    DbHelper.delete_rss_movie):
         assert _persist_policy(method).retry_safe
+
+
+def test_parallel_subscribe_tv_writes_are_safe_to_retry():
+    for method in (DbHelper.update_rss_tv_lack,
+                   DbHelper.update_rss_tv_episodes,
+                   DbHelper.update_rss_tv_state,
+                   DbHelper.update_rss_filter_order,
+                   DbHelper.delete_rss_tv):
+        assert _persist_policy(method).retry_safe
