@@ -31,7 +31,7 @@ class SQLiteBackend(DatabaseBackend):
             # for overlapping reads/work while preventing a burst of workers
             # from opening a ten-connection pool against the same WAL file.
             pool_size=2,
-            max_overflow=0,
+            max_overflow=50,
             pool_recycle=1800,
             pool_timeout=60,
             connect_args={"timeout": 60, "check_same_thread": False,
