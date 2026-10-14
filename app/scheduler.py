@@ -41,6 +41,8 @@ class Scheduler:
         """
         读取配置，启动定时服务
         """
+        # Scheduler 是单例；配置更新后重启时需重新读取，避免沿用旧的识别清理开关。
+        self.init_config()
         self.SCHEDULER = DatabaseSessionBackgroundScheduler(timezone=Config().get_timezone(),
                                              executors={
                                                  'default': ThreadPoolExecutor(20)
@@ -145,7 +147,8 @@ class Scheduler:
                 self.SCHEDULER.add_job(
                     self.cleanup_expired_recognition_records,
                     'interval', days=1,
-                    id='recognition_record_cleanup', replace_existing=True)
+                    id='recognition_record_cleanup', replace_existing=True,
+                    next_run_time=datetime.datetime.now())
                 log.info("媒体识别记录过期清理服务启动，保留 %s 天" % retention_days)
 
         self.SCHEDULER.print_jobs()
@@ -174,7 +177,7 @@ class Scheduler:
         except (TypeError, ValueError):
             retention_days = 30
         deleted_count = DbHelper().delete_expired_recognition_records(retention_days)
-        log.info("媒体识别记录过期清理完成，保留 %s 天，删除 %s 条" % (
+        log.info("媒体识别记录过期清理完成，保留 %s 天，共删除 %s 条记录" % (
             retention_days, deleted_count))
         return deleted_count
 

@@ -1166,6 +1166,10 @@ class WebAction:
         strategy = data.get("recognition.decision.strategy")
         if strategy and strategy not in ("legacy", "title_evidence"):
             return {"code": 1, "msg": "媒体识别策略无效"}
+        record_mode_key = "recognition.records.mode"
+        if record_mode_key in data and data[record_mode_key] not in (
+                "all", "failed", "none"):
+            return {"code": 1, "msg": "媒体识别记录类型无效"}
         for key in (
                 "recognition.decision.title_evidence.min_cjk_chars_for_strong",
                 "recognition.decision.title_evidence.min_latin_chars_for_strong"):

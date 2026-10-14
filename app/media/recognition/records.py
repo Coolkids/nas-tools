@@ -12,7 +12,9 @@ import requests.exceptions
 from functools import wraps
 from enum import Enum
 from threading import Condition, Lock
-from app.media.recognition.settings import provider_enabled, profile_tmdb_allowed
+from app.media.recognition.settings import (
+    provider_enabled, profile_tmdb_allowed, recognition_record_mode,
+)
 
 
 _current = contextvars.ContextVar("media_recognition_recorder", default=None)
@@ -330,6 +332,7 @@ class RecognitionRecorder:
         self._delegate = None
         self._spool_path = None
         self._runtime_config = None
+        self._record_mode = "failed"
         self.deadline_monotonic = None
         self._tmdb_timeout_count = 0
         self._tmdb_timeout_reason = None
@@ -350,6 +353,8 @@ class RecognitionRecorder:
             _active_recognitions += 1
             self._registered = True
         self._runtime_config = _runtime_config_snapshot()
+        recognition = (self._runtime_config or {}).get("recognition", {})
+        self._record_mode = recognition_record_mode(recognition)
         config_version, config_snapshot = _recognition_config_snapshot()
         if self._runtime_config is not None:
             recognition_config_value = self._runtime_config.get("recognition", {})
@@ -368,16 +373,17 @@ class RecognitionRecorder:
         self._token = _current.set(self)
         self.action("request_start", status="running", input={"original_name": self.original_name})
         self.overall_result = {"status": "running", "lifecycle": "running"}
-        try:
-            self._spool_path = _write_spool(self.as_dict())
-            with _spool_lock:
-                _active_spool_paths.add(self._spool_path)
-        except Exception as error:
+        if self._record_mode != "none":
             try:
-                import log
-                log.warn(f"【Recognition】无法写入识别开始暂存 {self.request_id}：{error}")
-            except Exception:
-                pass
+                self._spool_path = _write_spool(self.as_dict())
+                with _spool_lock:
+                    _active_spool_paths.add(self._spool_path)
+            except Exception as error:
+                try:
+                    import log
+                    log.warn(f"【Recognition】无法写入识别开始暂存 {self.request_id}：{error}")
+                except Exception:
+                    pass
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -395,26 +401,33 @@ class RecognitionRecorder:
         self.overall_result["elapsed_ms"] = int((time.monotonic() - self.started) * 1000)
         self.action("request_finish", status=self.overall_result["status"],
                     output=self.overall_result)
+        status = str(self.overall_result.get("status") or "").lower()
+        should_persist = (self._record_mode == "all" or
+                          self._record_mode == "failed" and
+                          status in {"failed", "error", "interrupted"})
         try:
-            if self._spool_path:
-                try:
-                    self._spool_path = _write_spool(self.as_dict())
-                except Exception as error:
+            if not should_persist:
+                if self._spool_path:
+                    self._remove_spool()
+            else:
+                if self._spool_path:
                     try:
-                        import log
-                        log.error(f"【Recognition】更新识别暂存失败 {self.request_id}：{error}")
-                    except Exception:
-                        pass
-            from app.helper.db_helper import DbHelper
-            saved = DbHelper().insert_recognition_record(self.as_dict())
-            if saved and self._spool_path:
-                os.remove(self._spool_path)
-                self._spool_path = None
-            elif not saved and not self._spool_path:
-                self._spool_path = _write_spool(self.as_dict())
-            if not saved:
-                import log
-                log.warn(f"【Recognition】数据库暂不可写，记录已暂存：{self._spool_path}")
+                        self._spool_path = _write_spool(self.as_dict())
+                    except Exception as error:
+                        try:
+                            import log
+                            log.error(f"【Recognition】更新识别暂存失败 {self.request_id}：{error}")
+                        except Exception:
+                            pass
+                from app.helper.db_helper import DbHelper
+                saved = DbHelper().insert_recognition_record(self.as_dict())
+                if saved and self._spool_path:
+                    self._remove_spool()
+                elif not saved and not self._spool_path:
+                    self._spool_path = _write_spool(self.as_dict())
+                if not saved:
+                    import log
+                    log.warn(f"【Recognition】数据库暂不可写，记录已暂存：{self._spool_path}")
         except Exception as error:
             # 识别记录失败不能影响现有媒体查询行为。
             try:
@@ -422,7 +435,7 @@ class RecognitionRecorder:
                 log.error(f"【Recognition】保存识别记录失败：{error}")
             except Exception:
                 pass
-            if not self._spool_path:
+            if should_persist and not self._spool_path:
                 try:
                     self._spool_path = _write_spool(self.as_dict())
                 except Exception as spool_error:
@@ -447,6 +460,18 @@ class RecognitionRecorder:
                     self._registered = False
                     _recognition_condition.notify_all()
         return False
+
+    def _remove_spool(self):
+        path = self._spool_path
+        if not path:
+            return
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        with _spool_lock:
+            _active_spool_paths.discard(path)
+        self._spool_path = None
 
     def action(self, action_type, status="success", input=None, output=None,
                provider_id=None, attempt_id=None, reason=None):

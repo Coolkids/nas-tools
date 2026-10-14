@@ -480,7 +480,7 @@ class DbHelper:
 
     @DbPersist(_db)
     def delete_expired_recognition_records(self, retention_days, now=None, batch_size=500):
-        """删除超过保留期限的识别请求及其解析器明细，跳过仍在运行的请求。"""
+        """删除过期的识别核对记录和识别请求及其明细，跳过仍在运行的请求。"""
         retention_days = int(retention_days)
         if not 1 <= retention_days <= 36500:
             raise ValueError("识别记录保留天数必须介于 1 和 36500 之间")
@@ -511,6 +511,21 @@ class DbHelper:
                 RECOGNITIONREQUEST.REQUEST_ID.in_(request_ids)).delete(
                 synchronize_session=False)
             # 每个批次独立提交，让其他 SQLite 写入在批次边界获得机会。
+            self._db.commit()
+
+        # 兼容页面仍展示的旧 AI 识别核对记录。其 ADD_TIME 使用本地
+        # YYYY-MM-DD HH:MM:SS 格式，与上面的截止值保持可排序比较。
+        while True:
+            record_ids = [row[0] for row in self._db.query(
+                AIRECOGNITIONRECORD.ID).filter(
+                    AIRECOGNITIONRECORD.ADD_TIME < older_than
+                ).order_by(AIRECOGNITIONRECORD.ADD_TIME.asc(),
+                           AIRECOGNITIONRECORD.ID.asc()).limit(batch_size).all()]
+            if not record_ids:
+                break
+            deleted_count += self._db.query(AIRECOGNITIONRECORD).filter(
+                AIRECOGNITIONRECORD.ID.in_(record_ids)).delete(
+                    synchronize_session=False)
             self._db.commit()
         return deleted_count
 

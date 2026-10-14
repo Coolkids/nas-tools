@@ -1,6 +1,17 @@
 """识别器的有效配置读取与旧字段兼容。"""
 
 
+RECOGNITION_RECORD_MODES = {"all", "failed", "none"}
+
+
+def recognition_record_mode(recognition=None):
+    """返回媒体识别记录策略，旧配置默认只保留失败记录。"""
+    recognition = recognition if isinstance(recognition, dict) else {}
+    records = recognition.get("records") or {}
+    mode = records.get("mode") if isinstance(records, dict) else None
+    return mode if isinstance(mode, str) and mode in RECOGNITION_RECORD_MODES else "failed"
+
+
 def _as_bool(value):
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
