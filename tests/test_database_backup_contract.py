@@ -10,7 +10,21 @@ import app.db as app_database
 import app.db.maintenance as maintenance
 from app.db.backends import create_backend
 from app.db.manager import DatabaseManager
-from app.db.models import Base, MEDIASYNCITEMS
+from app.db.models import Base, MEDIASYNCITEMS, RSSTVS
+
+
+def test_backup_decoder_normalizes_legacy_blank_nullable_integer():
+    row = {column.name: None for column in RSSTVS.__table__.columns}
+    row["ID"] = 991
+    row["DOWNLOAD_SETTING"] = ""
+
+    decoded = maintenance._decode_backup_row(row, RSSTVS.__table__)
+
+    assert decoded["DOWNLOAD_SETTING"] is None
+
+    row["DOWNLOAD_SETTING"] = "not-an-integer"
+    with pytest.raises(ValueError, match="DOWNLOAD_SETTING 的类型不匹配"):
+        maintenance._decode_backup_row(row, RSSTVS.__table__)
 
 
 @pytest.mark.parametrize("backend_name", ("sqlite", "postgresql", "mariadb", "mysql"))

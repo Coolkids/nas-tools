@@ -852,6 +852,14 @@ class FileTransfer:
             except Exception as err:
                 ExceptionUtils.exception_traceback(err)
                 log.error("【Rmt】文件转移时发生错误：%s - %s" % (str(err), traceback.format_exc()))
+                success_flag = False
+                error_message = "文件处理时发生错误：%s" % err
+                if udf_flag:
+                    return __finish_transfer(False, error_message)
+                failed_count += 1
+                alert_count += 1
+                if error_message not in alert_messages:
+                    alert_messages.append(error_message)
         # 循环结束
         # 统计完成情况，发送通知
         if message_medias:

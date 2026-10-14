@@ -1481,7 +1481,20 @@ def _decode_backup_row(raw_row, table):
     if not isinstance(raw_row, dict) or set(raw_row) != set(table.columns.keys()):
         raise ValueError(f"备份表 {table.name} 的字段集合无效")
     decoded = {name: _decode_value(value) for name, value in raw_row.items()}
+    # SQLite 历史库可能把可空数值列的空值存成空字符串。跨库迁移已将
+    # 这种表示统一成 NULL，备份检查和恢复也沿用同一规则，避免合法旧备份
+    # 被类型校验拒绝。
+    from app.db.migration import _coerce_transfer_value
+
     for column in table.columns:
+        value = decoded[column.name]
+        if isinstance(value, str) and not value.strip():
+            try:
+                expected = column.type.python_type
+            except (AttributeError, NotImplementedError):
+                expected = None
+            if expected in (int, float, bool, Decimal):
+                decoded[column.name] = _coerce_transfer_value(value, column)
         if not _matches_column_type(decoded[column.name], column):
             raise ValueError(f"备份表 {table.name} 字段 {column.name} 的类型不匹配")
     validate_string_lengths(table, (decoded,))
