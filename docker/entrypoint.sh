@@ -17,6 +17,9 @@ dir /config/cache/valkey
 dbfilename dump.rdb
 appendonly yes
 appendfsync everysec
+# AOF 超过 100 MB 且较上次重写增长 1% 后触发自动重写；这不是硬上限。
+auto-aof-rewrite-percentage 1
+auto-aof-rewrite-min-size 100mb
 save 900 1
 save 300 10
 save 60 10000
