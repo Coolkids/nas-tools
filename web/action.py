@@ -462,6 +462,9 @@ class WebAction:
             "douban": DoubanSync().sync,
             "subscribe_search_all": Subscribe().subscribe_search_all,
             "recognition_record_cleanup": Scheduler().cleanup_expired_recognition_records,
+            "transfer_history_cleanup": Scheduler().cleanup_expired_transfer_history,
+            "subscription_history_cleanup": Scheduler().cleanup_expired_subscription_history,
+            "download_history_cleanup": Scheduler().cleanup_expired_download_history,
         }
         sch_item = data.get("item")
         if sch_item and commands.get(sch_item):
@@ -1234,6 +1237,12 @@ class WebAction:
                 except (TypeError, ValueError):
                     return {"code": 1, "msg": "识别权重必须为数字"}
         config_test = StringUtils.to_bool(data.get("test"), False)
+        history_cleanup_paths = [
+            f"history.cleanup.{name}"
+            for name in ("transfer_history", "subscription_history", "download_history")
+        ]
+        recognition_cleanup_path = "recognition.records.cleanup"
+        cleanup_paths = [recognition_cleanup_path] + history_cleanup_paths
         numeric_fields = {
             "cache.port": int, "cache.db": int,
             "cache.connect_timeout": float, "cache.retry_interval": float,
@@ -1256,6 +1265,9 @@ class WebAction:
             "recognition.decision.weights.provider_reliability": float,
             "recognition.cache.parse.ttl_seconds": int,
         }
+        for cleanup_path in cleanup_paths:
+            numeric_fields[f"{cleanup_path}.interval_hours"] = int
+            numeric_fields[f"{cleanup_path}.retention_value"] = int
         boolean_fields = {
             "recognition.records.cleanup.enabled",
             "recognition.providers.anitopy_ml.enabled",
@@ -1267,6 +1279,7 @@ class WebAction:
             "recognition.profiles.resolve.network_allowed",
             "recognition.profiles.resolve.tmdb_allowed",
         }
+        boolean_fields.update(f"{cleanup_path}.enabled" for cleanup_path in cleanup_paths)
         profile_provider_keys = {
             "recognition.profiles.parse_only.providers",
             "recognition.profiles.resolve.providers",
@@ -1292,18 +1305,52 @@ class WebAction:
             # 生效配置
             cfg = self.set_config_value(cfg, key, value)
 
+        legacy_retention_key = "recognition.records.cleanup.retention_days"
+        if legacy_retention_key in data and not any(key in data for key in (
+                "recognition.records.cleanup.retention_value",
+                "recognition.records.cleanup.retention_unit")):
+            # 旧客户端仍提交天数配置时，同步到新的带单位设置。
+            legacy_days = (cfg.get("recognition", {}).get("records", {})
+                           .get("cleanup", {}).get("retention_days"))
+            cfg = self.set_config_value(cfg, "recognition.records.cleanup.retention_value", legacy_days)
+            cfg = self.set_config_value(cfg, "recognition.records.cleanup.retention_unit", "day")
+
         if "pt.search_rss_interval" in data:
             value = int(cfg.get("pt", {}).get("search_rss_interval") or 0)
             if value and not 6 <= value <= 8760:
                 return {"code": 1, "msg": "订阅搜索周期必须为 0 或介于 6 小时和 365 天之间"}
-        if "recognition.records.cleanup.retention_days" in data:
-            cleanup = (((cfg.get("recognition") or {}).get("records") or {}).get("cleanup") or {})
+        for cleanup_path in cleanup_paths:
+            legacy_key = f"{cleanup_path}.retention_days" if cleanup_path == recognition_cleanup_path else None
+            keys = [f"{cleanup_path}.interval_hours", f"{cleanup_path}.retention_value",
+                    f"{cleanup_path}.retention_unit", f"{cleanup_path}.enabled"]
+            if legacy_key:
+                keys.append(legacy_key)
+            if not any(key in data for key in keys):
+                continue
+            cleanup = cfg
+            for part in cleanup_path.split("."):
+                cleanup = cleanup.get(part, {}) if isinstance(cleanup, dict) else {}
             try:
-                retention_days = int(cleanup.get("retention_days") or 0)
+                interval_hours = int(cleanup.get("interval_hours", 24))
+                retention_unit = cleanup.get("retention_unit", "day")
+                retention_default = cleanup.get("retention_days", 30) if legacy_key else 30
+                retention_value = int(cleanup.get("retention_value", retention_default))
             except (TypeError, ValueError):
-                return {"code": 1, "msg": "媒体识别记录保留天数无效"}
-            if not 1 <= retention_days <= 36500:
-                return {"code": 1, "msg": "媒体识别记录保留天数必须介于 1 和 36500 天之间"}
+                return {"code": 1, "msg": "清理周期或数据保留时间无效"}
+            if not 1 <= interval_hours <= 8760:
+                return {"code": 1, "msg": "执行周期必须介于 1 小时和 365 天之间"}
+            if retention_unit not in ("day", "month"):
+                return {"code": 1, "msg": "数据保存时间单位无效"}
+            max_retention = 36500 if retention_unit == "day" else 1200
+            if not 1 <= retention_value <= max_retention:
+                return {"code": 1, "msg": "数据保存时间超出允许范围"}
+            if legacy_key and legacy_key in data:
+                try:
+                    legacy_days = int(cleanup.get("retention_days") or 0)
+                except (TypeError, ValueError):
+                    return {"code": 1, "msg": "媒体识别记录保留天数无效"}
+                if not 1 <= legacy_days <= 36500:
+                    return {"code": 1, "msg": "媒体识别记录保留天数必须介于 1 和 36500 天之间"}
 
         # 旧设置页和新识别配置共用一个有效 AI 开关和接口地址。
         legacy_enabled_key = "laboratory.ai_inference"
@@ -1431,7 +1478,11 @@ class WebAction:
             if any(key in data for key in (
                     "pt.search_rss_interval",
                     "recognition.records.cleanup.enabled",
-                    "recognition.records.cleanup.retention_days")):
+                    "recognition.records.cleanup.interval_hours",
+                    "recognition.records.cleanup.retention_days",
+                    "recognition.records.cleanup.retention_value",
+                    "recognition.records.cleanup.retention_unit")) or any(
+                    key.startswith("history.cleanup.") for key in data):
                 restart_scheduler()
 
         return {"code": 0, "msg": "已忽略旧客户端提交的 AI 缓存容量字段" if ignored_cache_limits else ""}

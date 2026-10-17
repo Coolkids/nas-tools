@@ -20,6 +20,28 @@ from config import PT_TRANSFER_INTERVAL, METAINFO_SAVE_INTERVAL, \
 from web.backend.wallpaper import get_login_wallpaper
 
 
+def _cleanup_options(config, default_retention=30, legacy_retention_key=None):
+    """读取并检查历史清理周期与保留时间。"""
+    config = config or {}
+    try:
+        interval_hours = int(config.get('interval_hours', 24))
+        retention_value = config.get('retention_value')
+        if retention_value is None and legacy_retention_key:
+            retention_value = config.get(legacy_retention_key)
+        retention_value = int(retention_value if retention_value is not None else default_retention)
+    except (TypeError, ValueError):
+        return None
+    retention_unit = config.get('retention_unit', 'day')
+    max_retention = 36500 if retention_unit == 'day' else 1200 if retention_unit == 'month' else 0
+    if not 1 <= interval_hours <= 8760 or not 1 <= retention_value <= max_retention:
+        return None
+    return interval_hours, retention_value, retention_unit
+
+
+def _retention_label(value, unit):
+    return f"{value} {'天' if unit == 'day' else '个月'}"
+
+
 @singleton
 class Scheduler:
     SCHEDULER = None
@@ -27,6 +49,7 @@ class Scheduler:
     _douban = None
     _media = None
     _recognition = None
+    _history = None
 
     def __init__(self):
         self.init_config()
@@ -36,6 +59,7 @@ class Scheduler:
         self._media = Config().get_config('media')
         self._douban = Config().get_config('douban')
         self._recognition = Config().get_config('recognition')
+        self._history = Config().get_config('history')
 
     def run_service(self):
         """
@@ -139,17 +163,42 @@ class Scheduler:
         # 定时清理超过保留期限的媒体识别记录。
         record_cleanup = (((self._recognition or {}).get('records') or {}).get('cleanup') or {})
         if record_cleanup.get('enabled'):
-            try:
-                retention_days = int(record_cleanup.get('retention_days', 30))
-            except (TypeError, ValueError):
-                retention_days = 30
-            if 1 <= retention_days <= 36500:
+            cleanup_options = _cleanup_options(
+                record_cleanup, default_retention=30, legacy_retention_key='retention_days')
+            if cleanup_options:
+                interval_hours, retention_value, retention_unit = cleanup_options
                 self.SCHEDULER.add_job(
                     self.cleanup_expired_recognition_records,
-                    'interval', days=1,
+                    'interval', hours=interval_hours,
                     id='recognition_record_cleanup', replace_existing=True,
                     next_run_time=datetime.datetime.now())
-                log.info("媒体识别记录过期清理服务启动，保留 %s 天" % retention_days)
+                log.info("媒体识别记录过期清理服务启动，每 %s 小时执行，保留 %s" % (
+                    interval_hours, _retention_label(retention_value, retention_unit)))
+
+        history_config = (self._history or {}).get('cleanup') or {}
+        history_jobs = (
+            ('transfer_history', 'transfer_history_cleanup',
+             self.cleanup_expired_transfer_history, '转移历史'),
+            ('subscription_history', 'subscription_history_cleanup',
+             self.cleanup_expired_subscription_history, '订阅历史'),
+            ('download_history', 'download_history_cleanup',
+             self.cleanup_expired_download_history, '最近下载'),
+        )
+        for config_key, job_id, cleanup_func, label in history_jobs:
+            cleanup_config = history_config.get(config_key) or {}
+            if not cleanup_config.get('enabled'):
+                continue
+            cleanup_options = _cleanup_options(cleanup_config)
+            if not cleanup_options:
+                log.error("%s过期清理配置无效，任务未启动" % label)
+                continue
+            interval_hours, retention_value, retention_unit = cleanup_options
+            self.SCHEDULER.add_job(
+                cleanup_func, 'interval', hours=interval_hours,
+                id=job_id, replace_existing=True,
+                next_run_time=datetime.datetime.now())
+            log.info("%s过期清理服务启动，每 %s 小时执行，保留 %s" % (
+                label, interval_hours, _retention_label(retention_value, retention_unit)))
 
         self.SCHEDULER.print_jobs()
 
@@ -172,14 +221,46 @@ class Scheduler:
         """按当前配置删除过期识别记录及其解析器明细。"""
         recognition = Config().get_config('recognition') or {}
         cleanup = ((recognition.get('records') or {}).get('cleanup') or {})
-        try:
-            retention_days = int(cleanup.get('retention_days', 30))
-        except (TypeError, ValueError):
-            retention_days = 30
-        deleted_count = DbHelper().delete_expired_recognition_records(retention_days)
-        log.info("媒体识别记录过期清理完成，保留 %s 天，共删除 %s 条记录" % (
-            retention_days, deleted_count))
+        options = _cleanup_options(cleanup, default_retention=30,
+                                   legacy_retention_key='retention_days')
+        if not options:
+            log.error("媒体识别记录过期清理配置无效")
+            return 0
+        _, retention_value, retention_unit = options
+        deleted_count = DbHelper().delete_expired_recognition_records(
+            retention_unit=retention_unit, retention_value=retention_value)
+        log.info("媒体识别记录过期清理完成，保留 %s，共删除 %s 条记录" % (
+            _retention_label(retention_value, retention_unit), deleted_count))
         return deleted_count
+
+    @staticmethod
+    def _cleanup_expired_history(config_key, delete_method, label):
+        history = Config().get_config('history') or {}
+        cleanup = ((history.get('cleanup') or {}).get(config_key) or {})
+        options = _cleanup_options(cleanup)
+        if not options:
+            log.error("%s过期清理配置无效" % label)
+            return 0
+        _, retention_value, retention_unit = options
+        deleted_count = delete_method(retention_value, retention_unit=retention_unit)
+        log.info("%s过期清理完成，保留 %s，共删除 %s 条记录" % (
+            label, _retention_label(retention_value, retention_unit), deleted_count))
+        return deleted_count
+
+    @staticmethod
+    def cleanup_expired_transfer_history():
+        return Scheduler._cleanup_expired_history(
+            'transfer_history', DbHelper().delete_expired_transfer_history, '转移历史')
+
+    @staticmethod
+    def cleanup_expired_subscription_history():
+        return Scheduler._cleanup_expired_history(
+            'subscription_history', DbHelper().delete_expired_subscription_history, '订阅历史')
+
+    @staticmethod
+    def cleanup_expired_download_history():
+        return Scheduler._cleanup_expired_history(
+            'download_history', DbHelper().delete_expired_download_history, '最近下载')
 
 def run_scheduler():
     """

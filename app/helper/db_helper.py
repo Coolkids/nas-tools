@@ -1,3 +1,4 @@
+import calendar
 import datetime
 import os
 import os.path
@@ -29,6 +30,51 @@ class DbHelper:
             return int(value)
         except (TypeError, ValueError, OverflowError):
             return None
+
+    @staticmethod
+    def _history_retention_cutoff(retention_value, retention_unit, now=None):
+        """计算历史数据保留期限的字符串时间边界。"""
+        try:
+            retention_value = int(retention_value)
+        except (TypeError, ValueError) as error:
+            raise ValueError("历史记录保留时间无效") from error
+        if retention_value < 1:
+            raise ValueError("历史记录保留时间必须大于 0")
+        if retention_unit == "day":
+            if retention_value > 36500:
+                raise ValueError("历史记录保留天数不能超过 36500 天")
+            cutoff = (now or datetime.datetime.now()) - datetime.timedelta(days=retention_value)
+        elif retention_unit == "month":
+            if retention_value > 1200:
+                raise ValueError("历史记录保留月数不能超过 1200 个月")
+            now = now or datetime.datetime.now()
+            month_index = now.year * 12 + now.month - 1 - retention_value
+            year, month_index = divmod(month_index, 12)
+            month = month_index + 1
+            day = min(now.day, calendar.monthrange(year, month)[1])
+            cutoff = now.replace(year=year, month=month, day=day)
+        else:
+            raise ValueError("历史记录保留单位无效")
+        return cutoff.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+    def _delete_expired_history(self, model, date_column, retention_value, retention_unit,
+                                now=None, batch_size=500):
+        """分批删除超过保留期限的历史，降低清理期间的数据库锁占用。"""
+        older_than = self._history_retention_cutoff(retention_value, retention_unit, now=now)
+        batch_size = min(max(int(batch_size or 500), 1), 2000)
+        deleted_count = 0
+        last_id = 0
+        while True:
+            record_ids = [row[0] for row in self._db.query(model.ID).filter(
+                date_column < older_than, model.ID > last_id
+            ).order_by(model.ID.asc()).limit(batch_size).all()]
+            if not record_ids:
+                break
+            last_id = record_ids[-1]
+            deleted_count += self._db.query(model).filter(
+                model.ID.in_(record_ids)).delete(synchronize_session=False)
+            self._db.commit()
+        return deleted_count
 
     @staticmethod
     def _search_task_query(keyword):
@@ -479,15 +525,37 @@ class DbHelper:
         return request, attempts
 
     @DbPersist(_db)
-    def delete_expired_recognition_records(self, retention_days, now=None, batch_size=500):
+    def delete_expired_transfer_history(self, retention_value, retention_unit="day",
+                                        now=None, batch_size=500):
+        """删除超出保留期限的文件转移历史。"""
+        return self._delete_expired_history(
+            TRANSFERHISTORY, TRANSFERHISTORY.DATE, retention_value,
+            retention_unit, now=now, batch_size=batch_size)
+
+    @DbPersist(_db)
+    def delete_expired_subscription_history(self, retention_value, retention_unit="day",
+                                            now=None, batch_size=500):
+        """删除超出保留期限的订阅历史。"""
+        return self._delete_expired_history(
+            RSSHISTORY, RSSHISTORY.FINISH_TIME, retention_value,
+            retention_unit, now=now, batch_size=batch_size)
+
+    @DbPersist(_db)
+    def delete_expired_download_history(self, retention_value, retention_unit="day",
+                                        now=None, batch_size=500):
+        """删除超出保留期限的最近下载记录。"""
+        return self._delete_expired_history(
+            DOWNLOADHISTORY, DOWNLOADHISTORY.DATE, retention_value,
+            retention_unit, now=now, batch_size=batch_size)
+
+    @DbPersist(_db)
+    def delete_expired_recognition_records(self, retention_days=None, now=None, batch_size=500,
+                                           retention_unit="day", retention_value=None):
         """删除过期的识别核对记录和识别请求及其明细，跳过仍在运行的请求。"""
-        retention_days = int(retention_days)
-        if not 1 <= retention_days <= 36500:
-            raise ValueError("识别记录保留天数必须介于 1 和 36500 之间")
         batch_size = min(max(int(batch_size or 500), 1), 2000)
-        now = now or datetime.datetime.now()
-        older_than = (now - datetime.timedelta(days=retention_days)).strftime(
-            "%Y-%m-%d %H:%M:%S.%f")
+        older_than = self._history_retention_cutoff(
+            retention_value if retention_value is not None else retention_days,
+            retention_unit, now=now)
         deleted_count = 0
         while True:
             request_ids = [row[0] for row in self._db.query(
