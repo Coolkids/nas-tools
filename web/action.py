@@ -82,7 +82,7 @@ class WebAction:
     dbhelper = None
     _actions = {}
     _cache_admin_actions = frozenset({
-        "get_system_cache_info", "clear_system_cache", "check_cache_storage",
+        "get_system_cache_info", "clear_system_cache", "update_system_cache_ttl", "check_cache_storage",
         "start_cache_migration", "get_cache_job", "cancel_cache_job",
         "retry_cache_restart", "recover_cache_migration",
     })
@@ -256,6 +256,7 @@ class WebAction:
             "clear_recognition_parse_cache": self.__clear_recognition_parse_cache,
             "get_system_cache_info": self.__get_system_cache_info,
             "clear_system_cache": self.__clear_system_cache,
+            "update_system_cache_ttl": self.__update_system_cache_ttl,
             "check_cache_storage": self.__check_cache_storage,
             "start_cache_migration": self.__start_cache_migration,
             "get_cache_job": self.__get_cache_job,
@@ -5039,6 +5040,20 @@ class WebAction:
         from app.utils.system_cache import backend_status, cache_info
 
         return {"code": 0, "caches": cache_info(), "backend": backend_status()}
+
+    @staticmethod
+    def __update_system_cache_ttl(data=None):
+        from app.utils.system_cache import update_cache_ttl
+
+        data = data or {}
+        try:
+            seconds = update_cache_ttl(data.get("name"), data.get("value"), data.get("unit"))
+            return {"code": 0, "ttl_seconds": seconds}
+        except ValueError as error:
+            return {"code": 1, "msg": str(error)}
+        except Exception as error:
+            ExceptionUtils.exception_traceback(error)
+            return {"code": 1, "msg": "保存缓存有效期失败"}
 
     @staticmethod
     def __check_cache_storage(data=None):

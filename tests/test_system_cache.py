@@ -243,7 +243,7 @@ class SystemCacheApiTest(TestCase):
 
         with patch.object(system_cache, "clear_cache") as clear, \
                 patch.object(system_cache, "cache_info") as info:
-            for command in ("get_system_cache_info", "clear_system_cache"):
+            for command in ("get_system_cache_info", "clear_system_cache", "update_system_cache_ttl"):
                 response = App.test_client().post("/do", data={"cmd": command, "data": '{"name":"all"}'})
                 self.assertEqual(-1, response.json["code"])
         clear.assert_not_called()

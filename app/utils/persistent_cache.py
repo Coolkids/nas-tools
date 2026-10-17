@@ -8,6 +8,7 @@ from functools import wraps
 from threading import RLock
 
 from app.utils.cache_backend import CacheStore, STORE
+from app.utils.cache_policy import cache_ttl
 
 CacheInfo = namedtuple("CacheInfo", "hits misses maxsize currsize")
 StatsInfo = namedtuple("StatsInfo", "hit_count miss_count")
@@ -29,13 +30,21 @@ class PersistentCache:
 
     def __init__(self, name, store=None, maxsize=0, ttl=0, timer=time.time,
                  default=None, enable_stats=False):
-        self.name, self.maxsize, self.ttl = name, maxsize, ttl
+        self.name, self.maxsize, self._ttl = name, maxsize, ttl
         self.store = store if store is not None else STORE
         self.timer, self.default = timer, default
         self.stats = _Stats()
         self._lock = RLock()
         self._order = OrderedDict()
         self._revision = None
+
+    @property
+    def ttl(self):
+        return cache_ttl(self.name, self._ttl)
+
+    @ttl.setter
+    def ttl(self, value):
+        self._ttl = value
 
     def _sync(self):
         revision = self.store.revision
@@ -81,7 +90,7 @@ class PersistentCache:
     def set(self, key, value, ttl=None):
         with self._lock:
             self._sync()
-            effective_ttl = self.ttl if ttl is None else ttl
+            effective_ttl = cache_ttl(self.name, self._ttl if ttl is None else ttl)
             expires = time.time() + effective_ttl if effective_ttl else None
             if self.maxsize:
                 for old, expiration in list(self._order.items()):

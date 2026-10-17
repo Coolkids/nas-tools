@@ -5,6 +5,7 @@ from enum import Enum
 from threading import RLock
 
 from app.utils.cache_memory import cache_memory_info
+from app.utils.cache_policy import cache_ttl
 from app.utils.commons import singleton
 from app.utils.persistent_cache import PersistentCache
 from config import Config
@@ -24,24 +25,32 @@ class MetaHelper:
         laboratory = Config().get_config("laboratory") or {}
         self._tmdb_cache_expire = bool(laboratory.get("tmdb_cache_expire"))
 
+    def _ttl_seconds(self):
+        return cache_ttl("tmdb_metadata", EXPIRE_TIMESTAMP if self._tmdb_cache_expire else 0)
+
+    def _save_entry(self, key, value):
+        ttl = self._ttl_seconds()
+        value[CACHE_EXPIRE_TIMESTAMP_STR] = int(time.time()) + ttl if ttl else None
+        self._cache.set(key, value, ttl=ttl)
+
     def clear_meta_data(self):
         with lock:
             self._cache.clear()
 
     def cache_info(self, include_memory=False):
         with lock:
-            return cache_memory_info(self._cache) if include_memory else {"entries": len(self._cache)}
+            info = cache_memory_info(self._cache) if include_memory else {"entries": len(self._cache)}
+            return {**info, "ttl_seconds": self._ttl_seconds()}
 
     def get_meta_data_by_key(self, key):
         with lock:
             info = self._cache.get(key) or {}
             expires = info.get(CACHE_EXPIRE_TIMESTAMP_STR)
-            if expires and expires <= time.time() and self._tmdb_cache_expire:
+            if expires and expires <= time.time() and self._ttl_seconds():
                 self._cache.delete(key)
                 return {}
-            if info and (not expires or expires > time.time()):
-                info[CACHE_EXPIRE_TIMESTAMP_STR] = int(time.time()) + EXPIRE_TIMESTAMP
-                self._cache.set(key, info)
+            if info:
+                self._save_entry(key, info)
             return info
 
     def dump_meta_data(self, search, page, num):
@@ -79,8 +88,7 @@ class MetaHelper:
             value = self._cache.get(key)
             if value:
                 value["title"] = title
-                value[CACHE_EXPIRE_TIMESTAMP_STR] = int(time.time()) + EXPIRE_TIMESTAMP
-                self._cache.set(key, value)
+                self._save_entry(key, value)
             return value
 
     def update_meta_data(self, meta_data):
@@ -88,15 +96,15 @@ class MetaHelper:
             for key, value in (meta_data or {}).items():
                 if not self._cache.get(key):
                     value = dict(value)
-                    value[CACHE_EXPIRE_TIMESTAMP_STR] = int(time.time()) + EXPIRE_TIMESTAMP
-                    self._cache.set(key, value)
+                    self._save_entry(key, value)
 
     def save_meta_data(self, force=False):
         # 保留旧的定时任务和 WebAction 入口；CacheLib 写入时已经保存。
         with lock:
-            if self._tmdb_cache_expire:
+            if self._ttl_seconds():
                 for key, value in self._cache.copy().items():
-                    if value.get(CACHE_EXPIRE_TIMESTAMP_STR, float("inf")) <= time.time():
+                    expires = value.get(CACHE_EXPIRE_TIMESTAMP_STR)
+                    if expires is not None and expires <= time.time():
                         self._cache.delete(key)
 
     def get_cache_title(self, key):
@@ -108,4 +116,4 @@ class MetaHelper:
             value = self._cache.get(key)
             if value:
                 value["title"] = cn_title
-                self._cache.set(key, value)
+                self._save_entry(key, value)

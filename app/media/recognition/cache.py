@@ -8,6 +8,7 @@ from threading import RLock
 
 from app.utils.persistent_cache import PersistentCache, STORE
 from app.utils.cache_memory import cache_memory_info
+from app.utils.cache_policy import cache_ttl
 
 from app.media.recognition.records import current_recorder, recognition_config
 
@@ -136,7 +137,8 @@ class _ParseCache:
             if not effective["enabled"] or (generation is not None and
                                               generation != self._generation):
                 return False
-            expires = time.time() + effective["ttl_seconds"]
+            ttl = cache_ttl("recognition_parse", effective["ttl_seconds"])
+            expires = time.time() + ttl if ttl else None
             self._cache.set_with_expiration(
                 key, self._make_payload(copy.deepcopy(value)), expires)
             return True
@@ -157,6 +159,7 @@ class _ParseCache:
                   "bytes": storage.get("bytes"),
                   "max_entries": None, "max_bytes": None,
                   "generation": generation, **effective}
+        result["ttl_seconds"] = cache_ttl("recognition_parse", effective["ttl_seconds"])
         if include_memory:
             result.update(storage)
         return result
@@ -240,12 +243,18 @@ def info(namespace="parse", include_memory=False):
     cache = _CACHES.get(namespace)
     if cache is None:
         return None
+    settings = _cache_settings()
+    try:
+        ttl = max(1, int(settings.get(f"{namespace}_ttl_seconds", _DEFAULTS[namespace]["ttl_seconds"])))
+    except (TypeError, ValueError):
+        ttl = _DEFAULTS[namespace]["ttl_seconds"]
+    ttl = cache_ttl(f"recognition_{namespace}", ttl)
     if include_memory:
         return {**cache_memory_info(cache), "max_entries": cache.maxsize or None,
-                "max_bytes": None}
+                "max_bytes": None, "ttl_seconds": ttl}
     cache.delete_expired()
     return {"entries": len(cache), "max_entries": cache.maxsize or None,
-            "max_bytes": None}
+            "max_bytes": None, "ttl_seconds": ttl}
 
 
 def config_version():
