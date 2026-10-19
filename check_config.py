@@ -246,6 +246,7 @@ def update_config():
                 'require_latin_word_boundary': True,
                 'preserve_title_numbers': True,
                 'check_sequel_prefix': True,
+                'preferred_genre_id': 16,
                 'min_cjk_chars_for_strong': 3,
                 'min_latin_chars_for_strong': 4,
                 'weak_technical_tokens': [
@@ -259,6 +260,7 @@ def update_config():
                 ],
                 'raw_title_first': True,
                 'allow_fuzzy_fallback': False,
+                # 多路候选名称相似度及额外模糊回退共用此阈值。
                 'fuzzy_min_score': 0.88,
             },
             'weights': {

@@ -1199,9 +1199,9 @@ class WebAction:
         if fuzzy_key in data:
             try:
                 if not 0 < float(data[fuzzy_key]) <= 1:
-                    return {"code": 1, "msg": "模糊回退分数必须介于 0 和 1 之间"}
+                    return {"code": 1, "msg": "标题相似度阈值必须介于 0 和 1 之间"}
             except (TypeError, ValueError):
-                return {"code": 1, "msg": "模糊回退分数无效"}
+                return {"code": 1, "msg": "标题相似度阈值无效"}
         timeout_key = "recognition.execution.total_timeout_seconds"
         if timeout_key in data:
             try:

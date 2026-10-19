@@ -1,5 +1,7 @@
 """根据已计算的标题证据，确定性地选择媒体实体。"""
 
+from math import isfinite
+
 
 TITLE_SIMILARITY_MIN_SCORE = 0.88
 TITLE_SIMILARITY_MIN_MARGIN = 0.05
@@ -93,6 +95,138 @@ def _entity_key(tmdb_info):
     if media_type is None or tmdb_id is None or str(tmdb_id).strip() == "":
         return None
     return str(media_type), str(tmdb_id)
+
+
+def select_provider_candidates(candidates, preferred_genre_id=16,
+                               minimum_score=TITLE_SIMILARITY_MIN_SCORE):
+    """先采用解析器的一致结果，再按类型、共有候选和完整标题相似度裁决。
+
+    每个解析器可以提供多个 ``((provider_id, parsed, tmdb_info), evidence)``。
+    查询结果唯一且相同本身就是充分证据，不再要求名称包含匹配。
+    """
+    try:
+        minimum_score = float(minimum_score)
+        if not isfinite(minimum_score) or not 0 < minimum_score <= 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        minimum_score = TITLE_SIMILARITY_MIN_SCORE
+    try:
+        preferred_genre_id = int(preferred_genre_id or 0)
+    except (TypeError, ValueError, OverflowError):
+        preferred_genre_id = 16
+
+    entities = {}
+    providers = {}
+    for candidate, evidence in candidates:
+        key = _entity_key(candidate[2])
+        if key is None:
+            continue
+        entities.setdefault(key, []).append((candidate, evidence))
+        providers.setdefault(candidate[0], set()).add(key)
+
+    def agreement(allowed):
+        values = [keys & allowed for keys in providers.values()]
+        if len(values) >= 2 and all(len(keys) == 1 for keys in values):
+            keys = set.union(*values)
+            if len(keys) == 1:
+                return next(iter(keys))
+        return None
+
+    def priority(values):
+        adult = False
+        genres = set()
+        for candidate, _ in values:
+            info = candidate[2]
+            adult = adult or str(info.get("adult", False)).lower() in ("true", "1")
+            raw_genres = info.get("genre_ids") or info.get("genres") or []
+            if not isinstance(raw_genres, (list, tuple, set)):
+                raw_genres = [raw_genres]
+            for genre in raw_genres:
+                value = genre.get("id") if callable(getattr(genre, "get", None)) else genre
+                genre_id = _optional_int(value)
+                if genre_id is not None:
+                    genres.add(genre_id)
+        return int(adult), int(preferred_genre_id > 0 and preferred_genre_id not in genres)
+
+    def similarity(values):
+        scores = []
+        for _, evidence in values:
+            try:
+                score = float(evidence.get("similarity_score", 0))
+                if isfinite(score) and 0 <= score <= 1:
+                    scores.append(score)
+            except (TypeError, ValueError):
+                pass
+        return max(scores, default=0.0)
+
+    allowed = set(entities)
+    winner = agreement(allowed)
+    method = "provider_agreement" if winner is not None else None
+    if winner is None and entities:
+        best_priority = min(priority(values) for values in entities.values())
+        allowed = {key for key, values in entities.items() if priority(values) == best_priority}
+        winner = agreement(allowed)
+        if winner is not None:
+            method = "priority_provider_agreement"
+
+    shared = {key for key in allowed if len({candidate[0] for candidate, _ in entities[key]}) > 1}
+    reason = None
+    if winner is None:
+        for phase, keys in (("shared_similarity", shared),
+                            ("distinct_similarity", allowed - shared)):
+            if not keys:
+                continue
+            method = phase
+            best_score = max(similarity(entities[key]) for key in keys)
+            if best_score < minimum_score:
+                continue
+            best = [key for key in keys if similarity(entities[key]) == best_score]
+            if len(best) == 1:
+                winner = best[0]
+            else:
+                reason = "ambiguous_tmdb"
+            break
+
+    reports = []
+    for key, values in sorted(entities.items()):
+        candidate, _ = _best_candidate(values)
+        title_scores = {}
+        for _, evidence in values:
+            for match in evidence.get("similarity_matches", []):
+                name = match.get("name")
+                if name and (name not in title_scores or
+                             match.get("score", 0) > title_scores[name].get("score", 0)):
+                    title_scores[name] = match
+        reports.append({
+            "id": candidate[2]["id"], "media_type": key[0],
+            "title": candidate[2].get("title") or candidate[2].get("name"),
+            "provider_ids": sorted({item[0] for item, _ in values}),
+            "adult": bool(priority(values)[0]),
+            "retained": key in allowed,
+            "comparison_group": "shared" if key in shared else
+                                "distinct" if key in allowed else "filtered",
+            "similarity_score": similarity(values),
+            "title_similarities": list(title_scores.values()),
+            "selected": key == winner,
+        })
+
+    selected = _best_candidate(entities[winner])[0] if winner is not None else None
+    agreement_count = len({item[0] for item, _ in entities[winner]}) if selected else 0
+    return {
+        "status": "success" if selected else "failed",
+        "reason": None if selected else reason or (
+            "insufficient_title_evidence" if entities else
+            "invalid_tmdb_entity" if candidates else "no_tmdb_match"),
+        "selected": selected,
+        "entities": {key: _best_candidate(entities[key])[0] for key in allowed},
+        "confidence": (1.0 if method in ("provider_agreement", "priority_provider_agreement")
+                       else similarity(entities[winner])) if selected else None,
+        "agreement_count": agreement_count,
+        "selection_method": method,
+        "minimum_score": minimum_score,
+        "preferred_genre_id": preferred_genre_id,
+        "candidate_similarities": reports,
+    }
 
 
 def select_title_evidence(candidates, agreement_bonus=0.0):

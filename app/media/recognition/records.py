@@ -550,6 +550,10 @@ class RecognitionRecorder:
             self.overall_result["tmdb_status"] = "not_requested"
         if self.context.get("shadow_result") is not None:
             self.overall_result["shadow_result"] = json_safe(self.context["shadow_result"])
+        metrics = self.context.get("decision_metrics") or {}
+        if "candidate_similarities" in metrics:
+            self.overall_result["candidate_similarities"] = json_safe(metrics["candidate_similarities"])
+            self.overall_result["selection_method"] = metrics.get("selection_method")
         self.action("decision", status=status, output=self.overall_result, reason=reason)
 
     def as_dict(self):

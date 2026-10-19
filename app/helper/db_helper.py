@@ -150,7 +150,7 @@ class DbHelper:
             return {"id": value.get("id"), "media_type": media_type,
                     "title": value.get("title") or value.get("name")}
 
-        return {
+        summary = {
             "overall_result": {
                 "status": overall.get("status"),
                 "reason": overall.get("reason"),
@@ -172,6 +172,14 @@ class DbHelper:
             "actions": [{key: item.get(key) for key in ("sequence", "action_type", "status")}
                         for item in (payload.get("actions") or [])],
         }
+        if "candidate_similarities" in overall:
+            summary["overall_result"]["selection_method"] = overall.get("selection_method")
+            summary["overall_result"]["candidate_similarities"] = [{
+                key: item.get(key) for key in (
+                    "id", "media_type", "title", "provider_ids", "similarity_score",
+                    "comparison_group", "retained", "selected")
+            } for item in overall["candidate_similarities"]]
+        return summary
 
     def _save_recognition_action_index(self, request_id, action_types):
         action_ids = {action_type: portable_key_digest((request_id, action_type))
