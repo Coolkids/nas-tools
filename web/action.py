@@ -30,6 +30,7 @@ from app.downloader import Downloader
 from app.downloader.client import Qbittorrent, Transmission
 from app.filetransfer import FileTransfer
 from app.filter import Filter
+from app.helper.db_helper import DEFAULT_HISTORY_LIMITS, history_record_limit
 from app.helper import DbHelper, ProgressHelper, ThreadHelper, \
     MetaHelper, WordsHelper
 from app.indexer import Indexer
@@ -1269,6 +1270,7 @@ class WebAction:
         for cleanup_path in cleanup_paths:
             numeric_fields[f"{cleanup_path}.interval_hours"] = int
             numeric_fields[f"{cleanup_path}.retention_value"] = int
+            numeric_fields[f"{cleanup_path}.max_records"] = history_record_limit
         boolean_fields = {
             "recognition.records.cleanup.enabled",
             "recognition.providers.anitopy_ml.enabled",
@@ -1323,7 +1325,7 @@ class WebAction:
         for cleanup_path in cleanup_paths:
             legacy_key = f"{cleanup_path}.retention_days" if cleanup_path == recognition_cleanup_path else None
             keys = [f"{cleanup_path}.interval_hours", f"{cleanup_path}.retention_value",
-                    f"{cleanup_path}.retention_unit", f"{cleanup_path}.enabled"]
+                    f"{cleanup_path}.retention_unit", f"{cleanup_path}.enabled", f"{cleanup_path}.max_records"]
             if legacy_key:
                 keys.append(legacy_key)
             if not any(key in data for key in keys):
@@ -1345,6 +1347,11 @@ class WebAction:
             max_retention = 36500 if retention_unit == "day" else 1200
             if not 1 <= retention_value <= max_retention:
                 return {"code": 1, "msg": "数据保存时间超出允许范围"}
+            try:
+                history_record_limit(cleanup.get("max_records", DEFAULT_HISTORY_LIMITS.get(
+                    cleanup_path.rsplit(".", 1)[-1], DEFAULT_HISTORY_LIMITS["recognition"])))
+            except (TypeError, ValueError):
+                return {"code": 1, "msg": "记录上限必须为大于 0 的整数"}
             if legacy_key and legacy_key in data:
                 try:
                     legacy_days = int(cleanup.get("retention_days") or 0)
@@ -1482,7 +1489,8 @@ class WebAction:
                     "recognition.records.cleanup.interval_hours",
                     "recognition.records.cleanup.retention_days",
                     "recognition.records.cleanup.retention_value",
-                    "recognition.records.cleanup.retention_unit")) or any(
+                    "recognition.records.cleanup.retention_unit",
+                    "recognition.records.cleanup.max_records")) or any(
                     key.startswith("history.cleanup.") for key in data):
                 restart_scheduler()
 

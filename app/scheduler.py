@@ -9,6 +9,7 @@ from app.db.media_db import MediaDb
 from app.doubansync import DoubanSync
 from app.downloader import Downloader
 from app.helper import DbHelper, MetaHelper
+from app.helper.db_helper import DEFAULT_HISTORY_LIMITS, history_record_limit
 from app.mediaserver import MediaServer
 from app.subscribe import Subscribe
 from app.sync import Sync
@@ -20,8 +21,8 @@ from config import PT_TRANSFER_INTERVAL, METAINFO_SAVE_INTERVAL, \
 from web.backend.wallpaper import get_login_wallpaper
 
 
-def _cleanup_options(config, default_retention=30, legacy_retention_key=None):
-    """读取并检查历史清理周期与保留时间。"""
+def _cleanup_options(config, default_retention=30, legacy_retention_key=None, default_max_records=200):
+    """读取并检查历史清理周期、保留时间与记录上限。"""
     config = config or {}
     try:
         interval_hours = int(config.get('interval_hours', 24))
@@ -29,13 +30,14 @@ def _cleanup_options(config, default_retention=30, legacy_retention_key=None):
         if retention_value is None and legacy_retention_key:
             retention_value = config.get(legacy_retention_key)
         retention_value = int(retention_value if retention_value is not None else default_retention)
+        max_records = history_record_limit(config.get('max_records', default_max_records))
     except (TypeError, ValueError):
         return None
     retention_unit = config.get('retention_unit', 'day')
     max_retention = 36500 if retention_unit == 'day' else 1200 if retention_unit == 'month' else 0
     if not 1 <= interval_hours <= 8760 or not 1 <= retention_value <= max_retention:
         return None
-    return interval_hours, retention_value, retention_unit
+    return interval_hours, retention_value, retention_unit, max_records
 
 
 def _retention_label(value, unit):
@@ -166,14 +168,14 @@ class Scheduler:
             cleanup_options = _cleanup_options(
                 record_cleanup, default_retention=30, legacy_retention_key='retention_days')
             if cleanup_options:
-                interval_hours, retention_value, retention_unit = cleanup_options
+                interval_hours, retention_value, retention_unit, max_records = cleanup_options
                 self.SCHEDULER.add_job(
                     self.cleanup_expired_recognition_records,
                     'interval', hours=interval_hours,
                     id='recognition_record_cleanup', replace_existing=True,
                     next_run_time=datetime.datetime.now())
-                log.info("媒体识别记录过期清理服务启动，每 %s 小时执行，保留 %s" % (
-                    interval_hours, _retention_label(retention_value, retention_unit)))
+                log.info("媒体识别记录过期清理服务启动，每 %s 小时执行，保留 %s，记录上限 %s 条" % (
+                    interval_hours, _retention_label(retention_value, retention_unit), max_records))
 
         history_config = (self._history or {}).get('cleanup') or {}
         history_jobs = (
@@ -188,17 +190,17 @@ class Scheduler:
             cleanup_config = history_config.get(config_key) or {}
             if not cleanup_config.get('enabled'):
                 continue
-            cleanup_options = _cleanup_options(cleanup_config)
+            cleanup_options = _cleanup_options(cleanup_config, default_max_records=DEFAULT_HISTORY_LIMITS[config_key])
             if not cleanup_options:
                 log.error("%s过期清理配置无效，任务未启动" % label)
                 continue
-            interval_hours, retention_value, retention_unit = cleanup_options
+            interval_hours, retention_value, retention_unit, max_records = cleanup_options
             self.SCHEDULER.add_job(
                 cleanup_func, 'interval', hours=interval_hours,
                 id=job_id, replace_existing=True,
                 next_run_time=datetime.datetime.now())
-            log.info("%s过期清理服务启动，每 %s 小时执行，保留 %s" % (
-                label, interval_hours, _retention_label(retention_value, retention_unit)))
+            log.info("%s过期清理服务启动，每 %s 小时执行，保留 %s，记录上限 %s 条" % (
+                label, interval_hours, _retention_label(retention_value, retention_unit), max_records))
 
         self.SCHEDULER.print_jobs()
 
@@ -218,7 +220,7 @@ class Scheduler:
 
     @staticmethod
     def cleanup_expired_recognition_records():
-        """按当前配置删除过期识别记录及其解析器明细。"""
+        """按当前保留期限和条数上限清理识别记录及其解析器明细。"""
         recognition = Config().get_config('recognition') or {}
         cleanup = ((recognition.get('records') or {}).get('cleanup') or {})
         options = _cleanup_options(cleanup, default_retention=30,
@@ -226,23 +228,23 @@ class Scheduler:
         if not options:
             log.error("媒体识别记录过期清理配置无效")
             return 0
-        _, retention_value, retention_unit = options
+        _, retention_value, retention_unit, max_records = options
         deleted_count = DbHelper().delete_expired_recognition_records(
-            retention_unit=retention_unit, retention_value=retention_value)
-        log.info("媒体识别记录过期清理完成，保留 %s，共删除 %s 条记录" % (
-            _retention_label(retention_value, retention_unit), deleted_count))
+            retention_unit=retention_unit, retention_value=retention_value, max_records=max_records)
+        if deleted_count is False:
+            raise RuntimeError("媒体识别记录清理失败，请查看数据库错误日志")
         return deleted_count
 
     @staticmethod
     def _cleanup_expired_history(config_key, delete_method, label):
         history = Config().get_config('history') or {}
         cleanup = ((history.get('cleanup') or {}).get(config_key) or {})
-        options = _cleanup_options(cleanup)
+        options = _cleanup_options(cleanup, default_max_records=DEFAULT_HISTORY_LIMITS[config_key])
         if not options:
             log.error("%s过期清理配置无效" % label)
             return 0
-        _, retention_value, retention_unit = options
-        deleted_count = delete_method(retention_value, retention_unit=retention_unit)
+        _, retention_value, retention_unit, max_records = options
+        deleted_count = delete_method(retention_value, retention_unit=retention_unit, max_records=max_records)
         if deleted_count is False:
             raise RuntimeError("%s过期清理失败，请查看数据库错误日志" % label)
         return deleted_count

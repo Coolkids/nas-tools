@@ -192,6 +192,45 @@ class RecognitionConfigTest(TestCase):
         self.assertIn("6 小时", response["msg"])
         save.assert_not_called()
 
+    def test_service_record_limits_are_saved_and_restart_scheduler(self):
+        paths = ["recognition.records.cleanup"] + [f"history.cleanup.{key}" for key in (
+            "transfer_history", "subscription_history", "download_history")]
+        for path in paths:
+            with self.subTest(path=path):
+                live_config = config_snapshot()
+                saved = {}
+                config = SimpleNamespace(get_config=lambda: live_config,
+                                         save_config=lambda value: saved.update(value))
+                with patch("web.action.Config", return_value=config), \
+                        patch("web.action.restart_scheduler") as restart:
+                    response = object.__new__(WebAction)._WebAction__update_config({
+                        f"{path}.max_records": "321",
+                    })
+                self.assertEqual(0, response["code"])
+                cleanup = saved
+                for key in path.split("."):
+                    cleanup = cleanup[key]
+                self.assertEqual(321, cleanup["max_records"])
+                self.assertEqual(config_snapshot(), live_config)
+                restart.assert_called_once_with()
+
+    def test_service_record_limits_reject_invalid_values_without_saving(self):
+        paths = ["recognition.records.cleanup"] + [f"history.cleanup.{key}" for key in (
+            "transfer_history", "subscription_history", "download_history")]
+        for path in paths:
+            for value in (0, -1, 1.5, "2.5", "", None, True):
+                with self.subTest(path=path, value=value):
+                    save = Mock()
+                    config = SimpleNamespace(get_config=config_snapshot, save_config=save)
+                    with patch("web.action.Config", return_value=config), \
+                            patch("web.action.restart_scheduler") as restart:
+                        response = object.__new__(WebAction)._WebAction__update_config({
+                            f"{path}.max_records": value,
+                        })
+                    self.assertEqual(1, response["code"])
+                    save.assert_not_called()
+                    restart.assert_not_called()
+
     def test_zero_total_weights_are_rejected_without_saving(self):
         live_config = config_snapshot()
         save = Mock()

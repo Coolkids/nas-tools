@@ -15,7 +15,8 @@ import app.db.scheduler as database_scheduler_module
 import app.scheduler as scheduler_module
 from app.db.backends.sqlite import SQLiteBackend
 from app.db.manager import DatabaseManager
-from app.db.models import Base, DOWNLOADHISTORY, RSSHISTORY, TRANSFERHISTORY
+from app.db.models import (AIRECOGNITIONRECORD, Base, DOWNLOADHISTORY, RECOGNITIONATTEMPT,
+                           RECOGNITIONREQUEST, RECOGNITIONREQUESTACTION, RSSHISTORY, TRANSFERHISTORY)
 from app.db.scheduler import DatabaseSessionBackgroundScheduler
 from app.helper.db_helper import DbHelper
 
@@ -30,24 +31,29 @@ CASES = [
 ]
 
 
-def configure_history(monkeypatch, value=2, unit="month"):
+def configure_history(monkeypatch, value=2, unit="month", max_records=None):
     history = {"cleanup": {key: {
         "enabled": True, "interval_hours": 1,
         "retention_value": value, "retention_unit": unit,
     } for _, _, key, _, _ in CASES}}
+    if max_records is not None:
+        for cleanup in history["cleanup"].values():
+            cleanup["max_records"] = max_records
     configured = SimpleNamespace(get_config=lambda node: history if node == "history" else {})
     monkeypatch.setattr(scheduler_module, "Config", lambda: configured)
 
 
 @pytest.mark.parametrize("model,date_field,key,delete_method,callback", CASES)
+@pytest.mark.parametrize("max_records", [None, 7])
 def test_public_cleanup_entrypoint_uses_singleton_instance_and_current_settings(
-        monkeypatch, model, date_field, key, delete_method, callback):
-    configure_history(monkeypatch)
+        monkeypatch, model, date_field, key, delete_method, callback, max_records):
+    configure_history(monkeypatch, max_records=max_records)
     delete = Mock(return_value=3)
     monkeypatch.setattr(scheduler_module, "DbHelper", lambda: SimpleNamespace(**{delete_method: delete}))
 
     assert getattr(scheduler_module.Scheduler(), callback)() == 3
-    delete.assert_called_once_with(2, retention_unit="month")
+    expected_limit = max_records if max_records is not None else (200 if key == "transfer_history" else 100)
+    delete.assert_called_once_with(2, retention_unit="month", max_records=expected_limit)
 
 
 @pytest.fixture
@@ -57,7 +63,9 @@ def history_database(tmp_path, monkeypatch):
     monkeypatch.setattr(manager, "_read_settings", lambda: {"type": "sqlite"})
     monkeypatch.setattr(main_db_module, "DATABASE", manager)
     monkeypatch.setattr(database_scheduler_module, "DATABASE", manager)
-    Base.metadata.create_all(manager.engine, tables=[case[0].__table__ for case in CASES])
+    tables = [case[0].__table__ for case in CASES] + [model.__table__ for model in (
+        AIRECOGNITIONRECORD, RECOGNITIONREQUEST, RECOGNITIONATTEMPT, RECOGNITIONREQUESTACTION)]
+    Base.metadata.create_all(manager.engine, tables=tables)
     try:
         yield manager
     finally:
@@ -92,11 +100,11 @@ def test_history_tables_have_dates_and_expired_rows_are_committed_in_batches(
         value, retention_unit=unit, now=datetime.datetime(2026, 3, 31, 12), batch_size=2) == 3
     assert any("本批次删除 2 条，累计删除 2 条" in message for message in messages)
     assert any("本批次删除 1 条，累计删除 3 条" in message for message in messages)
-    assert messages[-1].endswith("共删除 3 条过期记录")
+    assert "共删除 3 条记录（过期 3 条，超出上限 0 条）" in messages[-1]
 
     assert getattr(DbHelper(), delete_method)(
         value, retention_unit=unit, now=datetime.datetime(2026, 3, 31, 12), batch_size=2) == 0
-    assert messages[-1].endswith("共删除 0 条过期记录")
+    assert "共删除 0 条记录（过期 0 条，超出上限 0 条）" in messages[-1]
 
     manager.close_session()
     assert [row.ID for row in manager.session.query(model).order_by(model.ID)] == [4, 5, 6]
@@ -147,3 +155,111 @@ def test_database_failure_is_not_reported_as_completed_cleanup(monkeypatch):
         delete_expired_transfer_history=Mock(return_value=False)))
     with pytest.raises(RuntimeError, match="转移历史.*清理失败"):
         scheduler_module.Scheduler().cleanup_expired_transfer_history()
+
+
+@pytest.mark.parametrize("model,date_field,key,delete_method,callback", CASES)
+def test_cleanup_limit_keeps_newest_dates_and_deletes_null_dates_when_over_limit(
+        history_database, monkeypatch, model, date_field, key, delete_method, callback):
+    manager = history_database
+    dates = ["2026-03-30 00:00:00", "2026-03-28 00:00:00", "2026-03-29 00:00:00",
+             "2026-03-30 00:00:00", None, "2000-01-01 00:00:00", None]
+    manager.session.add_all([model(ID=index, **{date_field: date})
+                             for index, date in enumerate(dates, start=1)])
+    manager.session.commit()
+    messages = []
+    monkeypatch.setattr("app.helper.db_helper.log.info", messages.append)
+    cleanup = getattr(DbHelper(), delete_method)
+
+    assert cleanup(30, now=datetime.datetime(2026, 3, 31), batch_size=1, max_records=2) == 5
+    manager.close_session()
+    assert [row.ID for row in manager.session.query(model).order_by(model.ID)] == [1, 4]
+    assert "共删除 5 条记录（过期 1 条，超出上限 4 条）" in messages[-1]
+    assert cleanup(30, now=datetime.datetime(2026, 3, 31), batch_size=1, max_records=2) == 0
+
+
+@pytest.mark.parametrize("model,date_field,key,delete_method,callback", CASES)
+def test_cleanup_default_limits(history_database, model, date_field, key, delete_method, callback):
+    manager = history_database
+    expected_limit = 200 if key == "transfer_history" else 100
+    manager.session.add_all([model(ID=index, **{date_field: "2099-01-01 00:00:00"})
+                             for index in range(1, expected_limit + 4)])
+    manager.session.commit()
+
+    assert getattr(DbHelper(), delete_method)(30, batch_size=2) == 3
+    manager.close_session()
+    assert [row.ID for row in manager.session.query(model).order_by(model.ID)] == list(
+        range(4, expected_limit + 4))
+
+
+@pytest.mark.parametrize("max_records,expected_requests,expected_legacy,total_deleted", [
+    (4, {"running", "business-running", "new"}, {2}, 4),
+    (1, {"running", "business-running"}, set(), 6),
+])
+def test_recognition_limit_is_shared_with_legacy_and_protects_running_requests(
+        history_database, monkeypatch, max_records, expected_requests, expected_legacy, total_deleted):
+    manager = history_database
+    request_data = [
+        ("expired", "2000-01-01 00:00:00", "success", None),
+        ("running", "2000-01-01 00:00:00", "running", None),
+        ("business-running", "2000-01-01 00:00:00", "success", "running"),
+        ("null-date", None, None, None),
+        ("mid", "2026-03-28 00:00:00", "failed", None),
+        ("new", "2026-03-30 00:00:00", "success", None),
+    ]
+    for request_id, created, status, business_status in request_data:
+        manager.session.add(RECOGNITIONREQUEST(REQUEST_ID=request_id, CREATED_AT=created,
+                                               STATUS_SUMMARY=status, BUSINESS_STATUS_SUMMARY=business_status))
+        manager.session.add(RECOGNITIONATTEMPT(REQUEST_ID=request_id, ATTEMPT_ID=request_id))
+        manager.session.add(RECOGNITIONREQUESTACTION(
+            ID=request_id, REQUEST_ID=request_id, ACTION_TYPE="recognize", ACTION_HASH="test-hash"))
+    manager.session.add_all([
+        AIRECOGNITIONRECORD(ID=1, ADD_TIME="2000-01-01 00:00:00"),
+        AIRECOGNITIONRECORD(ID=2, ADD_TIME="2026-03-29 00:00:00"),
+    ])
+    manager.session.commit()
+    messages = []
+    monkeypatch.setattr("app.helper.db_helper.log.info", messages.append)
+
+    assert DbHelper().delete_expired_recognition_records(
+        30, now=datetime.datetime(2026, 3, 31), batch_size=1, max_records=max_records) == total_deleted
+    manager.close_session()
+    assert {row.REQUEST_ID for row in manager.session.query(RECOGNITIONREQUEST)} == expected_requests
+    assert {row.REQUEST_ID for row in manager.session.query(RECOGNITIONATTEMPT)} == expected_requests
+    assert {row.REQUEST_ID for row in manager.session.query(RECOGNITIONREQUESTACTION)} == expected_requests
+    assert {row.ID for row in manager.session.query(AIRECOGNITIONRECORD)} == expected_legacy
+    assert f"过期 2 条，超出上限 {total_deleted - 2} 条" in messages[-1]
+    if max_records == 1:
+        assert any("运行中的请求暂不清理" in message for message in messages)
+
+
+def test_recognition_default_limit_counts_new_and_legacy_records_together(history_database):
+    manager = history_database
+    manager.session.add_all([RECOGNITIONREQUEST(
+        REQUEST_ID=f"request-{index:03d}", CREATED_AT="2099-01-01 00:00:00")
+        for index in range(201)])
+    manager.session.add(AIRECOGNITIONRECORD(ID=1, ADD_TIME="2099-02-01 00:00:00"))
+    manager.session.commit()
+
+    assert DbHelper().delete_expired_recognition_records(30, batch_size=1) == 2
+    manager.close_session()
+    assert manager.session.query(RECOGNITIONREQUEST).count() == 199
+    assert manager.session.query(AIRECOGNITIONRECORD).count() == 1
+    assert manager.session.query(RECOGNITIONREQUEST).filter(
+        RECOGNITIONREQUEST.REQUEST_ID.in_(["request-000", "request-001"])).count() == 0
+
+
+@pytest.mark.parametrize("max_records", [None, 7])
+def test_recognition_callback_passes_current_limit(monkeypatch, max_records):
+    cleanup = {"retention_days": 45}
+    if max_records is not None:
+        cleanup["max_records"] = max_records
+    config = SimpleNamespace(get_config=lambda node: {"records": {"cleanup": cleanup}}
+                             if node == "recognition" else {})
+    monkeypatch.setattr(scheduler_module, "Config", lambda: config)
+    delete = Mock(return_value=3)
+    monkeypatch.setattr(scheduler_module, "DbHelper", lambda: SimpleNamespace(
+        delete_expired_recognition_records=delete))
+
+    assert scheduler_module.Scheduler().cleanup_expired_recognition_records() == 3
+    delete.assert_called_once_with(retention_unit="day", retention_value=45,
+                                   max_records=max_records if max_records is not None else 200)

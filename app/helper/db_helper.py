@@ -16,6 +16,21 @@ from app.utils import StringUtils
 from app.utils.types import MediaType, RmtMode
 
 
+DEFAULT_HISTORY_LIMITS = {
+    "transfer_history": 200,
+    "subscription_history": 100,
+    "download_history": 100,
+    "recognition": 200,
+}
+
+
+def history_record_limit(value):
+    """记录上限必须为正整数，不能将小数或布尔值静默转换为条数。"""
+    if not str(value).strip().isdigit() or int(value) < 1:
+        raise ValueError("记录上限必须为大于 0 的整数")
+    return int(value)
+
+
 class DbHelper:
     _db = MainDb()
 
@@ -59,14 +74,15 @@ class DbHelper:
         return cutoff.strftime("%Y-%m-%d %H:%M:%S.%f")
 
     def _delete_expired_history(self, model, date_column, retention_value, retention_unit,
-                                now=None, batch_size=500):
-        """分批删除超过保留期限的历史，降低清理期间的数据库锁占用。"""
+                                now=None, batch_size=500, max_records=200):
+        """按保留期限和条数分批清理历史，优先保留时间最新的记录。"""
         older_than = self._history_retention_cutoff(retention_value, retention_unit, now=now)
+        max_records = history_record_limit(max_records)
         batch_size = min(max(int(batch_size or 500), 1), 2000)
         label = {"TRANSFER_HISTORY": "转移历史", "RSS_HISTORY": "订阅历史",
                  "DOWNLOAD_HISTORY": "最近下载"}.get(model.__tablename__, model.__tablename__)
-        log.info("【历史清理】开始清理%s，保留 %s %s，清理 %s 之前的记录" % (
-            label, retention_value, "天" if retention_unit == "day" else "个月", older_than))
+        log.info("【历史清理】开始清理%s，保留 %s %s，最多保留 %s 条，清理 %s 之前的记录" % (
+            label, retention_value, "天" if retention_unit == "day" else "个月", max_records, older_than))
         deleted_count = 0
         last_id = 0
         while True:
@@ -82,8 +98,23 @@ class DbHelper:
             deleted_count += batch_deleted
             log.info("【历史清理】%s本批次删除 %s 条，累计删除 %s 条过期记录" % (
                 label, batch_deleted, deleted_count))
-        log.info("【历史清理】%s清理完成，共删除 %s 条过期记录" % (label, deleted_count))
-        return deleted_count
+        overflow_count = 0
+        while True:
+            # NULL 日期排在最后，日期相同时用主键稳定排序。
+            record_ids = [row[0] for row in self._db.query(model.ID).order_by(
+                case((date_column.is_(None), 1), else_=0), date_column.desc(), model.ID.desc()
+            ).offset(max_records).limit(batch_size).all()]
+            if not record_ids:
+                break
+            batch_deleted = self._db.query(model).filter(
+                model.ID.in_(record_ids)).delete(synchronize_session=False)
+            self._db.commit()
+            overflow_count += batch_deleted
+            log.info("【历史清理】%s本批次删除 %s 条超出上限记录，累计删除 %s 条超出上限记录" % (
+                label, batch_deleted, overflow_count))
+        log.info("【历史清理】%s清理完成，共删除 %s 条记录（过期 %s 条，超出上限 %s 条），记录上限 %s 条" % (
+            label, deleted_count + overflow_count, deleted_count, overflow_count, max_records))
+        return deleted_count + overflow_count
 
     @staticmethod
     def _search_task_query(keyword):
@@ -535,60 +566,69 @@ class DbHelper:
 
     @DbPersist(_db)
     def delete_expired_transfer_history(self, retention_value, retention_unit="day",
-                                        now=None, batch_size=500):
-        """删除超出保留期限的文件转移历史。"""
+                                        now=None, batch_size=500, max_records=200):
+        """清理过期或超出条数上限的文件转移历史。"""
         return self._delete_expired_history(
             TRANSFERHISTORY, TRANSFERHISTORY.DATE, retention_value,
-            retention_unit, now=now, batch_size=batch_size)
+            retention_unit, now=now, batch_size=batch_size, max_records=max_records)
 
     @DbPersist(_db)
     def delete_expired_subscription_history(self, retention_value, retention_unit="day",
-                                            now=None, batch_size=500):
-        """删除超出保留期限的订阅历史。"""
+                                            now=None, batch_size=500, max_records=100):
+        """清理过期或超出条数上限的订阅历史。"""
         return self._delete_expired_history(
             RSSHISTORY, RSSHISTORY.FINISH_TIME, retention_value,
-            retention_unit, now=now, batch_size=batch_size)
+            retention_unit, now=now, batch_size=batch_size, max_records=max_records)
 
     @DbPersist(_db)
     def delete_expired_download_history(self, retention_value, retention_unit="day",
-                                        now=None, batch_size=500):
-        """删除超出保留期限的最近下载记录。"""
+                                        now=None, batch_size=500, max_records=100):
+        """清理过期或超出条数上限的最近下载记录。"""
         return self._delete_expired_history(
             DOWNLOADHISTORY, DOWNLOADHISTORY.DATE, retention_value,
-            retention_unit, now=now, batch_size=batch_size)
+            retention_unit, now=now, batch_size=batch_size, max_records=max_records)
+
+    def _delete_recognition_requests(self, request_ids):
+        """删除请求时同步删除解析明细和动作索引。"""
+        self._db.query(RECOGNITIONATTEMPT).filter(
+            RECOGNITIONATTEMPT.REQUEST_ID.in_(request_ids)).delete(synchronize_session=False)
+        self._db.query(RECOGNITIONREQUESTACTION).filter(
+            RECOGNITIONREQUESTACTION.REQUEST_ID.in_(request_ids)).delete(synchronize_session=False)
+        return self._db.query(RECOGNITIONREQUEST).filter(
+            RECOGNITIONREQUEST.REQUEST_ID.in_(request_ids)).delete(synchronize_session=False)
 
     @DbPersist(_db)
     def delete_expired_recognition_records(self, retention_days=None, now=None, batch_size=500,
-                                           retention_unit="day", retention_value=None):
-        """删除过期的识别核对记录和识别请求及其明细，跳过仍在运行的请求。"""
+                                           retention_unit="day", retention_value=None, max_records=200):
+        """按时间和总条数清理新旧识别记录，保护运行中的请求及其明细。"""
         batch_size = min(max(int(batch_size or 500), 1), 2000)
+        max_records = history_record_limit(max_records)
         older_than = self._history_retention_cutoff(
             retention_value if retention_value is not None else retention_days,
             retention_unit, now=now)
+        completed = and_(
+            or_(RECOGNITIONREQUEST.STATUS_SUMMARY.is_(None),
+                RECOGNITIONREQUEST.STATUS_SUMMARY != "running"),
+            or_(RECOGNITIONREQUEST.BUSINESS_STATUS_SUMMARY.is_(None),
+                RECOGNITIONREQUEST.BUSINESS_STATUS_SUMMARY != "running"))
+        log.info("【历史清理】开始清理媒体识别记录，清理 %s 之前的记录，最多保留 %s 条" % (
+            older_than, max_records))
         deleted_count = 0
         while True:
             request_ids = [row[0] for row in self._db.query(
                 RECOGNITIONREQUEST.REQUEST_ID).filter(
                     RECOGNITIONREQUEST.CREATED_AT < older_than,
-                    or_(RECOGNITIONREQUEST.STATUS_SUMMARY.is_(None),
-                        RECOGNITIONREQUEST.STATUS_SUMMARY != "running"),
-                    or_(RECOGNITIONREQUEST.BUSINESS_STATUS_SUMMARY.is_(None),
-                        RECOGNITIONREQUEST.BUSINESS_STATUS_SUMMARY != "running")
+                    completed
                 ).order_by(RECOGNITIONREQUEST.CREATED_AT.asc(),
                            RECOGNITIONREQUEST.REQUEST_ID.asc()).limit(batch_size).all()]
             if not request_ids:
                 break
-            self._db.query(RECOGNITIONATTEMPT).filter(
-                RECOGNITIONATTEMPT.REQUEST_ID.in_(request_ids)).delete(
-                    synchronize_session=False)
-            self._db.query(RECOGNITIONREQUESTACTION).filter(
-                RECOGNITIONREQUESTACTION.REQUEST_ID.in_(request_ids)).delete(
-                    synchronize_session=False)
-            deleted_count += self._db.query(RECOGNITIONREQUEST).filter(
-                RECOGNITIONREQUEST.REQUEST_ID.in_(request_ids)).delete(
-                synchronize_session=False)
+            batch_deleted = self._delete_recognition_requests(request_ids)
+            deleted_count += batch_deleted
             # 每个批次独立提交，让其他 SQLite 写入在批次边界获得机会。
             self._db.commit()
+            log.info("【历史清理】媒体识别记录本批次删除 %s 条，累计删除 %s 条过期记录" % (
+                batch_deleted, deleted_count))
 
         # 兼容页面仍展示的旧 AI 识别核对记录。其 ADD_TIME 使用本地
         # YYYY-MM-DD HH:MM:SS 格式，与上面的截止值保持可排序比较。
@@ -600,11 +640,50 @@ class DbHelper:
                            AIRECOGNITIONRECORD.ID.asc()).limit(batch_size).all()]
             if not record_ids:
                 break
-            deleted_count += self._db.query(AIRECOGNITIONRECORD).filter(
+            batch_deleted = self._db.query(AIRECOGNITIONRECORD).filter(
                 AIRECOGNITIONRECORD.ID.in_(record_ids)).delete(
                     synchronize_session=False)
+            deleted_count += batch_deleted
             self._db.commit()
-        return deleted_count
+            log.info("【历史清理】媒体识别记录本批次删除 %s 条，累计删除 %s 条过期记录" % (
+                batch_deleted, deleted_count))
+
+        # 两种识别记录共享同一个上限，只读取分批主键和时间，不加载识别结果正文。
+        excess = (self._db.query(RECOGNITIONREQUEST).count()
+                  + self._db.query(AIRECOGNITIONRECORD).count() - max_records)
+        overflow_count = 0
+        while excess > 0:
+            limit = min(excess, batch_size)
+            requests = self._db.query(RECOGNITIONREQUEST.REQUEST_ID, RECOGNITIONREQUEST.CREATED_AT).filter(
+                completed).order_by(
+                    case((RECOGNITIONREQUEST.CREATED_AT.is_(None), 0), else_=1),
+                    RECOGNITIONREQUEST.CREATED_AT.asc(), RECOGNITIONREQUEST.REQUEST_ID.asc()
+                ).limit(limit).all()
+            legacy = self._db.query(AIRECOGNITIONRECORD.ID, AIRECOGNITIONRECORD.ADD_TIME).order_by(
+                case((AIRECOGNITIONRECORD.ADD_TIME.is_(None), 0), else_=1),
+                AIRECOGNITIONRECORD.ADD_TIME.asc(), AIRECOGNITIONRECORD.ID.asc()).limit(limit).all()
+            candidates = [(date or "", "request", record_id) for record_id, date in requests]
+            candidates.extend((date or "", "legacy", record_id) for record_id, date in legacy)
+            candidates.sort()
+            candidates = candidates[:limit]
+            if not candidates:
+                # 运行中的请求可能暂时让总数超过上限，下次清理再处理。
+                log.info("【历史清理】媒体识别记录仍超出上限 %s 条，运行中的请求暂不清理" % excess)
+                break
+            request_ids = [record_id for _, kind, record_id in candidates if kind == "request"]
+            legacy_ids = [record_id for _, kind, record_id in candidates if kind == "legacy"]
+            batch_deleted = self._delete_recognition_requests(request_ids) if request_ids else 0
+            if legacy_ids:
+                batch_deleted += self._db.query(AIRECOGNITIONRECORD).filter(
+                    AIRECOGNITIONRECORD.ID.in_(legacy_ids)).delete(synchronize_session=False)
+            self._db.commit()
+            overflow_count += batch_deleted
+            excess -= batch_deleted
+            log.info("【历史清理】媒体识别记录本批次删除 %s 条超出上限记录，累计删除 %s 条超出上限记录" % (
+                batch_deleted, overflow_count))
+        log.info("【历史清理】媒体识别记录清理完成，共删除 %s 条记录（过期 %s 条，超出上限 %s 条），记录上限 %s 条" % (
+            deleted_count + overflow_count, deleted_count, overflow_count, max_records))
+        return deleted_count + overflow_count
 
     def archive_recognition_records(self, older_than, archive_path, delete_archived=False,
                                     batch_size=250):
