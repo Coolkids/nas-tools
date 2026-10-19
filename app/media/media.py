@@ -1574,46 +1574,45 @@ class Media:
         if weak_matches:
             return {"level": "weak", "matched_names": [], "weak_matches": weak_matches,
                     "names": names, "input": original_title, **similarity}
-        # 完整标题近似命中允许少量字词差异；滑动窗口模糊匹配仍由配置控制。
+        # 完整标题近似命中允许少量字词差异；未达到完整标题阈值时，
+        # 始终执行滑动窗口模糊回退，由 fuzzy_min_score 控制最低分数。
         if select_title_similarity([similarity]) is not None:
             return {"level": "fuzzy", "matched_names": [], "weak_matches": [],
                     "fuzzy_matches": [{**item, "level": "fuzzy"} for item in similarity_matches
                                       if item["score"] >= TITLE_SIMILARITY_MIN_SCORE],
                     "fuzzy_score": similarity["similarity_score"],
                     "names": names, "input": original_title, **similarity}
-        fuzzy_cfg = title_cfg.get("allow_fuzzy_fallback", False)
-        if fuzzy_cfg:
-            try:
-                fuzzy_threshold = float(title_cfg.get("fuzzy_min_score", 0.88))
-            except (TypeError, ValueError):
-                fuzzy_threshold = 0.88
-            title_tokens = normalized_title.split()
-            fuzzy_matches = []
-            for name in names:
-                normalized_name = normalize(name)
-                name_tokens = normalized_name.split()
-                compact_name = re.sub(r"\W", "", normalized_name, flags=re.UNICODE).casefold()
-                char_count = len(compact_name)
-                if compact_name in technical_title_tokens or compact_name in normalized_release_groups \
-                        or compact_name.isdigit():
-                    continue
-                if not name_tokens or char_count < (min_cjk if re.search(r"[\u3400-\u9fff]", normalized_name)
-                                                    else min_latin):
-                    continue
-                best = 0.0
-                width = len(name_tokens)
-                for size in range(max(1, width - 1), width + 2):
-                    for start in range(max(1, len(title_tokens) - size + 1)):
-                        candidate = " ".join(title_tokens[start:start + size])
-                        best = max(best, SequenceMatcher(None, normalized_name, candidate).ratio())
-                if best >= fuzzy_threshold:
-                    fuzzy_matches.append({"name": name, "normalized_name": normalized_name,
-                                          "score": round(best, 4), "level": "fuzzy"})
-            if fuzzy_matches:
-                best_match = max(fuzzy_matches, key=lambda item: item["score"])
-                return {"level": "fuzzy", "matched_names": [], "weak_matches": [],
-                        "fuzzy_matches": fuzzy_matches, "fuzzy_score": best_match["score"],
-                        "names": names, "input": original_title, **similarity}
+        try:
+            fuzzy_threshold = float(title_cfg.get("fuzzy_min_score", 0.88))
+        except (TypeError, ValueError):
+            fuzzy_threshold = 0.88
+        title_tokens = normalized_title.split()
+        fuzzy_matches = []
+        for name in names:
+            normalized_name = normalize(name)
+            name_tokens = normalized_name.split()
+            compact_name = re.sub(r"\W", "", normalized_name, flags=re.UNICODE).casefold()
+            char_count = len(compact_name)
+            if compact_name in technical_title_tokens or compact_name in normalized_release_groups \
+                    or compact_name.isdigit():
+                continue
+            if not name_tokens or char_count < (min_cjk if re.search(r"[\u3400-\u9fff]", normalized_name)
+                                                else min_latin):
+                continue
+            best = 0.0
+            width = len(name_tokens)
+            for size in range(max(1, width - 1), width + 2):
+                for start in range(max(1, len(title_tokens) - size + 1)):
+                    candidate = " ".join(title_tokens[start:start + size])
+                    best = max(best, SequenceMatcher(None, normalized_name, candidate).ratio())
+            if best >= fuzzy_threshold:
+                fuzzy_matches.append({"name": name, "normalized_name": normalized_name,
+                                      "score": round(best, 4), "level": "fuzzy"})
+        if fuzzy_matches:
+            best_match = max(fuzzy_matches, key=lambda item: item["score"])
+            return {"level": "fuzzy", "matched_names": [], "weak_matches": [],
+                    "fuzzy_matches": fuzzy_matches, "fuzzy_score": best_match["score"],
+                    "names": names, "input": original_title, **similarity}
         return {"level": "none", "matched_names": [], "weak_matches": [],
                 "names": names, "input": original_title, **similarity}
 

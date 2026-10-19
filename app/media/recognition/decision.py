@@ -97,12 +97,26 @@ def _entity_key(tmdb_info):
     return str(media_type), str(tmdb_id)
 
 
+def _evidence_similarity_score(evidence):
+    """返回标题证据的有效分数，兼容完整标题和模糊回退分数。"""
+    scores = []
+    for field in ("similarity_score", "fuzzy_score"):
+        try:
+            score = float(evidence.get(field))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if isfinite(score) and 0 <= score <= 1:
+            scores.append(score)
+    return max(scores) if scores else None
+
+
 def select_provider_candidates(candidates, preferred_genre_id=16,
                                minimum_score=TITLE_SIMILARITY_MIN_SCORE):
-    """先采用解析器的一致结果，再按类型、共有候选和完整标题相似度裁决。
+    """先采用解析器的一致结果，再按类型、共有候选和有效标题相似度裁决。
 
     每个解析器可以提供多个 ``((provider_id, parsed, tmdb_info), evidence)``。
     查询结果唯一且相同本身就是充分证据，不再要求名称包含匹配。
+    ``minimum_score`` 是完整标题和模糊回退共同使用的最低分数；回退始终启用。
     """
     try:
         minimum_score = float(minimum_score)
@@ -151,12 +165,9 @@ def select_provider_candidates(candidates, preferred_genre_id=16,
     def similarity(values):
         scores = []
         for _, evidence in values:
-            try:
-                score = float(evidence.get("similarity_score", 0))
-                if isfinite(score) and 0 <= score <= 1:
-                    scores.append(score)
-            except (TypeError, ValueError):
-                pass
+            score = _evidence_similarity_score(evidence)
+            if score is not None:
+                scores.append(score)
         return max(scores, default=0.0)
 
     allowed = set(entities)
@@ -255,12 +266,10 @@ def select_title_evidence(candidates, agreement_bonus=0.0):
     entity_keys = list(combined)
     similarity_evidence = []
     for values in combined.values():
-        try:
-            scores = [float(item["similarity_score"]) for _, item in values]
-            similarity_evidence.append({"similarity_score": max(scores)}
-                                       if all(0 <= score <= 1 for score in scores) else {})
-        except (KeyError, TypeError, ValueError):
-            similarity_evidence.append({})
+        scores = [_evidence_similarity_score(item) for _, item in values]
+        similarity_evidence.append({"similarity_score": max(scores)}
+                                   if scores and all(score is not None for score in scores)
+                                   else {})
     winner = select_title_similarity(similarity_evidence) if len(combined) > 1 else None
     entities = strong or fuzzy
     if winner is not None:

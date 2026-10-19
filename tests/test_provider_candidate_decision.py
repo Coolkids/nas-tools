@@ -84,6 +84,19 @@ class ProviderCandidateDecisionTest(TestCase):
         ])
         self.assertEqual(1, decision["selected"][2]["id"])
 
+    def test_fuzzy_fallback_score_participates_in_candidate_selection(self):
+        first = item("local_rules", 1, 0.60)
+        second = item("anitopy_ml", 2, 0.91)
+        first[1]["level"], first[1]["fuzzy_score"] = "fuzzy", 0.93
+        second[1]["level"], second[1]["fuzzy_score"] = "fuzzy", 0.91
+        decision = select_provider_candidates([first, second])
+
+        self.assertEqual("success", decision["status"])
+        self.assertEqual(1, decision["selected"][2]["id"])
+        self.assertEqual(0.93, next(row["similarity_score"]
+                                    for row in decision["candidate_similarities"]
+                                    if row["id"] == 1))
+
     def test_threshold_is_configurable_and_failure_keeps_all_title_scores(self):
         candidates = [item("local_rules", 1, 0.89), item("anitopy_ml", 2, 0.85)]
         for minimum, status in ((0.9, "failed"), (0.88, "success")):

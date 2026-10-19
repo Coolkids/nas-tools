@@ -259,8 +259,8 @@ def update_config():
                     'ddp5.1',
                 ],
                 'raw_title_first': True,
-                'allow_fuzzy_fallback': False,
-                # 多路候选名称相似度及额外模糊回退共用此阈值。
+                # 完整标题匹配不足时自动进行模糊回退；数值越高，回退越严格。
+                # 多路候选名称相似度和模糊回退共用此最低分数。
                 'fuzzy_min_score': 0.88,
             },
             'weights': {
@@ -317,6 +317,11 @@ def update_config():
         overwrite_cofig = True
     merge_recognition_defaults(_config['recognition'], recognition_defaults)
     recognition = _config['recognition']
+    title_evidence = (recognition.get('decision') or {}).get('title_evidence')
+    if isinstance(title_evidence, dict) and 'allow_fuzzy_fallback' in title_evidence:
+        # 模糊回退已改为始终启用，清理旧的开关配置。
+        title_evidence.pop('allow_fuzzy_fallback', None)
+        overwrite_cofig = True
     parse_cache = (recognition.get('cache') or {}).get('parse')
     if isinstance(parse_cache, dict):
         for key in ('max_entries', 'max_bytes', 'max_entry_bytes'):

@@ -236,6 +236,14 @@ class TmdbTitleEvidenceTest(TestCase):
         self.assertEqual("雖然我不是完美惡女~雛宮蝶鼠替換傳~",
                          result["similarity_matches"][0]["match_text"])
 
+    def test_fuzzy_fallback_is_always_available_and_uses_its_score(self):
+        result = self.media._Media__tmdb_title_evidence(
+            "The.Matrx.Reloaded.1080p", {"title": "The Matrix"})
+
+        self.assertEqual("fuzzy", result["level"])
+        self.assertLess(result["similarity_score"], 0.88)
+        self.assertGreaterEqual(result["fuzzy_score"], 0.88)
+
     def test_title_numbers_survive_similarity_comparison(self):
         result = self.media._Media__tmdb_title_evidence(
             "[Group] Blade Runner 2049 S01E01 [1080p]", {"name": "Blade Runner 2049"})
