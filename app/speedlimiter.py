@@ -5,7 +5,7 @@ from app.utils import ExceptionUtils
 from app.utils.commons import singleton
 from app.utils.types import DownloaderType, MediaServerType
 from app.helper.security_helper import SecurityHelper
-from app.db.scheduler import DatabaseSessionBackgroundScheduler
+from app.db.scheduler import PersistentBackgroundScheduler
 from config import Config
 
 import log
@@ -77,25 +77,30 @@ class SpeedLimiter:
             self.unlimited_ips["ipv6"] = config.get("ipv6") or "::/0"
         else:
             self.limit_enabled = False
-        # 移出现有任务
+        # 停止旧调度器，保留持久化任务的下一次时间。
         try:
             if self._scheduler:
-                self._scheduler.remove_all_jobs()
                 if self._scheduler.running:
                     self._scheduler.shutdown()
                 self._scheduler = None
         except Exception as e:
             ExceptionUtils.exception_traceback(e)
         # 启动限速任务
+        self._scheduler = PersistentBackgroundScheduler(namespace='speed_limiter', timezone=Config().get_timezone())
+        self._scheduler.start(paused=True)
         if self.limit_enabled:
-            self._scheduler = DatabaseSessionBackgroundScheduler(timezone=Config().get_timezone())
-            self._scheduler.add_job(func=self.__check_playing_sessions,
-                                    args=[self.mediaserver.get_type(), True],
-                                    trigger='interval',
-                                    seconds=300)
+            self._scheduler.add_interval_job('app.speedlimiter:SpeedLimiter._SpeedLimiter__check_playing_sessions',
+                                             id='playing_sessions',
+                                             args=[self.mediaserver.get_type(), True],
+                                             seconds=300)
+        self._scheduler.reconcile_jobs()
+        if self.limit_enabled:
             self._scheduler.print_jobs()
-            self._scheduler.start()
+            self._scheduler.resume()
             log.info("播放限速服务启动")
+        else:
+            self._scheduler.shutdown()
+            self._scheduler = None
 
     def __start(self):
         """
@@ -204,8 +209,6 @@ class SpeedLimiter:
                 self.__stop()
             else:
                 pass
-
-
 
 
 

@@ -3,24 +3,16 @@ import traceback
 
 from apscheduler.executors.pool import ThreadPoolExecutor
 import log
-from app.db.scheduler import DatabaseSessionBackgroundScheduler
-from app.db.main_db import MainDb
-from app.db.media_db import MediaDb
+from app.db.scheduler import PersistentBackgroundScheduler
 from app.db.statistics import database_statistics_schedule
-from app.doubansync import DoubanSync
-from app.downloader import Downloader
-from app.helper import DbHelper, MetaHelper
+from app.helper import DbHelper
 from app.helper.db_helper import DEFAULT_HISTORY_LIMITS, history_record_limit
-from app.mediaserver import MediaServer
-from app.subscribe import Subscribe
-from app.sync import Sync
 from app.utils import ExceptionUtils
 from app.utils.commons import singleton
 from app.utils.storage_jobs import STORAGE_JOBS
 from config import PT_TRANSFER_INTERVAL, METAINFO_SAVE_INTERVAL, \
     SYNC_TRANSFER_INTERVAL, RSS_CHECK_INTERVAL, \
     RSS_REFRESH_TMDB_INTERVAL, META_DELETE_UNKNOWN_INTERVAL, REFRESH_WALLPAPER_INTERVAL, Config
-from web.backend.wallpaper import get_login_wallpaper
 
 
 def _cleanup_options(config, default_retention=30, legacy_retention_key=None, default_max_records=200):
@@ -71,7 +63,7 @@ class Scheduler:
         """
         # Scheduler 是单例；配置更新后重启时需重新读取，避免沿用旧的识别清理开关。
         self.init_config()
-        self.SCHEDULER = DatabaseSessionBackgroundScheduler(timezone=Config().get_timezone(),
+        self.SCHEDULER = PersistentBackgroundScheduler(namespace='main', timezone=Config().get_timezone(),
                                              executors={
                                                  'default': ThreadPoolExecutor(20)
                                              },
@@ -82,11 +74,13 @@ class Scheduler:
                                              })
         if not self.SCHEDULER:
             return
+        self.SCHEDULER.start(paused=True)
         if self._pt:
             # 下载文件转移
             pt_monitor = self._pt.get('pt_monitor')
             if pt_monitor:
-                self.SCHEDULER.add_job(Downloader().transfer, 'interval', seconds=PT_TRANSFER_INTERVAL)
+                self.SCHEDULER.add_interval_job('app.downloader:Downloader.transfer',
+                                                id='pttransfer', seconds=PT_TRANSFER_INTERVAL)
                 log.info("下载文件转移服务启动")
 
             # RSS订阅定时检索
@@ -103,7 +97,8 @@ class Scheduler:
                 if search_rss_interval:
                     if search_rss_interval < 6:
                         search_rss_interval = 6
-                    self.SCHEDULER.add_job(Subscribe().subscribe_search_all, 'interval', hours=search_rss_interval)
+                    self.SCHEDULER.add_interval_job('app.subscribe:Subscribe.subscribe_search_all',
+                                                    id='subscribe_search_all', hours=search_rss_interval)
                     log.info("订阅定时搜索服务启动")
 
         # 豆瓣电影同步
@@ -120,7 +115,8 @@ class Scheduler:
                             log.info("豆瓣同步服务启动失败：%s" % str(e))
                             douban_interval = 0
                 if douban_interval:
-                    self.SCHEDULER.add_job(DoubanSync().sync, 'interval', hours=douban_interval)
+                    self.SCHEDULER.add_interval_job('app.doubansync:DoubanSync.sync',
+                                                    id='douban', hours=douban_interval)
                     log.info("豆瓣同步服务启动")
 
         # 媒体库同步
@@ -137,32 +133,37 @@ class Scheduler:
                             log.info("豆瓣同步服务启动失败：%s" % str(e))
                             mediasync_interval = 0
                 if mediasync_interval:
-                    self.SCHEDULER.add_job(MediaServer().sync_mediaserver, 'interval', hours=mediasync_interval)
+                    self.SCHEDULER.add_interval_job('app.mediaserver:MediaServer.sync_mediaserver',
+                                                    id='media_sync', hours=mediasync_interval)
                     log.info("媒体库同步服务启动")
 
         # 元数据定时保存
-        self.SCHEDULER.add_job(MetaHelper().save_meta_data, 'interval', seconds=METAINFO_SAVE_INTERVAL)
+        self.SCHEDULER.add_interval_job('app.helper.meta_helper:MetaHelper.save_meta_data',
+                                       id='metadata_save', seconds=METAINFO_SAVE_INTERVAL)
 
         # 定时把队列中的监控文件转移走
-        self.SCHEDULER.add_job(Sync().transfer_mon_files, 'interval', seconds=SYNC_TRANSFER_INTERVAL)
+        self.SCHEDULER.add_interval_job('app.sync:Sync.transfer_mon_files',
+                                       id='sync_transfer', seconds=SYNC_TRANSFER_INTERVAL)
 
         # RSS队列中检索
-        self.SCHEDULER.add_job(Subscribe().subscribe_search, 'interval', seconds=RSS_CHECK_INTERVAL)
+        self.SCHEDULER.add_interval_job('app.subscribe:Subscribe.subscribe_search',
+                                       id='rss_search', seconds=RSS_CHECK_INTERVAL)
 
         # 豆瓣RSS转TMDB，定时更新TMDB数据
-        self.SCHEDULER.add_job(Subscribe().refresh_rss_metainfo, 'interval', hours=RSS_REFRESH_TMDB_INTERVAL)
+        self.SCHEDULER.add_interval_job('app.subscribe:Subscribe.refresh_rss_metainfo',
+                                       id='rss_refresh_metainfo', hours=RSS_REFRESH_TMDB_INTERVAL)
 
         # 定时清除未识别的缓存
-        self.SCHEDULER.add_job(MetaHelper().delete_unknown_meta, 'interval', hours=META_DELETE_UNKNOWN_INTERVAL)
+        self.SCHEDULER.add_interval_job('app.helper.meta_helper:MetaHelper.delete_unknown_meta',
+                                       id='unknown_metadata_cleanup', hours=META_DELETE_UNKNOWN_INTERVAL)
 
         # 定时刷新壁纸
-        self.SCHEDULER.add_job(get_login_wallpaper,
-                               'interval',
-                               hours=REFRESH_WALLPAPER_INTERVAL,
-                               next_run_time=datetime.datetime.now())
+        self.SCHEDULER.add_interval_job('web.backend.wallpaper:get_login_wallpaper', id='wallpaper_refresh',
+                                       hours=REFRESH_WALLPAPER_INTERVAL,
+                                       next_run_time=datetime.datetime.now())
 
         # 定时 WAL checkpoint，防止 WAL 文件过度膨胀
-        self.SCHEDULER.add_job(MainDb.wal_checkpoint, 'interval', hours=6)
+        self.SCHEDULER.add_interval_job('app.db.main_db:MainDb.wal_checkpoint', id='wal_checkpoint', hours=6)
 
         self._schedule_database_statistics()
 
@@ -173,10 +174,9 @@ class Scheduler:
                 record_cleanup, default_retention=30, legacy_retention_key='retention_days')
             if cleanup_options:
                 interval_hours, retention_value, retention_unit, max_records = cleanup_options
-                self.SCHEDULER.add_job(
-                    self.cleanup_expired_recognition_records,
-                    'interval', hours=interval_hours,
-                    id='recognition_record_cleanup', replace_existing=True,
+                self.SCHEDULER.add_interval_job(
+                    'app.scheduler:Scheduler.cleanup_expired_recognition_records', hours=interval_hours,
+                    id='recognition_record_cleanup',
                     next_run_time=datetime.datetime.now())
                 log.info("媒体识别记录过期清理服务启动，每 %s 小时执行，保留 %s，记录上限 %s 条" % (
                     interval_hours, _retention_label(retention_value, retention_unit), max_records))
@@ -199,16 +199,16 @@ class Scheduler:
                 log.error("%s过期清理配置无效，任务未启动" % label)
                 continue
             interval_hours, retention_value, retention_unit, max_records = cleanup_options
-            self.SCHEDULER.add_job(
-                cleanup_func, 'interval', hours=interval_hours,
-                id=job_id, replace_existing=True,
+            self.SCHEDULER.add_interval_job(
+                f'app.scheduler:Scheduler.{cleanup_func.__name__}', hours=interval_hours,
+                id=job_id,
                 next_run_time=datetime.datetime.now())
             log.info("%s过期清理服务启动，每 %s 小时执行，保留 %s，记录上限 %s 条" % (
                 label, interval_hours, _retention_label(retention_value, retention_unit), max_records))
 
+        self.SCHEDULER.reconcile_jobs()
         self.SCHEDULER.print_jobs()
-
-        self.SCHEDULER.start()
+        self.SCHEDULER.resume()
 
     def stop_service(self):
         """
@@ -216,7 +216,6 @@ class Scheduler:
         """
         try:
             if self.SCHEDULER:
-                self.SCHEDULER.remove_all_jobs()
                 self.SCHEDULER.shutdown()
                 self.SCHEDULER = None
         except Exception as e:
@@ -238,9 +237,9 @@ class Scheduler:
         if latest and latest.get('created_at'):
             last_started = datetime.datetime.fromtimestamp(float(latest['created_at']), datetime.timezone.utc)
             next_run = max(now, last_started + datetime.timedelta(hours=options['interval_hours']))
-        self.SCHEDULER.add_job(
-            self.refresh_database_statistics, 'interval', hours=options['interval_hours'],
-            id='database_statistics', replace_existing=True, next_run_time=next_run)
+        self.SCHEDULER.add_interval_job(
+            'app.scheduler:Scheduler.refresh_database_statistics', hours=options['interval_hours'],
+            id='database_statistics', next_run_time=next_run)
         log.info("数据库精确统计定时任务启动，每 %s %s执行" % (
             options['interval_value'], '小时' if options['interval_unit'] == 'hour' else '天'))
 

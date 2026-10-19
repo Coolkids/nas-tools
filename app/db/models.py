@@ -3,10 +3,10 @@ from collections.abc import Mapping
 import hashlib
 import json
 
-from sqlalchemy import BigInteger, Column, Float, Index, Integer, String, Text, event, text
+from sqlalchemy import BigInteger, Column, Float, Index, Integer, LargeBinary, String, Table, Text, event, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import deferred
-from sqlalchemy.dialects.mysql import LONGTEXT
+from sqlalchemy.dialects.mysql import LONGBLOB, LONGTEXT
 
 MEDIA_SYNC_LEGACY_GENERATION = "legacy"
 
@@ -14,6 +14,21 @@ Base = declarative_base()
 # 两个业务逻辑域共用一份 metadata 和结构版本。
 BaseMedia = declarative_base(metadata=Base.metadata)
 LargeText = Text().with_variant(LONGTEXT(), "mysql", "mariadb")
+
+# 每个调度器独立读取自己的 JobStore，避免多个调度器重复执行同一任务。
+SCHEDULER_JOB_TABLES = {
+    namespace: Table(
+        name, Base.metadata,
+        Column("id", String(191), primary_key=True),
+        Column("next_run_time", Float(precision=53), index=True),
+        Column("job_state", LargeBinary().with_variant(LONGBLOB(), "mysql", "mariadb"), nullable=False),
+    ) for namespace, name in (
+        ("main", "SCHEDULER_JOBS"),
+        ("rss", "RSS_SCHEDULER_JOBS"),
+        ("torrent_remover", "TORRENT_REMOVER_JOBS"),
+        ("speed_limiter", "SPEED_LIMITER_JOBS"),
+    )
+}
 
 
 def portable_key_digest(values):

@@ -8,7 +8,7 @@ from lxml import etree
 
 import log
 from app.downloader import Downloader
-from app.db.scheduler import DatabaseSessionBackgroundScheduler
+from app.db.scheduler import PersistentBackgroundScheduler
 from app.filter import Filter
 from app.helper import DbHelper
 from app.media import Media
@@ -57,10 +57,9 @@ class RssChecker(object):
         self.media = Media()
         self.downloader = Downloader()
         self.subscribe = Subscribe()
-        # 移除现有任务
+        # 停止旧调度器，保留数据库中的下一次执行时间。
         try:
             if self._scheduler:
-                self._scheduler.remove_all_jobs()
                 if self._scheduler.running:
                     self._scheduler.shutdown()
                 self._scheduler = None
@@ -128,14 +127,12 @@ class RssChecker(object):
                 "filter_args": json.loads(task.FILTER_ARGS)
                 if task.FILTER_ARGS else {"restype": "", "pix": "", "team": ""},
             })
-        if not self._rss_tasks:
-            return
         # 启动RSS任务
         try:
-            rss_workers = max(1, int(Config().get_config("pt").get("rss_concurrency", 10)))
+            rss_workers = max(1, int((Config().get_config("pt") or {}).get("rss_concurrency", 10)))
         except (TypeError, ValueError):
             rss_workers = 10
-        self._scheduler = DatabaseSessionBackgroundScheduler(timezone=Config().get_timezone(),
+        self._scheduler = PersistentBackgroundScheduler(namespace='rss', timezone=Config().get_timezone(),
                                               executors={
                                                   'default': ThreadPoolExecutor(rss_workers)
                                               },
@@ -144,18 +141,24 @@ class RssChecker(object):
                                                   'coalesce': True,
                                                   'misfire_grace_time': 300
                                               })
+        self._scheduler.start(paused=True)
         rss_flag = False
         for task in self._rss_tasks:
-            if task.get("state") == "Y" and task.get("interval") and str(task.get("interval")).isdigit():
+            if (task.get("state") == "Y" and str(task.get("interval")).isdigit()
+                    and int(task["interval"]) > 0):
                 rss_flag = True
-                self._scheduler.add_job(func=self.check_task_rss,
-                                        args=[task.get("id")],
-                                        trigger='interval',
-                                        seconds=int(task.get("interval")) * 60)
+                self._scheduler.add_interval_job('app.rsschecker:RssChecker.check_task_rss',
+                                                 id=f'rss_task_{task["id"]}',
+                                                 args=[task.get("id")],
+                                                 minutes=int(task["interval"]))
+        self._scheduler.reconcile_jobs()
         if rss_flag:
             self._scheduler.print_jobs()
-            self._scheduler.start()
+            self._scheduler.resume()
             log.info("自定义订阅服务启动")
+        else:
+            self._scheduler.shutdown()
+            self._scheduler = None
 
     def get_rsstask_info(self, taskid=None):
         """

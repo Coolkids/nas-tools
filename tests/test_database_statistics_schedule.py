@@ -87,18 +87,17 @@ def test_statistics_settings_save_and_reload_without_changing_database_connectio
 def test_statistics_job_is_registered_on_service_start_with_default_interval(monkeypatch):
     service = configured_scheduler(monkeypatch)
     engine = service.SCHEDULER
-    monkeypatch.setattr(scheduler_module, "DatabaseSessionBackgroundScheduler", lambda **kwargs: engine)
-    for name in ("MetaHelper", "Sync", "Subscribe"):
-        monkeypatch.setattr(scheduler_module, name, Mock())
-
+    monkeypatch.setattr(scheduler_module, "PersistentBackgroundScheduler", lambda **kwargs: engine)
     before = datetime.datetime.now(datetime.timezone.utc)
     service.run_service()
 
-    job = next(call for call in engine.add_job.call_args_list if call.kwargs.get("id") == "database_statistics")
-    assert job.args == (service.refresh_database_statistics, "interval")
+    job = next(call for call in engine.add_interval_job.call_args_list
+               if call.kwargs.get("id") == "database_statistics")
+    assert job.args == ("app.scheduler:Scheduler.refresh_database_statistics",)
     assert job.kwargs["hours"] == 12
     assert before <= job.kwargs["next_run_time"] <= datetime.datetime.now(datetime.timezone.utc)
-    engine.start.assert_called_once_with()
+    engine.start.assert_called_once_with(paused=True)
+    engine.resume.assert_called_once_with()
 
 
 @pytest.mark.parametrize("settings", [{"enabled": False}, {"interval_value": 11}])
@@ -107,7 +106,7 @@ def test_disabled_or_invalid_statistics_job_is_not_registered(monkeypatch, setti
 
     service._schedule_database_statistics()
 
-    service.SCHEDULER.add_job.assert_not_called()
+    service.SCHEDULER.add_interval_job.assert_not_called()
 
 
 def test_statistics_reload_preserves_recent_refresh_time_and_converts_days(monkeypatch):
@@ -117,7 +116,7 @@ def test_statistics_reload_preserves_recent_refresh_time_and_converts_days(monke
 
     service._schedule_database_statistics()
 
-    job = service.SCHEDULER.add_job.call_args
+    job = service.SCHEDULER.add_interval_job.call_args
     assert job.kwargs["hours"] == 24
     assert job.kwargs["next_run_time"] == created + datetime.timedelta(days=1)
 
