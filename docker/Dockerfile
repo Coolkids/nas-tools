@@ -50,9 +50,9 @@ ENV PATH="/root/.local/bin:${PATH}" \
     UV_PYTHON_INSTALL_DIR="/opt/python" \
     UV_LINK_MODE=copy
 
-# 安装 Python 3.14 并创建虚拟环境
-RUN uv python install 3.14 \
-    && uv venv /app/.venv --python 3.14
+# 安装 Python 3.15 并创建虚拟环境
+RUN uv python install 3.15 \
+    && uv venv /app/.venv --python 3.15
 
 # 激活 venv（后续 RUN 层通过 PATH 继承 venv 优先）
 ENV VIRTUAL_ENV=/app/.venv \
