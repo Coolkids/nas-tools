@@ -20,9 +20,10 @@ import app.rsschecker as rss_module
 from app.db.backends.sqlite import SQLiteBackend
 from app.db.manager import DatabaseManager
 from app.db.models import SCHEDULER_JOB_TABLES
-from app.db.scheduler import PersistentBackgroundScheduler, run_persistent_job
+from app.db.scheduler import PersistentBackgroundScheduler, get_persistent_job_schedules, run_persistent_job
 from app.utils.storage_jobs import StorageJobStore
 from db_scripts.versions.fa0d1e2f3a4b_persistent_scheduler_jobs import upgrade as upgrade_scheduler_jobs
+from web.action import WebAction
 
 
 UTC = datetime.timezone.utc
@@ -75,6 +76,8 @@ def test_restart_and_interval_change_keep_original_next_run(database, old_minute
         assert state["func"] == "app.db.scheduler:run_persistent_job"
         assert state["args"] == ("builtins:len", ([1, 2],), {})
         assert state["next_run_time"] == next_run
+        published = next(job for job in get_persistent_job_schedules() if job["id"] == "rss_task_7")
+        assert datetime.datetime.fromisoformat(published["next_run_time"]) == next_run
     finally:
         restored.shutdown()
 
@@ -258,3 +261,52 @@ def test_scheduler_retries_during_database_maintenance_without_changing_schedule
         assert instance.get_job("protected").trigger.interval == datetime.timedelta(hours=1)
     finally:
         instance.shutdown()
+
+
+def test_schedule_api_reads_all_namespaces_without_restoring_or_starting_jobs(database, monkeypatch):
+    next_run = datetime.datetime(2099, 10, 19, 4, 34, 56, 123456, tzinfo=UTC)
+    for namespace, table in SCHEDULER_JOB_TABLES.items():
+        with database.engine.begin() as connection:
+            connection.execute(table.insert(), {
+                "id": "same-id", "next_run_time": next_run.timestamp(),
+                "job_state": b"not-a-pickled-job",
+            })
+    table = SCHEDULER_JOB_TABLES["main"]
+    with database.engine.begin() as connection:
+        connection.execute(table.insert(), {"id": "paused", "next_run_time": None, "job_state": b"private"})
+    for name in ("Scheduler", "RssChecker", "TorrentRemover", "SpeedLimiter"):
+        monkeypatch.setattr(f"web.action.{name}", Mock(side_effect=AssertionError("不得初始化调度器")))
+    monkeypatch.setattr("web.action.DbHelper", Mock())
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    action = WebAction()
+
+    result = action.action("get_scheduler_jobs", {})
+
+    assert result["code"] == 0
+    assert result["timezone"] == "Asia/Shanghai"
+    assert len(result["jobs"]) == 5
+    assert {job["namespace"] for job in result["jobs"]} == set(SCHEDULER_JOB_TABLES)
+    for job in result["jobs"]:
+        assert set(job) == {"namespace", "id", "next_run_time"}
+        if job["id"] == "paused":
+            assert job["next_run_time"] is None
+        else:
+            assert datetime.datetime.fromisoformat(job["next_run_time"]) == next_run
+    assert database.engine.pool.checkedout() == 0
+
+    # 刷新接口应读取已推进的持久化时间，不返回先前缓存。
+    advanced = next_run + datetime.timedelta(hours=12)
+    with database.engine.begin() as connection:
+        connection.execute(table.update().where(table.c.id == "same-id").values(next_run_time=advanced.timestamp()))
+    refreshed = action.action("get_scheduler_jobs", {})
+    main = next(job for job in refreshed["jobs"] if job["namespace"] == "main" and job["id"] == "same-id")
+    assert datetime.datetime.fromisoformat(main["next_run_time"]) == advanced
+
+
+def test_schedule_api_reports_read_failure_without_exposing_database_details(monkeypatch):
+    monkeypatch.setattr(scheduler_module, "get_persistent_job_schedules", Mock(side_effect=RuntimeError(
+        "postgresql://private:password@db-host")))
+
+    result = WebAction._WebAction__get_scheduler_jobs({})
+
+    assert result == {"code": 1, "msg": "读取定时任务执行时间失败，请稍后重试"}

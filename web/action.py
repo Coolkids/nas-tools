@@ -114,6 +114,7 @@ class WebAction:
         self.dbhelper = DbHelper()
         self._actions = {
             "sch": self.__sch,
+            "get_scheduler_jobs": self.__get_scheduler_jobs,
             "search": self.__search,
             "download": self.__download,
             "download_link": self.__download_link,
@@ -452,6 +453,17 @@ class WebAction:
                     cfg[keys[0]] = {}
                     cfg[keys[0]][keys[1]] = cfg_value.replace("\\", "/")
         return cfg
+
+    @staticmethod
+    def __get_scheduler_jobs(data=None):
+        from app.db.scheduler import get_persistent_job_schedules
+
+        try:
+            return {"code": 0, "jobs": get_persistent_job_schedules(),
+                    "timezone": Config().get_timezone()}
+        except Exception as error:
+            log.error("读取定时任务执行时间失败：%s" % type(error).__name__)
+            return {"code": 1, "msg": "读取定时任务执行时间失败，请稍后重试"}
 
     @staticmethod
     def __sch(data):

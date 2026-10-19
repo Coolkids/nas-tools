@@ -3,6 +3,7 @@
 from functools import wraps
 from importlib import import_module
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import pickle
 
 from apscheduler.jobstores.base import BaseJobStore
@@ -11,6 +12,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.base import STATE_RUNNING, STATE_STOPPED
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.util import undefined
+from sqlalchemy import select
 
 from app.db.manager import DATABASE
 from app.db.models import SCHEDULER_JOB_TABLES
@@ -24,6 +26,22 @@ def _jobstore_access():
         if STORAGE_JOBS.maintenance_gate("database"):
             raise RuntimeError("数据库正在维护，暂不读写定时任务")
         yield
+
+
+def get_persistent_job_schedules():
+    """只读持久化执行时间，不反序列化任务正文或初始化业务调度器。"""
+    schedules = []
+    with _jobstore_access(), DATABASE.engine.connect() as connection:
+        for namespace, table in SCHEDULER_JOB_TABLES.items():
+            for job_id, timestamp in connection.execute(
+                    select(table.c.id, table.c.next_run_time).order_by(table.c.id)):
+                schedules.append({
+                    "namespace": namespace,
+                    "id": job_id,
+                    "next_run_time": (datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+                                      if timestamp is not None else None),
+                })
+    return schedules
 
 
 def _release_database_session(func):
