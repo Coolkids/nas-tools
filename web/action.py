@@ -31,6 +31,7 @@ from app.downloader.client import Qbittorrent, Transmission
 from app.filetransfer import FileTransfer
 from app.filter import Filter
 from app.helper.db_helper import DEFAULT_HISTORY_LIMITS, history_record_limit
+from app.db.statistics import database_statistics_schedule
 from app.helper import DbHelper, ProgressHelper, ThreadHelper, \
     MetaHelper, WordsHelper
 from app.indexer import Indexer
@@ -463,6 +464,7 @@ class WebAction:
             "sync": Sync().transfer_all_sync,
             "douban": DoubanSync().sync,
             "subscribe_search_all": Subscribe().subscribe_search_all,
+            "database_statistics": Scheduler().refresh_database_statistics,
             "recognition_record_cleanup": Scheduler().cleanup_expired_recognition_records,
             "transfer_history_cleanup": Scheduler().cleanup_expired_transfer_history,
             "subscription_history_cleanup": Scheduler().cleanup_expired_subscription_history,
@@ -1272,6 +1274,7 @@ class WebAction:
             numeric_fields[f"{cleanup_path}.retention_value"] = int
             numeric_fields[f"{cleanup_path}.max_records"] = history_record_limit
         boolean_fields = {
+            "scheduler.database_statistics.enabled",
             "recognition.records.cleanup.enabled",
             "recognition.providers.anitopy_ml.enabled",
             "recognition.cache.enabled",
@@ -1307,6 +1310,15 @@ class WebAction:
                     return {"code": 1, "msg": f"{key} 数值无效"}
             # 生效配置
             cfg = self.set_config_value(cfg, key, value)
+
+        if any(key.startswith("scheduler.database_statistics.") for key in data):
+            try:
+                statistics_config = (cfg.get("scheduler") or {}).get("database_statistics")
+                options = database_statistics_schedule(statistics_config)
+            except ValueError as error:
+                return {"code": 1, "msg": str(error)}
+            for key in ("enabled", "interval_value", "interval_unit"):
+                cfg = self.set_config_value(cfg, f"scheduler.database_statistics.{key}", options[key])
 
         legacy_retention_key = "recognition.records.cleanup.retention_days"
         if legacy_retention_key in data and not any(key in data for key in (
@@ -1491,7 +1503,7 @@ class WebAction:
                     "recognition.records.cleanup.retention_value",
                     "recognition.records.cleanup.retention_unit",
                     "recognition.records.cleanup.max_records")) or any(
-                    key.startswith("history.cleanup.") for key in data):
+                    key.startswith(("history.cleanup.", "scheduler.database_statistics.")) for key in data):
                 restart_scheduler()
 
         return {"code": 0, "msg": "已忽略旧客户端提交的 AI 缓存容量字段" if ignored_cache_limits else ""}

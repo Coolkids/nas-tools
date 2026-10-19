@@ -6,6 +6,7 @@ import log
 from app.db.scheduler import DatabaseSessionBackgroundScheduler
 from app.db.main_db import MainDb
 from app.db.media_db import MediaDb
+from app.db.statistics import database_statistics_schedule
 from app.doubansync import DoubanSync
 from app.downloader import Downloader
 from app.helper import DbHelper, MetaHelper
@@ -15,6 +16,7 @@ from app.subscribe import Subscribe
 from app.sync import Sync
 from app.utils import ExceptionUtils
 from app.utils.commons import singleton
+from app.utils.storage_jobs import STORAGE_JOBS
 from config import PT_TRANSFER_INTERVAL, METAINFO_SAVE_INTERVAL, \
     SYNC_TRANSFER_INTERVAL, RSS_CHECK_INTERVAL, \
     RSS_REFRESH_TMDB_INTERVAL, META_DELETE_UNKNOWN_INTERVAL, REFRESH_WALLPAPER_INTERVAL, Config
@@ -162,6 +164,8 @@ class Scheduler:
         # 定时 WAL checkpoint，防止 WAL 文件过度膨胀
         self.SCHEDULER.add_job(MainDb.wal_checkpoint, 'interval', hours=6)
 
+        self._schedule_database_statistics()
+
         # 定时清理超过保留期限的媒体识别记录。
         record_cleanup = (((self._recognition or {}).get('records') or {}).get('cleanup') or {})
         if record_cleanup.get('enabled'):
@@ -217,6 +221,43 @@ class Scheduler:
                 self.SCHEDULER = None
         except Exception as e:
             ExceptionUtils.exception_traceback(e)
+
+    def _schedule_database_statistics(self):
+        """重载后沿用最近统计时间，避免配置保存频繁触发全表统计。"""
+        scheduler_config = Config().get_config('scheduler') or {}
+        try:
+            options = database_statistics_schedule(scheduler_config.get('database_statistics'))
+        except ValueError as error:
+            log.error("数据库精确统计定时任务未启动：%s" % error)
+            return
+        if not options['enabled']:
+            return
+        now = datetime.datetime.now(datetime.timezone.utc)
+        next_run = now
+        latest = STORAGE_JOBS.latest('database_statistics')
+        if latest and latest.get('created_at'):
+            last_started = datetime.datetime.fromtimestamp(float(latest['created_at']), datetime.timezone.utc)
+            next_run = max(now, last_started + datetime.timedelta(hours=options['interval_hours']))
+        self.SCHEDULER.add_job(
+            self.refresh_database_statistics, 'interval', hours=options['interval_hours'],
+            id='database_statistics', replace_existing=True, next_run_time=next_run)
+        log.info("数据库精确统计定时任务启动，每 %s %s执行" % (
+            options['interval_value'], '小时' if options['interval_unit'] == 'hour' else '天'))
+
+    @staticmethod
+    def refresh_database_statistics():
+        """立即提交统计，手动执行不受定时开关和 12 小时间隔限制。
+
+        间隔限制仅在注册定时任务时使用；正在执行的统计仍由后台入口复用。
+        """
+        from app.db.maintenance import start_database_statistics_refresh
+
+        result = start_database_statistics_refresh({'idempotency_key': 'scheduled-database-statistics'})
+        if result.get('code') != 0:
+            log.warn("【数据库统计】精确统计未启动：%s" % result.get('msg', '未知原因'))
+        else:
+            log.info("【数据库统计】精确统计任务已提交：%s" % result.get('job_id'))
+        return result
 
     @staticmethod
     def cleanup_expired_recognition_records():
