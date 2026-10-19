@@ -9,6 +9,7 @@ import uuid
 from enum import Enum
 from sqlalchemy import func, or_, and_, case
 
+import log
 from app.db import MainDb, DbPersist
 from app.db.models import *
 from app.utils import StringUtils
@@ -62,6 +63,10 @@ class DbHelper:
         """分批删除超过保留期限的历史，降低清理期间的数据库锁占用。"""
         older_than = self._history_retention_cutoff(retention_value, retention_unit, now=now)
         batch_size = min(max(int(batch_size or 500), 1), 2000)
+        label = {"TRANSFER_HISTORY": "转移历史", "RSS_HISTORY": "订阅历史",
+                 "DOWNLOAD_HISTORY": "最近下载"}.get(model.__tablename__, model.__tablename__)
+        log.info("【历史清理】开始清理%s，保留 %s %s，清理 %s 之前的记录" % (
+            label, retention_value, "天" if retention_unit == "day" else "个月", older_than))
         deleted_count = 0
         last_id = 0
         while True:
@@ -71,9 +76,13 @@ class DbHelper:
             if not record_ids:
                 break
             last_id = record_ids[-1]
-            deleted_count += self._db.query(model).filter(
+            batch_deleted = self._db.query(model).filter(
                 model.ID.in_(record_ids)).delete(synchronize_session=False)
             self._db.commit()
+            deleted_count += batch_deleted
+            log.info("【历史清理】%s本批次删除 %s 条，累计删除 %s 条过期记录" % (
+                label, batch_deleted, deleted_count))
+        log.info("【历史清理】%s清理完成，共删除 %s 条过期记录" % (label, deleted_count))
         return deleted_count
 
     @staticmethod

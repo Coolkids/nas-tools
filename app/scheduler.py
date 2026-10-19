@@ -243,24 +243,22 @@ class Scheduler:
             return 0
         _, retention_value, retention_unit = options
         deleted_count = delete_method(retention_value, retention_unit=retention_unit)
-        log.info("%s过期清理完成，保留 %s，共删除 %s 条记录" % (
-            label, _retention_label(retention_value, retention_unit), deleted_count))
+        if deleted_count is False:
+            raise RuntimeError("%s过期清理失败，请查看数据库错误日志" % label)
         return deleted_count
 
-    @staticmethod
-    def cleanup_expired_transfer_history():
-        return Scheduler._cleanup_expired_history(
+    def cleanup_expired_transfer_history(self):
+        return self._cleanup_expired_history(
             'transfer_history', DbHelper().delete_expired_transfer_history, '转移历史')
 
-    @staticmethod
-    def cleanup_expired_subscription_history():
-        return Scheduler._cleanup_expired_history(
+    def cleanup_expired_subscription_history(self):
+        return self._cleanup_expired_history(
             'subscription_history', DbHelper().delete_expired_subscription_history, '订阅历史')
 
-    @staticmethod
-    def cleanup_expired_download_history():
-        return Scheduler._cleanup_expired_history(
+    def cleanup_expired_download_history(self):
+        return self._cleanup_expired_history(
             'download_history', DbHelper().delete_expired_download_history, '最近下载')
+
 
 def run_scheduler():
     """

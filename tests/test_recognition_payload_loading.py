@@ -11,7 +11,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import (RECOGNITIONATTEMPT, RECOGNITIONREQUEST,
+from app.db.models import (AIRECOGNITIONRECORD, RECOGNITIONATTEMPT, RECOGNITIONREQUEST,
                            RECOGNITIONREQUESTACTION)
 from app.helper.db_helper import DbHelper
 from web.action import WebAction
@@ -27,6 +27,7 @@ SPEC.loader.exec_module(MIGRATION)
 class RecognitionPayloadLoadingTest(unittest.TestCase):
     def test_expired_recognition_cleanup_deletes_in_batches_and_keeps_running_rows(self):
         engine = sa.create_engine("sqlite:///:memory:")
+        AIRECOGNITIONRECORD.__table__.create(engine)
         RECOGNITIONREQUEST.__table__.create(engine)
         RECOGNITIONATTEMPT.__table__.create(engine)
         RECOGNITIONREQUESTACTION.__table__.create(engine)
