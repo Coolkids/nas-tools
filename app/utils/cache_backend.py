@@ -1677,8 +1677,16 @@ class CacheStore(AtomicCacheMixin):
             records = self.envelope_records(namespace)
             size = sum(len(json.dumps(value).encode()) for _, value, _ in records)
             actual = self.capabilities()["actual_backend"]
-            return {"entries": len(records), "bytes": size, "memory_bytes": size if actual == "memory" else 0,
-                    "store_bytes": size if actual != "memory" else None,
+            persistent_size = None
+            if actual == "memory_disk":
+                path = os.path.join(self._directory(), "system.sqlite3")
+                persistent_size = sum(os.path.getsize(filename) for filename in
+                                      (path, path + "-wal", path + "-shm")
+                                      if os.path.exists(filename))
+            # 远程缓存数据计入服务端内存，本地文件占用只用于 SQLite。
+            return {"entries": len(records), "bytes": size,
+                    "memory_bytes": size if actual != "memory_disk" else 0,
+                    "store_bytes": persistent_size,
                     "backend": actual, "persistent": actual == "memory_disk"}
         def measure(memory, disk, actual, client, prefix):
             if disk is not None:
