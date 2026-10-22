@@ -7,6 +7,7 @@ media.db
 user.db
 venv
 .venv
+/tests/
 
 ### IntelliJ IDEA ###
 .idea
