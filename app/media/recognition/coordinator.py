@@ -14,7 +14,7 @@ from app.media.recognition.budget import RecognitionBudget, BudgetExceeded, Reco
 from app.media.recognition.cache_repository import CacheRepository, cache_hit_scope
 from app.media.recognition.configuration import migrate_recognition_v3
 from app.media.recognition.contracts import IdentityEntry, NormalizedParse, RecognitionOutcome, RecognitionStatus
-from app.media.recognition.episode_resolver import resolve_episode, default_episode_season
+from app.media.recognition.episode_resolver import resolve_episode, default_episode_season, merge_episode_context
 from app.media.recognition.identity import IdentityService, IdentityScope, OverrideRepository, OverrideConflict, detail_signature, media_kind, scope_for
 from app.media.recognition.preprocessor import PREPROCESSOR_VERSION, snapshot_rules
 from app.media.recognition.repository import RecognitionRepository, utc_now
@@ -249,6 +249,7 @@ class RecognitionCoordinator:
         episode = resolve_episode(prepared.clean_title, secondary_title=prepared.clean_secondary_title,
             parent_title=parent, season_override=season, episodes_override=episodes_override, absolute_mapping=absolute_mapping)
         episode_input = episode
+        file_parses = None
         lookup = prepared
         scope = scope_for(lookup, name=name, mtype=mtype, year=year)
         if provided and scope is None:
@@ -377,6 +378,8 @@ class RecognitionCoordinator:
                         network_allowed=True, cache=cache and not revalidate, episode=episode_input, lookup_overrides=overrides, client=client, emit=emit,
                         relax_year=not strict and str(self.settings.get("app", {}).get("rmt_match_mode") or "normal").lower() == "normal")
                     ranked = analysis["ranking"]
+                    if lookup is prepared:
+                        file_parses = analysis["parsers"].results
                     episode_input = analysis["episode"]
                     adopt_episode(episode_input)
                     if ranked.status == RecognitionStatus.MATCHED:
@@ -455,7 +458,29 @@ class RecognitionCoordinator:
             source = "override"
             state.pop("publication", None)
         if identity.media_type == "tv":
-            adopt_episode(default_episode_season(episode_input))
+            # Identity caches contain works, never this file's coordinates. A
+            # cache/provided-ID path still needs one local episode extraction;
+            # a full parse of this file already supplied it and is reused.
+            protected = {"override", "absolute_mapping"}
+            if episode_input.season_source not in protected or episode_input.episodes_source not in protected:
+                reused = file_parses is not None
+                if file_parses is None:
+                    from app.media.recognition.parser_manager import ParserManager
+                    trace.emit("episode", "file_anitopy_started", "running", {
+                        "input": {"title": prepared.clean_title}, "provider_id": "anitopy"})
+                    file_parses = ParserManager(self.settings, runtime=self._runtime(), budget=budget).run(
+                        prepared, network_allowed=False, cache=False, provider_ids=("anitopy",)).results
+                adopt_episode(merge_episode_context(episode_input, file_parses))
+                local = next((item for item in file_parses if item.provider_id == "anitopy"), None)
+                trace.emit("episode", "file_anitopy_completed", local.status if local else "unavailable", {
+                    "provider_id": "anitopy", "reused": reused,
+                    "cache_source": local.cache_source if local else None,
+                    "error": local.error if local else "provider_unavailable",
+                    "input": {"title": prepared.clean_title},
+                    "extraction": {"season": local.season, "episodes": local.episodes} if local else None,
+                    "output": asdict(episode)})
+            else:
+                adopt_episode(default_episode_season(episode_input))
         try:
             self._check_episode(detail, episode, identity.media_type)
         except ValueError as error:

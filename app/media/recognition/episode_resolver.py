@@ -44,7 +44,8 @@ def default_episode_season(episode):
 
 def merge_episode_context(fallback, parses):
     """Select each coordinate by provider priority, preserving explicit overrides."""
-    if fallback.review_reason not in (None, "absolute_mapping_required"):
+    if (fallback.review_reason not in (None, "absolute_mapping_required") or
+            fallback.review_reason is not None and fallback.source == "absolute_mapping"):
         return fallback
     results = {item.provider_id: item for item in parses if item.status == "success"}
     season_parse = next((results[name] for name in EPISODE_PROVIDER_PRIORITY
@@ -129,16 +130,23 @@ def resolve_episode(title, *, secondary_title=None, parent_title=None, season_ov
         if special and season_override is None:
             season, season_source = 0, "file"
         return context(_numbers(values))
-    absolute = re.search(r"\s-\s(\d{1,5})(?=\s|\[|\.|$)", text)
+    absolute = re.search(r"\s-\s(\d{1,5})(?:\s*[-~]\s*(\d{1,5}))?(?=\s|\[|\.|$)", text)
     if absolute:
-        number = int(absolute[1])
-        mapped = (absolute_mapping or {}).get(number)
-        if mapped is None:
-            return context(_numbers((number,)))
-        mapped_season, episode = mapped
-        if type(mapped_season) is not int or mapped_season < 0:
+        first, last = int(absolute[1]), int(absolute[2] or absolute[1])
+        if last < first or last - first >= 2000:
+            return context(review_reason="invalid_episode_range")
+        numbers = _numbers(range(first, last + 1))
+        mapped = [(absolute_mapping or {}).get(number) for number in numbers]
+        if not any(item is not None for item in mapped):
+            return context(numbers)
+        if any(item is None for item in mapped):
+            return context(source="absolute_mapping", review_reason="absolute_mapping_required")
+        mapped_season = mapped[0][0]
+        if any(type(item[0]) is not int or item[0] < 0 for item in mapped):
             raise ValueError("invalid absolute mapping")
-        return EpisodeContext(mapped_season, _numbers((episode,)), "season", "absolute_mapping",
+        if any(item[0] != mapped_season for item in mapped):
+            return context(source="absolute_mapping", review_reason="absolute_mapping_required")
+        return EpisodeContext(mapped_season, _numbers(item[1] for item in mapped), "season", "absolute_mapping",
                               season_source="absolute_mapping", episodes_source="absolute_mapping")
     bracket = find_bracket_episode(text)
     if bracket:

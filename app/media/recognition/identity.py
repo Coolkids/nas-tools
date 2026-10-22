@@ -65,7 +65,7 @@ def scope_for(prepared, *, name=None, mtype=None, year=None):
             tail = text[group.end():]
             if tail and not re.match(r"(?i)^(?:-\s*\d|S\d|E[P]?\d|第|\d{3,4}[pi]\b)", tail):
                 text = tail
-    episodic = re.search(r"(?i)(?:(?<![A-Za-z0-9])S\d{1,3}(?:E\d{1,5})?|(?<![A-Za-z0-9])(?:EP?|SP)\d{1,5}|第\s*\d+\s*[季集话話]|\bSeason\s*\d{1,3}\b|\s-\s\d{1,5}(?=\s|\[|\.|$))", text)
+    episodic = re.search(r"(?i)(?:(?<![A-Za-z0-9])S\d{1,3}(?:E\d{1,5})?|(?<![A-Za-z0-9])(?:EP?|SP)\d{1,5}|第\s*\d+\s*[季集话話]|\bSeason\s*\d{1,3}\b|\s-\s\d{1,5}(?:\s*[-~]\s*\d{1,5})?(?=\s|\[|\.|$))", text)
     bracket = find_bracket_episode(text)
     if bracket is not None and (episodic is None or bracket.start() < episodic.start()):
         episodic = bracket

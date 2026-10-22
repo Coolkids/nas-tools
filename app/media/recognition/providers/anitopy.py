@@ -5,12 +5,12 @@ import time
 import anitopy
 from app.media.recognition.contracts import MediaNameRecognizer, ParseResult, RecognizerDescriptor
 from app.media.recognition.provider_schema import ml_extraction
-from app.media.recognition.episode_resolver import find_season
+from app.media.recognition.episode_resolver import find_season, resolve_episode
 from app.media.recognition.title_names import title_variants
 
 
 class AnitopyRecognizer(MediaNameRecognizer):
-    descriptor = RecognizerDescriptor("anitopy", "Anitopy", "2.2-v3.4", "local_rules")
+    descriptor = RecognizerDescriptor("anitopy", "Anitopy", "2.2-v3.5", "local_rules")
 
     def __init__(self, timeout=None):
         self.timeout = timeout
@@ -20,6 +20,12 @@ class AnitopyRecognizer(MediaNameRecognizer):
         try:
             raw = anitopy.parse(request.title)
             value = ml_extraction(raw)
+            # Anitopy returns the endpoints of a range. Expand only when this
+            # file independently contains that range; E04E06 remains sparse.
+            coordinates = resolve_episode(request.title)
+            if (len(value["episodes"]) == 2 and 2 < len(coordinates.episodes) <= 200 and
+                    value["episodes"] == [coordinates.episodes[0], coordinates.episodes[-1]]):
+                value["episodes"] = list(coordinates.episodes)
             # Anitopy leaves Chinese season labels in anime_title. Preserve the
             # raw output while separating this explicit coordinate from the name.
             season, _marker = find_season(request.title)

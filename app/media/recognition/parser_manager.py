@@ -32,12 +32,16 @@ class ParserManager:
         self.budget = budget or RecognitionBudget((self.settings.get("timeouts") or {}).get("total_ms"))
         self.emit = emit or (lambda *args, **kwargs: None)
 
-    def run(self, prepared, *, network_allowed=True, cache=True):
+    def run(self, prepared, *, network_allowed=True, cache=True, provider_ids=None):
+        order = ("anitopy", "anitopy_ml", "openai")
+        selected = order if provider_ids is None else tuple(provider_ids)
+        if not selected or len(set(selected)) != len(selected) or any(name not in order for name in selected):
+            raise ValueError("invalid_parser_selection")
         pending, results, signatures, diagnostics, cache_keys, provider_raw = {}, {}, {}, [], {}, {}
         cache_settings = self.settings.get("cache", {})
         providers = registry.discover()
         config = self.settings["providers"]
-        for provider_id in ("anitopy", "anitopy_ml", "openai"):
+        for provider_id in selected:
             if provider_id not in providers:
                 results[provider_id] = NormalizedParse(provider_id, "unavailable", provider_id, "error", error="provider_unavailable")
                 continue
@@ -152,7 +156,7 @@ class ParserManager:
         if "openai" in results and results["openai"].llm is None:
             results["openai"] = replace(results["openai"], llm=parser_metadata(config["openai"], provider_raw.get("openai"),
                                                                             skipped="openai" not in pending))
-        ordered = tuple(results[key] for key in ("anitopy", "anitopy_ml", "openai"))
+        ordered = tuple(results[key] for key in selected)
         for result in ordered:
             self.emit("parser_finished", provider_id=result.provider_id, status=result.status,
                       error=result.error, cache_source=result.cache_source, duration_ms=result.duration_ms,
