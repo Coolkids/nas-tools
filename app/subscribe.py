@@ -9,6 +9,7 @@ from app.filter import Filter
 from app.helper import DbHelper, MetaHelper
 from app.media import Media, DouBan
 from app.media.meta import MetaInfo
+from app.media.recognition.overrides import normalize_numeric_override
 from app.message import Message
 from app.searcher import Searcher
 from app.indexer import Indexer
@@ -90,7 +91,12 @@ class Subscribe:
         """
         if not name:
             return -1, "标题或类型有误", None
-        year = int(year) if str(year).isdigit() else ""
+        try:
+            year = normalize_numeric_override(year, "year")
+            season = normalize_numeric_override(season, "season")
+        except ValueError as error:
+            message = "年份必须为空或 1870–2200 的整数" if str(error) == "invalid year override" else "季号必须为空或 0–1000 的整数"
+            return -1, message, None
         search_sites = search_sites or []
         over_edition = 1 if over_edition else 0
         filter_rule = int(filter_rule) if str(filter_rule).isdigit() else None
@@ -105,12 +111,8 @@ class Subscribe:
                 # 根据ID查询
                 media_info = WebUtils.get_mediainfo_from_id(mtype=mtype, mediaid=mediaid)
             else:
-                # 根据名称和年份查询
-                if season:
-                    title = "%s %s 第%s季".strip() % (name, year, season)
-                else:
-                    title = "%s %s".strip() % (name, year)
-                media_info = self.media.get_media_info_original_title(title=title,
+                # 名称、年份和季号分别传递，避免将季标签拼进用于识别的作品标题。
+                media_info = self.media.get_media_info_original_title(title=name,
                                                     name=name,
                                                     year=year,
                                                     season=season,
@@ -124,7 +126,7 @@ class Subscribe:
             # 添加订阅
             if media_info.type != MediaType.MOVIE:
                 # 电视剧
-                if season:
+                if season is not None:
                     total_episode = self.media.get_tmdb_season_episodes_num(tv_info=media_info.tmdb_info,
                                                                             season=int(season))
                 else:
@@ -197,7 +199,7 @@ class Subscribe:
             if year:
                 # 模糊订阅会跳过元数据查询，但仍须保留用户明确填写的年份。
                 media_info.year = year
-            if season:
+            if season is not None:
                 media_info.begin_season = int(season)
             if mtype == MediaType.MOVIE:
                 if rssid:

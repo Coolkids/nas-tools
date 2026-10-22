@@ -17,6 +17,7 @@ from app.media.recognition.contracts import IdentityEntry, NormalizedParse, Reco
 from app.media.recognition.episode_resolver import resolve_episode, default_episode_season, merge_episode_context
 from app.media.recognition.identity import IdentityService, IdentityScope, OverrideRepository, OverrideConflict, detail_signature, media_kind, scope_for
 from app.media.recognition.preprocessor import PREPROCESSOR_VERSION, snapshot_rules
+from app.media.recognition.overrides import normalize_numeric_override
 from app.media.recognition.release_year import explicit_release_year, release_year
 from app.media.recognition.repository import RecognitionRepository, utc_now
 from app.media.recognition.runtime import WorkItem, ResourceBusy, get_runtime
@@ -210,6 +211,9 @@ class RecognitionCoordinator:
     def _resolve(self, title, *, subtitle, mtype, name, year, season, cache, pre_parsed, file_path,
                  provided, episodes_override, absolute_mapping, trace, budget, chinese, strict, append_to_response,
                  work_scope, state):
+        # 旧业务入口可能传入 "02" 和空年份；进入内部校验前统一为整数或空值。
+        year = normalize_numeric_override(year, "year")
+        season = normalize_numeric_override(season, "season")
         def outcome(status, reason=None, identity=None, source=None):
             return RecognitionOutcome(trace.request_id, status, identity, reason,
                 episode.season, episode.episodes, identity.score if identity else None, cache_source=source)

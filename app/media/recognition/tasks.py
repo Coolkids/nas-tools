@@ -20,6 +20,7 @@ from app.media.recognition import admission
 from app.media.recognition.budget import RecognitionBudget, RecognitionCancelled, BudgetExceeded, CancellationReason
 from app.media.recognition.contracts import RecognitionOutcome, RecognitionStatus
 from app.media.recognition.coordinator import RecognitionCoordinator, effective_settings
+from app.media.recognition.overrides import normalize_numeric_override
 from app.media.recognition.repository import RecognitionRepository, ACTIVE_TASKS, encode, utc_now
 from app.media.recognition.runtime import ResourceBusy
 from app.media.recognition.trace import Trace, recover_spool, _generation
@@ -397,6 +398,10 @@ class TaskService:
                          ("season_override", "season"), ("media_type", "mtype")):
             if old in trace["input"] and new not in input:
                 input[new] = trace["input"][old]
+        # 旧同步业务记录可能保存字符串季号或空年份，重试时再转换为异步接口约定。
+        for field in ("year", "season"):
+            if field in input:
+                input[field] = normalize_numeric_override(input[field], field)
         if bypass_identity_cache:
             input["bypass_identity_cache"] = True
         return self.submit(input, actor, retry_of=task_id, idempotency_key=idempotency_key)
