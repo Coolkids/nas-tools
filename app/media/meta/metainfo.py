@@ -223,22 +223,8 @@ def _merge_parse_results(results):
                 continue
             if current is None and incoming is not None:
                 setattr(selected, field, incoming)
-        for start_field, end_field in (("begin_season", "end_season"),
-                                       ("begin_episode", "end_episode")):
-            current_range = (getattr(selected, start_field, None),
-                             getattr(selected, end_field, None))
-            incoming_range = (getattr(candidate, start_field, None),
-                              getattr(candidate, end_field, None))
-            if all(value is not None for value in current_range + incoming_range) \
-                    and current_range != incoming_range:
-                conflicts.append({"field": start_field.removeprefix("begin_"),
-                                  "provider_id": provider_id,
-                                  "selected": list(map(str, current_range)),
-                                  "candidate": list(map(str, incoming_range))})
-            elif all(value is None for value in current_range) \
-                    and any(value is not None for value in incoming_range):
-                setattr(selected, start_field, incoming_range[0])
-                setattr(selected, end_field, incoming_range[1])
+        # Season/episode selection is applied from the normalized parser batch
+        # after this merge, using the shared explicit provider priority.
         for field in ("cn_name", "en_name", "part", "resource_type", "resource_pix",
                       "resource_team", "video_encode", "audio_encode"):
             if not getattr(selected, field, None) and getattr(candidate, field, None):
@@ -283,7 +269,8 @@ def _record_meta_parse(recorder, title, subtitle, mtype, apply_custom_words,
     from app.media.recognition.coordinator import effective_settings
     from app.media.recognition.budget import RecognitionBudget
     from app.media.recognition.parser_manager import ParserManager
-    from app.media.recognition.adapters import meta_from_normalized
+    from app.media.recognition.adapters import meta_from_normalized, _apply_episode_context
+    from app.media.recognition.episode_resolver import resolve_episode, merge_episode_context
     from app.media.recognition.preprocessor import RuleSnapshot
 
     settings = effective_settings(recognition_config())
@@ -302,6 +289,7 @@ def _record_meta_parse(recorder, title, subtitle, mtype, apply_custom_words,
             used_info = {"ignored": [], "replaced": [], "offset": []}
         local_meta = _parse_meta_info(title, subtitle, mtype, apply_custom_words=False)
     candidates = [("anitopy", local_meta)]
+    episode_context = None
     if include_ai:
         # The title has already had custom rules applied, so this snapshot must
         # not apply them again inside any parser.
@@ -312,6 +300,7 @@ def _record_meta_parse(recorder, title, subtitle, mtype, apply_custom_words,
                 recorder.action(event, provider_id=provider_id, status=status, output=payload)
         batch = ParserManager(settings, budget=budget, emit=emit).run(prepared,
             network_allowed=profile_network_allowed("parse_only", settings["recognition"]))
+        episode_context = merge_episode_context(resolve_episode(title, secondary_title=subtitle), batch.results)
         if recorder is not None:
             from app.media.recognition.llm_usage import combine_usage
             recorder.context["llm_usage"] = combine_usage(parsed.llm["usage"] for parsed in batch.results if parsed.llm)
@@ -334,6 +323,11 @@ def _record_meta_parse(recorder, title, subtitle, mtype, apply_custom_words,
         for provider in ("anitopy_ml", "openai"):
             recorder.add_provider_result(provider, "skipped", error=ai_skip_reason or "local_parse_only")
     selected, selected_provider = _merge_parse_results(candidates)
+    if selected is not None and episode_context is not None:
+        _apply_episode_context(selected, episode_context.season, episode_context.episodes)
+        selected.recognition_review_reason = episode_context.review_reason
+        if recorder is not None:
+            recorder.action("episode_coordinates_selected", status="success", output=asdict(episode_context))
     if recorder is not None:
         recorder.context["selected_provider"] = selected_provider
     if selected is not None:

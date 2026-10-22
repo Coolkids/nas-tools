@@ -9,12 +9,12 @@ import re
 import time
 import uuid
 
-from app.media.recognition.adapters import meta_from_normalized, meta_from_outcome
+from app.media.recognition.adapters import meta_from_normalized, meta_from_outcome, _apply_episode_context
 from app.media.recognition.budget import RecognitionBudget, BudgetExceeded, RecognitionCancelled, effective_deadline_reason, total_timeout_ms
 from app.media.recognition.cache_repository import CacheRepository, cache_hit_scope
 from app.media.recognition.configuration import migrate_recognition_v3
 from app.media.recognition.contracts import IdentityEntry, NormalizedParse, RecognitionOutcome, RecognitionStatus
-from app.media.recognition.episode_resolver import resolve_episode, resolve_single_season_episode
+from app.media.recognition.episode_resolver import resolve_episode, default_episode_season
 from app.media.recognition.identity import IdentityService, IdentityScope, OverrideRepository, OverrideConflict, detail_signature, media_kind, scope_for
 from app.media.recognition.preprocessor import PREPROCESSOR_VERSION, snapshot_rules
 from app.media.recognition.repository import RecognitionRepository, utc_now
@@ -219,6 +219,9 @@ class RecognitionCoordinator:
                 trace.emit("episode", "episode_numbering_resolved", "review" if context.review_reason else "success",
                     {"input": asdict(episode), "output": asdict(context), "source": context.source})
                 episode = context
+                if state.get("meta") is not None:
+                    _apply_episode_context(state["meta"], episode.season, episode.episodes)
+                    state["meta"].recognition_review_reason = episode.review_reason
         if not title or not isinstance(title, str):
             return RecognitionOutcome(trace.request_id, RecognitionStatus.FAILED, failure_code="empty_title"), None, None, None, None
         if file_path is not None:
@@ -268,6 +271,8 @@ class RecognitionCoordinator:
             scope = replace(scope, media_type="tv")
         parsed_meta = self._parsed(scope, prepared, episode)
         state.update(meta=parsed_meta, scope=scope)
+        trace.emit("episode", "file_episode_resolved", "review" if episode.review_reason else "success",
+            {"output": asdict(episode), "source": episode.source})
         if scope is not None:
             trace.input["scope"] = asdict(scope)
         if pre_parsed is not None:
@@ -328,7 +333,7 @@ class RecognitionCoordinator:
                         "tmdb_id": identity.tmdb_id, "media_type": identity.media_type,
                         "cache_source": "tmdb" if client.http_attempt_count > attempts_before else "cache"})
                     if identity.media_type == "tv":
-                        adopt_episode(resolve_single_season_episode(episode_input, detail))
+                        adopt_episode(default_episode_season(episode_input))
                     if self.rec["matching"]["adult_policy"] == "exclude" and detail.get("adult") is True:
                         trace.emit("identity", "identity_rejected", "review", {"reason": "adult_excluded"})
                         return outcome(RecognitionStatus.REVIEW_REQUIRED, "adult_excluded"), parsed_meta, None, scope, None
@@ -372,6 +377,8 @@ class RecognitionCoordinator:
                         network_allowed=True, cache=cache and not revalidate, episode=episode_input, lookup_overrides=overrides, client=client, emit=emit,
                         relax_year=not strict and str(self.settings.get("app", {}).get("rmt_match_mode") or "normal").lower() == "normal")
                     ranked = analysis["ranking"]
+                    episode_input = analysis["episode"]
+                    adopt_episode(episode_input)
                     if ranked.status == RecognitionStatus.MATCHED:
                         adopt_episode(ranked.episode)
                     trace.candidates = [{"media_type": c.media_type, "tmdb_id": c.tmdb_id, "title": c.title[:512],
@@ -407,6 +414,8 @@ class RecognitionCoordinator:
                         else value for key, value in item.items()} for item in ranked.conflict_details]
                     trace.emit("rank", "rank_completed", ranked.status.value, {"reason": ranked.reason,
                         "coverage": ranked.coverage, "queries": analysis["search"].logical_query_count,
+                        "coverage_issues": analysis["search"].coverage_issues,
+                        "detail_complete": analysis["search"].detail_complete,
                         "http_attempts": analysis["search"].http_attempt_count, "episode": asdict(episode),
                         "conflicts": conflict_details, "candidate_count": len(trace.candidates),
                         "thresholds": {key: self.rec["matching"][key] for key in ("min_name_similarity", "match_threshold", "min_score_gap")},
@@ -446,8 +455,15 @@ class RecognitionCoordinator:
             source = "override"
             state.pop("publication", None)
         if identity.media_type == "tv":
-            adopt_episode(resolve_single_season_episode(episode_input, detail))
-        self._check_episode(detail, episode, identity.media_type)
+            adopt_episode(default_episode_season(episode_input))
+        try:
+            self._check_episode(detail, episode, identity.media_type)
+        except ValueError as error:
+            trace.emit("episode", "episode_validation_failed", "review",
+                {"output": asdict(episode), "reason": str(error), "source": episode.source})
+            raise
+        trace.emit("episode", "episode_coordinates_verified", "success",
+            {"output": asdict(episode), "source": episode.source})
         if self.rec["query"].get("episode_details_enabled") and identity.media_type == "tv" and episode.episodes:
             from concurrent.futures import ThreadPoolExecutor
             stage = budget.stage("episode", self.rec["timeouts"].get("episode_ms"))

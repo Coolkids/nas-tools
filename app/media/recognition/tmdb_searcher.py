@@ -18,6 +18,7 @@ class SearchBatch:
     logical_query_count: int
     http_attempt_count: int
     detail_complete: bool
+    coverage_issues: tuple[dict, ...] = ()
 
 
 class TMDBSearcher:
@@ -28,6 +29,8 @@ class TMDBSearcher:
         query = self.settings["query"]
         stage = budget or self.client.budget.stage("tmdb_stage", self.settings["timeouts"].get("tmdb_stage_ms"))
         responses, errors, partial = [], [], bool(plan.skipped)
+        coverage_issues = [{"query_id": item.query_id, "query": item.query, "reason": item.budget_reason}
+                           for item in plan.skipped]
         initial_attempts = self.client.http_attempt_count
         def consume(item):
             rows, consumed, complete, failures = [], 0, True, []
@@ -52,19 +55,32 @@ class TMDBSearcher:
                     break
             if rows and rows[-1].page < rows[-1].total_pages:
                 complete = False
-            return rows, complete, failures
+            issue = None
+            if not complete:
+                issue = {"query_id": item.query_id, "query": item.query,
+                    "reason": "QUERY_REQUEST_FAILED" if failures else "QUERY_CANDIDATE_LIMIT" if consumed >= query["candidates_per_query"] else "QUERY_PAGE_LIMIT",
+                    "pages_fetched": len(rows), "last_page": rows[-1].page if rows else None,
+                    "total_pages": rows[-1].total_pages if rows else None,
+                    "total_results": rows[-1].total_results if rows else None, "consumed_count": consumed}
+                if failures:
+                    issue["error"] = failures[-1]["error"]
+            return rows, complete, failures, issue
         workers = max(1, min(query["tmdb_concurrency"], len(plan.items)))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="recognition-query") as executor:
             futures = {executor.submit(consume, item): item for item in plan.items}
             for future in as_completed(futures):
                 item = futures[future]
                 try:
-                    rows, complete, failures = future.result()
+                    rows, complete, failures, issue = future.result()
                     responses.extend(rows)
                     errors.extend(failures)
                     partial = partial or not complete
+                    if issue is not None:
+                        coverage_issues.append(issue)
                 except (TMDBRequestError, BudgetExceeded, RecognitionCancelled) as error:
                     errors.append({"query_id": item.query_id, "error": str(error)})
+                    coverage_issues.append({"query_id": item.query_id, "query": item.query,
+                        "reason": "QUERY_REQUEST_FAILED", "error": str(error)})
                     partial = True
         responses.sort(key=lambda value: (value.query_id, value.page))
         candidates = merge_candidates(responses, plan)
@@ -85,6 +101,9 @@ class TMDBSearcher:
                     candidate.detail_fields = {"_error": str(error)}
                     errors.append({"media_type": candidate.media_type, "id": candidate.tmdb_id, "error": str(error)})
                     detail_complete = False
+                    coverage_issues.append({"media_type": candidate.media_type, "tmdb_id": candidate.tmdb_id,
+                        "reason": "TMDB_DETAIL_FAILED", "error": str(error)})
         return SearchBatch(tuple(responses), tuple(candidates), "partial" if partial or not detail_complete else "complete",
             tuple(sorted(errors, key=lambda value: str(sorted(value.items())))), len(plan.items),
-            self.client.http_attempt_count-initial_attempts, detail_complete)
+            self.client.http_attempt_count-initial_attempts, detail_complete,
+            tuple(sorted(coverage_issues, key=lambda value: str(sorted(value.items())))))

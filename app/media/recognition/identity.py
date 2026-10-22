@@ -15,7 +15,7 @@ from app.media.recognition.contracts import IdentityEntry
 from app.media.recognition.query_planner import canonical_title, query_planning_policy
 from app.media.recognition.ranker import MATCHING_VERSION
 from app.media.recognition.repository import RecognitionRepository, encode, utc_now
-from app.media.recognition.episode_resolver import find_season
+from app.media.recognition.episode_resolver import find_season, find_bracket_episode
 
 
 def digest(value):
@@ -66,6 +66,9 @@ def scope_for(prepared, *, name=None, mtype=None, year=None):
             if tail and not re.match(r"(?i)^(?:-\s*\d|S\d|E[P]?\d|第|\d{3,4}[pi]\b)", tail):
                 text = tail
     episodic = re.search(r"(?i)(?:(?<![A-Za-z0-9])S\d{1,3}(?:E\d{1,5})?|(?<![A-Za-z0-9])(?:EP?|SP)\d{1,5}|第\s*\d+\s*[季集话話]|\bSeason\s*\d{1,3}\b|\s-\s\d{1,5}(?=\s|\[|\.|$))", text)
+    bracket = find_bracket_episode(text)
+    if bracket is not None and (episodic is None or bracket.start() < episodic.start()):
+        episodic = bracket
     _season, season_marker = find_season(text)
     if season_marker is not None and (episodic is None or season_marker.start() < episodic.start()):
         episodic = season_marker

@@ -8,10 +8,10 @@ import re
 from app.media.recognition.contracts import RecognitionStatus
 from app.media.recognition.query_planner import canonical_title
 from app.media.recognition.title_names import official_keyword_in_title, title_variants
-from app.media.recognition.episode_resolver import EpisodeContext, resolve_single_season_episode
+from app.media.recognition.episode_resolver import EpisodeContext, default_episode_season, merge_episode_context
 
 
-MATCHING_VERSION = "rank-v3.2"
+MATCHING_VERSION = "rank-v3.3"
 DEFAULT_WEIGHTS = {"title": .55, "type_episode": .20, "year": .15, "consensus": .07, "popularity": .03}
 
 
@@ -90,6 +90,7 @@ class CandidateRanker:
     def rank(self, candidates, parses, *, episode=None, coverage="complete", conflicts=(), budget=None):
         settings = self.settings
         parsed = [p for p in parses if p.status == "success"]
+        episode = merge_episode_context(episode or EpisodeContext(), parsed)
         primary = sorted({name for p in parsed for value in (p.title, p.secondary_title) for name in title_variants(value)})
         types = {p.media_type for p in parsed if p.media_type in {"tv", "movie"}}
         years = {p.year for p in parsed if p.year is not None}
@@ -130,7 +131,7 @@ class CandidateRanker:
                     c.scores[key+"_contribution"] = weight*value
             component("title", name)
             type_score = 1 if types == {c.media_type} else None
-            context = resolve_single_season_episode(episode, c.detail_fields) if c.media_type == "tv" and c.detail_fields.get("_verified") else episode
+            context = default_episode_season(episode) if c.media_type == "tv" else episode
             c.search_fields["_episode_context"] = asdict(context) if context is not None else None
             season = context.season if context else next((p.season for p in parsed if p.season is not None), None)
             episodes = context.episodes if context else ()
@@ -199,7 +200,7 @@ class CandidateRanker:
         if not allowed:
             return RankingResult(RecognitionStatus.REVIEW_REQUIRED, None, tuple(output), "all_candidates_rejected", coverage)
         top = allowed[0]
-        top_episode = resolve_single_season_episode(episode, top.detail_fields) if top.media_type == "tv" and top.detail_fields.get("_verified") else episode
+        top_episode = default_episode_season(episode) if top.media_type == "tv" else episode
         details = [{"code": code} for code in conflicts]
         if top_episode and top_episode.review_reason:
             details.append({"code": top_episode.review_reason, "season": top_episode.season, "episodes": list(top_episode.episodes)})
@@ -220,4 +221,4 @@ class CandidateRanker:
         else:
             return RankingResult(RecognitionStatus.MATCHED, top, tuple(output), "verified_match", coverage, episode=top_episode)
         return RankingResult(RecognitionStatus.REVIEW_REQUIRED, None, tuple(output), reason, coverage,
-            conflict_details=tuple(details))
+            conflict_details=tuple(details), episode=top_episode)
