@@ -27,9 +27,8 @@ class SQLiteBackend(DatabaseBackend):
             echo=False,
             poolclass=MeasuredQueuePool,
             pool_pre_ping=True,
-            # SQLite still has a single concurrent writer. Keep two connections
-            # for overlapping reads/work while preventing a burst of workers
-            # from opening a ten-connection pool against the same WAL file.
+            # SQLite 同一时刻仍只能有一个写入者。保留两个连接以支持并行读取和任务，
+            # 同时避免大量工作线程针对同一个 WAL 文件打开过多连接。
             pool_size=2,
             max_overflow=50,
             pool_recycle=1800,
@@ -39,8 +38,8 @@ class SQLiteBackend(DatabaseBackend):
         )
 
     def configure_connection(self, connection):
-        # Python 3.14 uses sqlite3's PEP 249 transaction control by default.
-        # PRAGMAs that configure a connection must run outside that transaction.
+        # Python 3.14 默认使用 sqlite3 的 PEP 249 事务控制方式。
+        # 配置连接的 PRAGMA 必须在事务之外执行。
         previous_autocommit = connection.autocommit
         try:
             connection.autocommit = True
@@ -187,8 +186,8 @@ class SQLiteBackend(DatabaseBackend):
                 f"log_frames={log_frames}，checkpointed_frames={checkpointed_frames}")
 
     def optimize(self, engine):
-        # Run after Alembic/metadata changes during startup, before background
-        # work starts. SQLite decides whether fresh planner statistics help.
+        # 在启动时 Alembic 或 metadata 变更完成后、后台任务开始前执行。
+        # 是否需要更新查询规划统计信息由 SQLite 决定。
         with engine.begin() as connection:
             connection.exec_driver_sql("PRAGMA optimize")
 
