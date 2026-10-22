@@ -3,25 +3,22 @@ from logging.config import fileConfig
 from alembic import context
 
 from app.db.models import Base
-# this is the Alembic Config object, which provides
-# access to the values within the .ini file in use.
+# 这是 Alembic Config 对象，可用于访问当前使用的 ini 文件中的配置。
 config = context.config
 
-# Interpret the config file for Python logging.
-# This line sets up loggers basically.
+# 读取配置文件中的 Python 日志设置。
+# 此行会初始化日志记录器。
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# add your model's MetaData object here
-# for 'autogenerate' support
-# from myapp import mymodel
+# 在此添加模型的 MetaData 对象，以支持自动生成迁移。
+# 示例：from myapp import mymodel
 # target_metadata = mymodel.Base.metadata
 target_metadata = Base.metadata
 
-# other values from the config, defined by the needs of env.py,
-# can be acquired:
+# 也可以按 env.py 的需要读取配置中的其他值：
 # my_important_option = config.get_main_option("my_important_option")
-# ... etc.
+# 等等。
 
 
 def run_migrations_offline() -> None:

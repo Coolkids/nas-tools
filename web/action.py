@@ -1229,7 +1229,7 @@ class WebAction:
         }
         boolean_fields.update(f"{cleanup_path}.enabled" for cleanup_path in cleanup_paths)
         cfgs = dict(data).items()
-        # Candidate config is detached from the live Config singleton.
+        # 候选配置与正在使用的 Config 单例相互独立。
         for key, value in cfgs:
             if key == "test":
                 continue
@@ -1535,8 +1535,7 @@ class WebAction:
                 rssid = self.dbhelper.get_rss_movie_id(
                     title=name, year=media_info.year, tmdbid=media_info.tmdb_id)
             elif rssid:
-                # Updating an existing RSS subscription deletes and recreates
-                # its row, so return the new database ID to REST clients.
+                # 更新已有 RSS 订阅时会删除并重建对应记录，因此要向 REST 客户端返回新的数据库 ID。
                 query_season = media_info.get_season_string()
                 rssid = self.dbhelper.get_rss_tv_id(
                     title=name, year=media_info.year, season=query_season,
@@ -5165,8 +5164,7 @@ class WebAction:
             summary = decode(record.SUMMARY) if getattr(record, "SUMMARY", None) else None
             if summary:
                 return summary
-            # Rows created before the summary migration remain readable; only
-            # those legacy rows pay the cost of loading the full payload.
+            # 摘要迁移前创建的记录仍可读取；只有这些旧记录需要加载完整内容。
             return DbHelper.recognition_summary({
                 "overall_result": decode(record.OVERALL_RESULT) or {},
                 "provider_results": decode(record.PROVIDER_RESULTS) or [],

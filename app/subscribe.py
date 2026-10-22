@@ -195,8 +195,7 @@ class Subscribe:
             media_info.title = name
             media_info.type = mtype
             if year:
-                # Fuzzy subscriptions skip metadata lookup, but must retain
-                # the year explicitly supplied by the user.
+                # 模糊订阅会跳过元数据查询，但仍须保留用户明确填写的年份。
                 media_info.year = year
             if season:
                 media_info.begin_season = int(season)
@@ -576,9 +575,8 @@ class Subscribe:
             rss_movies = self.get_subscribe_movies(rid=rssid)
         else:
             rss_movies = self.get_subscribe_movies(state=state)
-        # Materialize the subscription rows before fan-out. Keeping the caller's
-        # scoped connection while it waits for worker futures can exhaust the
-        # bounded SQLite pool (particularly while another scheduled job runs).
+        # 分发子任务前先将订阅记录读取成独立数据。若等待工作线程时继续占用调用方的连接，
+        # 可能耗尽容量有限的 SQLite 连接池，尤其是同时运行其他定时任务时。
         close_db()
         if rss_movies:
             log.info("【Subscribe】共有 %s 个电影订阅需要检索" % len(rss_movies))
@@ -677,8 +675,7 @@ class Subscribe:
             rss_tvs = self.get_subscribe_tvs(rid=rssid)
         else:
             rss_tvs = self.get_subscribe_tvs(state=state)
-        # Do not hold a database connection in the coordinator thread while it
-        # waits for per-subscription tasks that also need database connections.
+        # 协调线程等待订阅子任务时不要占用数据库连接，因为子任务也需要数据库连接。
         close_db()
         if rss_tvs:
             log.info("【Subscribe】共有 %s 个电视剧订阅需要检索" % len(rss_tvs))

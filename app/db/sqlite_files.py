@@ -45,8 +45,7 @@ _MEDIA_SYNC_JOB_COLUMNS = {
     "EXPECTED_ACTIVE_GENERATION", "STATUS", "CREATED_AT", "UPDATED_AT",
 }
 _IGNORED_LEGACY_COLUMNS = {
-    # Subscription site selections were retired by the current schema and are
-    # intentionally excluded from imported subscription records.
+    # 当前结构已移除订阅站点选择，因此导入订阅记录时会有意排除该字段。
     "RSS_MOVIES": {"RSS_SITES"},
     "RSS_TVS": {"RSS_SITES"},
 }
@@ -218,8 +217,7 @@ def _upgrade_snapshot(path, config_path, target_revision="head"):
     engine = create_engine(URL.create("sqlite", database=path), connect_args={"timeout": 30})
     try:
         from app.db.recognition_upgrade import upgrade_engine
-        # This file is already an isolated snapshot. Keep its own pre-upgrade
-        # proof beside it; never rotate the active database's generation here.
+        # 此文件已经是隔离快照。将它自己的升级前校验记录保存在旁边；不要在此处轮换活动数据库的代次。
         upgrade_engine(engine, os.path.dirname(path), {"type": "sqlite"},
                        target=target_revision, active=False)
         source = _connect(path, read_only=True)
@@ -407,8 +405,8 @@ def _digest_rows(connection, schema, table, columns, primary_key, target_types=N
             for column, value in zip(columns, row):
                 if (_sqlite_affinity((target_types or {}).get(column)) == "TEXT"
                         and isinstance(value, (int, float))):
-                    # SQLite applies the destination TEXT affinity during
-                    # INSERT ... SELECT, so hash the value in that same form.
+                    # SQLite 在执行 INSERT ... SELECT 时会应用目标列的 TEXT 亲和性，
+                    # 因此应按相同形式计算哈希。
                     value = str(value)
                 normalized.append(value)
             digest.update(repr(tuple(normalized)).encode("utf-8", "surrogatepass"))
@@ -652,8 +650,7 @@ def _prepare_sqlite_database():
                         _copy_domain(connection, user_snapshot, "main", expected_tables,
                                      attached_sources=attached_sources)
                         if source.get("media"):
-                            # Sync leases are process control state, not media data. A
-                            # stale legacy lease must never block the first new sync.
+                            # 同步租约属于进程控制状态，不是媒体数据。过期的旧租约不能阻止首次新同步。
                             _copy_domain(connection, media_snapshot, "media", expected_tables,
                                          excluded_tables={"MEDIASYNC_SYNC_JOBS"},
                                          attached_sources=attached_sources)

@@ -130,8 +130,7 @@ def init_system():
         log.error(f"恢复识别记录暂存失败：{e}")
     # 本地缓存布局升级与旧数据导入必须在定时任务和后台服务启动前完成。
     try:
-        # Cache format initialization needs exclusive maintenance ownership;
-        # release startup-only ORM read transactions before requesting it.
+        # 初始化缓存格式需要独占维护权；申请前先释放仅用于启动阶段的 ORM 读事务。
         close_db()
         from app.utils.cache_backend import STORE
         STORE.initialize()
@@ -146,8 +145,7 @@ def init_system():
         SearchTaskPool.recover_crashed_tasks()
     except Exception as e:
         log.error(f"恢复搜索任务失败：{e}")
-    # Startup runs on the long-lived main thread. Do not carry its read
-    # transaction into the schedulers or web server after initialization.
+    # 启动流程运行在长期存活的主线程中。初始化结束后，不要将读事务带入调度器或 Web 服务。
     close_db()
     from app.media.recognition.runtime import get_runtime
     runtime = get_runtime()
@@ -174,7 +172,7 @@ def start_service():
     # 初始化浏览器
     if not is_windows_exe:
         ChromeHelper().init_driver()
-    # Service initializers read database-backed configuration on this thread.
+    # 服务初始化器会在当前线程读取数据库中的配置。
     close_db()
 
 
@@ -209,8 +207,7 @@ def monitor_config():
                 restart_scheduler()
                 restart_monitor()
             finally:
-                # The watchdog thread is long-lived too; release sessions
-                # opened by config reload hooks before its next event.
+                # 看门狗线程也会长期运行；处理下一个事件前，释放配置重载钩子打开的会话。
                 close_db()
 
         def on_modified(self, event):
@@ -232,7 +229,7 @@ def monitor_config():
     _observer.start()
 
 
-# Spawn workers import this entry point without starting schedulers/services.
+# Spawn 工作进程会导入此入口，但不会启动调度器或服务。
 if multiprocessing.current_process().name == "MainProcess":
     init_system()
     start_service()

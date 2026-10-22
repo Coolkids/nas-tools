@@ -688,8 +688,8 @@ def _run_migration(job_id, candidate):
     staged_sqlite = candidate.get("backend") == "memory_disk" and not same_store
     target_path = _target_cache_directory(job_id) if staged_sqlite else None
     target = CacheStore(path=target_path, settings=candidate)
-    # A refresh may hold a shared maintenance lease while waiting on unlimited
-    # HTTP. Stop its admission/I/O before waiting for exclusive ownership.
+    # 刷新任务可能在等待不设超时的 HTTP 请求时持有共享维护租约。
+    # 申请独占维护权前，先停止接收新任务并中断当前 I/O。
     pause_refreshes(STORE)
     try:
         with STORAGE_JOBS.maintenance_lock(exclusive=True), STORE._lock:
@@ -769,7 +769,7 @@ def _run_migration(job_id, candidate):
                 actual = _record_digest(_iter_limited_records(
                     namespace, target.iter_records(namespace, strict=False)), validation_time)
                 if actual != expected[namespace]:
-                    # Give entries expiring during target validation the same boundary.
+                    # 目标校验期间过期的条目也使用相同的截止边界。
                     validation_time = time.time()
                     expected[namespace] = _record_digest(
                         _snapshot_records(snapshot_path, namespace), validation_time)
@@ -937,8 +937,7 @@ def _restore_interrupted_memory_snapshot(job):
             or current.get("configured_backend") != "memory"):
         raise ValueError("当前缓存配置已变化，无法恢复原内存缓存")
 
-    # Startup runs behind the persistent maintenance gate, so no business writes can
-    # race this exact replacement of the process-local cache contents.
+    # 启动流程受持久维护门禁保护，不会有业务写入与此次进程内缓存内容替换并发执行。
     for namespace in CACHE_NAMESPACE_REGISTRY:
         STORE.clear(namespace)
     for namespace in CACHE_NAMESPACE_REGISTRY:

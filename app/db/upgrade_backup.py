@@ -93,7 +93,7 @@ def _run(arguments, *, env=None, source=None, target=None):
         subprocess.run(arguments, env=env, stdin=source, stdout=target or subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, timeout=600, check=True)
     except (OSError, subprocess.SubprocessError):
-        # Native client diagnostics may contain connection details or row data.
+        # 原生客户端的诊断信息可能包含连接详情或行数据。
         raise RuntimeError("升级原生备份/恢复校验失败；检查客户端版本、TLS及临时校验库权限") from None
 
 
@@ -115,7 +115,7 @@ def _remote_tools(settings, directory):
         if ssl.get("mode"):
             env["PGSSLMODE"] = str(ssl["mode"])
         return (_tool("pg_dump"), _tool("pg_restore"), [], env)
-    # defaults-extra-file must precede other MySQL/MariaDB options.
+    # defaults-extra-file 必须放在其他 MySQL/MariaDB 参数之前。
     options = {"host": settings["host"], "port": settings.get("port") or 3306,
                "user": settings["username"], "password": settings.get("password") or "",
                "protocol": "TCP", "default-character-set": "utf8mb4"}
@@ -192,14 +192,14 @@ def verify(engine, settings, directory, backup, check_name):
                 if connection.exec_driver_sql("PRAGMA foreign_key_check").first():
                     raise RuntimeError("升级前备份存在外键错误，拒绝删除历史表")
         else:
-            # UUID-derived name from the private upgrade journal, never user input.
+            # 名称由私有升级日志中的 UUID 派生，不能使用用户输入。
             import re
             if not re.fullmatch(r"nastools_upgrade_check_[a-f0-9]{32}", check_name):
                 raise RuntimeError("升级恢复校验库标识无效")
             dump, restore, arguments, env = _remote_tools(settings, directory)
             quote = engine.dialect.identifier_preparer.quote
             with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
-                # A previous process may have died during this job's own validation.
+                # 上一个进程可能在此任务自身的校验过程中意外退出。
                 connection.exec_driver_sql("DROP DATABASE IF EXISTS " + quote(check_name))
                 suffix = " TEMPLATE template0" if settings["type"] == "postgresql" else " CHARACTER SET utf8mb4"
                 connection.exec_driver_sql("CREATE DATABASE " + quote(check_name) + suffix)

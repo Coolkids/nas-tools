@@ -50,8 +50,8 @@ def _release_database_session(func):
         try:
             return func(*args, **kwargs)
         finally:
-            # APScheduler reuses worker threads. A scoped_session therefore
-            # survives between jobs unless it is explicitly removed here.
+            # APScheduler 会复用工作线程，因此必须在此显式移除 scoped_session，
+            # 否则会话会在不同任务之间继续保留。
             DATABASE.close_session()
 
     return run

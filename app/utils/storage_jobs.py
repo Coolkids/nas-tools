@@ -144,7 +144,7 @@ class StorageJobStore:
                         DATABASE.record_exclusive_maintenance(
                             time.perf_counter() - exclusive_started_at)
                     except Exception:
-                        # Diagnostics must not interfere with releasing a lock.
+                        # 诊断信息处理不能影响锁的释放。
                         pass
         finally:
             stream.close()

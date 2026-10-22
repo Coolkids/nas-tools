@@ -204,7 +204,7 @@ class DbPersist(object):
                     return True if ret is None else ret
                 except Exception as e:
                     if nested:
-                        # Preserve the enclosing unit's atomicity and let its owner roll back.
+                        # 保持外层事务单元的原子性，并由外层调用者负责回滚。
                         raise
                     if not self.retry_safe or not DATABASE.is_retryable_transaction_error(e):
                         ExceptionUtils.exception_traceback(e)

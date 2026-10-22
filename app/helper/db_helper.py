@@ -453,9 +453,8 @@ class DbHelper:
         删除RSS的记录
         """
         if enclosure:
-            # The saved torrent title may be normalized/identified from the
-            # feed title. When an enclosure is available it is the stable
-            # identity, and must be enough to clear the finished marker.
+            # 已保存的种子标题可能由订阅源标题规范化或识别得到。
+            # 如果存在下载链接，则应以它作为稳定标识，并据此清除已完成标记。
             self._db.query(RSSTORRENTS).filter(RSSTORRENTS.ENCLOSURE == enclosure).delete()
         else:
             self._db.query(RSSTORRENTS).filter(RSSTORRENTS.TORRENT_NAME == title).delete()

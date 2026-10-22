@@ -80,7 +80,7 @@ def _schema(engine):
         result[name] = {"columns": columns, "pk": inspector.get_pk_constraint(name),
                         "indexes": inspector.get_indexes(name), "fk": inspector.get_foreign_keys(name),
                         "unique": inspector.get_unique_constraints(name)}
-    # Normalize tuple/list and other dialect-returned scalar containers for journal equality.
+    # 统一转换元组、列表及数据库方言返回的其他标量容器，以便比较日志记录。
     return json.loads(json.dumps(result, default=str))
 
 
@@ -199,8 +199,7 @@ def upgrade_engine(engine, root, settings, *, target="head", active=True, checkp
                               or not re.fullmatch(r"[a-f0-9]{32}", str(state.get("job_id", "")))
                               or state.get("identity") != identity):
         raise RuntimeError("识别升级日志损坏或归属错误，保持维护状态")
-    # A copied/restored old database starts a new backup cycle, never overwrites
-    # the original rollback snapshot or reuses a completed proof.
+    # 复制或恢复的旧数据库要开始新的备份周期，不能覆盖原回滚快照，也不能复用已完成的校验记录。
     pending = bool(state and state.get("phase") != "complete")
     if versions == [head] and not pending:
         if set(RETIRED_TABLES) & set(sa.inspect(engine).get_table_names()):
@@ -218,7 +217,7 @@ def upgrade_engine(engine, root, settings, *, target="head", active=True, checkp
             else:
                 raise RuntimeError("存在未完成的其他识别升级门禁，拒绝恢复业务")
         return None
-    # Historical intermediate targets never reach the destructive revision.
+    # 历史中间版本不会执行到具有破坏性的迁移版本。
     needs_final = head == REVISION and versions[0] != REVISION
     if not needs_final and not pending:
         with engine.connect() as connection:
@@ -255,15 +254,14 @@ def upgrade_engine(engine, root, settings, *, target="head", active=True, checkp
         state["backup"] = backups.create(engine, settings, directory)
         state["key"] = _key_backup(root, directory)
         save("backup_created")
-    # Revalidate on every retry, including a crash after Alembic committed.
+    # 每次重试都要重新校验，包括 Alembic 已提交后进程崩溃的情况。
     backups.verify(engine, settings, directory, state["backup"],
                    "nastools_upgrade_check_" + state["job_id"])
     save("backup_verified")
     if "preservation_digests" not in state:
-        # Older SQLite revisions include intentional business schema changes.
-        # Keep the original native backup for rollback, run that historical
-        # chain first, then pin the preservation boundary immediately before
-        # V3's additive/final revisions. Remote SQLite-only paths stay refused.
+        # 旧版 SQLite 迁移包含有意进行的业务结构变更。
+        # 保留原生备份以供回滚，先执行旧迁移链，再在 V3 增量及最终迁移开始前固定数据保全边界。
+        # 远程数据库仍禁止使用仅适用于 SQLite 的迁移路径。
         if _versions(engine)[0] not in {REMOTE_BASE, "fb1e2f3a4b5c", REVISION}:
             with engine.connect() as connection:
                 config.attributes["connection"] = connection
@@ -293,7 +291,7 @@ def upgrade_engine(engine, root, settings, *, target="head", active=True, checkp
     save("data_verified")
     if active:
         from app.db.maintenance import _retire_recognition_spool
-        # Do not replay pre-upgrade recognition buffers before the generation change.
+        # 代次变更前不要重放升级前保存的识别缓冲数据。
         _retire_recognition_spool(state["job_id"], str(root))
         from app.db.migration import _fingerprint
         rotate_generation(_fingerprint(settings), root, "upgrade:" + state["job_id"])

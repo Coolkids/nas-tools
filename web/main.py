@@ -71,26 +71,24 @@ def get_session_secret_key():
                     secret_file.write(secret)
                 return secret
             except FileExistsError:
-                # Another worker may have created the key between the read
-                # and the atomic create attempt.
+                # 读取和原子创建之间，其他工作进程可能已经创建了该密钥。
                 secret = secret_path.read_text(encoding='utf-8').strip()
                 if secret:
                     return secret
         except OSError:
-            # Keep startup compatible with read-only/test environments.  In a
-            # normal installation NASTOOL_CONFIG is writable, so this branch
-            # is not used and the key remains stable across restarts.
+            # 兼容只读或测试环境。在正常安装中 NASTOOL_CONFIG 可写，
+            # 因此不会进入此分支，密钥也会在重启后保持不变。
             pass
 
     return secrets.token_hex(32)
 
 
-# Flask App
+# Flask 应用
 App = Flask(__name__)
 App.config['JSON_AS_ASCII'] = False
-# Database archives stream to disk and have their own 100 GiB application limit.
+# 数据库归档采用流式写入磁盘，并单独设置 100 GiB 的应用层大小限制。
 App.config['MAX_CONTENT_LENGTH'] = DATABASE_BACKUP_UPLOAD_LIMIT + 1024 * 1024
-# The session cookie must remain verifiable after the service restarts.
+# 服务重启后仍须能够验证会话 Cookie。
 App.secret_key = get_session_secret_key()
 App.permanent_session_lifetime = datetime.timedelta(days=30)
 
@@ -183,7 +181,7 @@ def login_json():
     login_user(user_info, remember=remember)
     session.permanent = remember
     if not remember:
-        # Remove a remember cookie left by an earlier remembered login.
+        # 清除之前“记住我”登录留下的 Cookie。
         session['_remember'] = 'clear'
     return {
         "code": 0,
@@ -430,7 +428,7 @@ def wechat():
             return make_response("ok", 200)
 
 
-# Plex Webhook
+# Plex Webhook 接口
 @App.route('/plex', methods=['POST'])
 def plex_webhook():
     if not SecurityHelper().check_mediaserver_ip(request.remote_addr):
@@ -443,7 +441,7 @@ def plex_webhook():
     return 'Ok'
 
 
-# Jellyfin Webhook
+# Jellyfin Webhook 接口
 @App.route('/jellyfin', methods=['POST'])
 def jellyfin_webhook():
     if not SecurityHelper().check_mediaserver_ip(request.remote_addr):
@@ -457,7 +455,7 @@ def jellyfin_webhook():
 
 
 @App.route('/emby', methods=['POST'])
-# Emby Webhook
+# Emby Webhook 接口
 def emby_webhook():
     if not SecurityHelper().check_mediaserver_ip(request.remote_addr):
         log.warn(f"非法IP地址的媒体服务器消息通知：{request.remote_addr}")
@@ -531,7 +529,7 @@ def telegram():
     return 'Ok'
 
 
-# Synology Chat消息响应
+# Synology Chat 消息响应
 @App.route('/synology', methods=['POST', 'GET'])
 def synology():
     """Synology Chat消息回调。"""
@@ -559,7 +557,7 @@ def synology():
     return 'Ok'
 
 
-# Slack消息响应
+# Slack 消息响应
 @App.route('/slack', methods=['POST'])
 def slack():
     """
@@ -691,7 +689,7 @@ def slack():
     return "Ok"
 
 
-# Jellyseerr Overseerr订阅接口
+# Jellyseerr、Overseerr 订阅接口
 @App.route('/subscribe', methods=['POST', 'GET'])
 @require_auth
 def subscribe():
@@ -1001,13 +999,13 @@ def recognition_export_xlsx():
     )
 
 
-# base64模板过滤器
+# base64 模板过滤器
 @App.template_filter('b64encode')
 def b64encode(s):
     return base64.b64encode(s.encode()).decode()
 
 
-# split模板过滤器
+# split 模板过滤器
 @App.template_filter('split')
 def split(string, char, pos):
     return string.split(char)[pos]

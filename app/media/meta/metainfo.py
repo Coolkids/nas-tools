@@ -223,8 +223,7 @@ def _merge_parse_results(results):
                 continue
             if current is None and incoming is not None:
                 setattr(selected, field, incoming)
-        # Season/episode selection is applied from the normalized parser batch
-        # after this merge, using the shared explicit provider priority.
+        # 合并后，根据统一的解析器结果批次和明确的提供方优先级选择季与集。
         for field in ("cn_name", "en_name", "part", "resource_type", "resource_pix",
                       "resource_team", "video_encode", "audio_encode"):
             if not getattr(selected, field, None) and getattr(candidate, field, None):
@@ -291,8 +290,7 @@ def _record_meta_parse(recorder, title, subtitle, mtype, apply_custom_words,
     candidates = [("anitopy", local_meta)]
     episode_context = None
     if include_ai:
-        # The title has already had custom rules applied, so this snapshot must
-        # not apply them again inside any parser.
+        # 标题已经应用过自定义规则，因此解析器内部不能再次应用这些规则。
         prepared, _, _ = preprocess_with_details(title or "", subtitle, rules=RuleSnapshot())
         budget = recorder.budget if recorder is not None else RecognitionBudget(settings["recognition"]["timeouts"]["total_ms"])
         def emit(event, provider_id=None, status=None, **payload):
@@ -311,7 +309,7 @@ def _record_meta_parse(recorder, title, subtitle, mtype, apply_custom_words,
             if parsed.status == "success" and parsed.title:
                 meta = meta_from_normalized(prepared, parsed)
                 if parsed.provider_id == "anitopy":
-                    # Preserve technical fields used by file transfer and filters.
+                    # 保留文件转移和筛选功能所需的技术字段。
                     for field in ("resource_type", "resource_pix", "resource_effect", "resource_team", "video_encode", "audio_encode", "part"):
                         setattr(meta, field, getattr(local_meta, field, None))
                     candidates[0] = ("anitopy", meta)
