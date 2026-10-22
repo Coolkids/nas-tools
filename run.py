@@ -22,20 +22,21 @@ if is_windows_exe:
     os.environ["NASTOOL_LOG"] = os.path.join(config_dir, "logs")
     os.makedirs(config_dir, exist_ok=True)
 
-from config import Config
-import log
-from web.main import App
-from app.utils import SystemUtils, ConfigLoadCache, Torrent
-from app.utils.commons import INSTANCES
-from app.db import close_db, init_db, update_db, init_data
-from app.helper import DisplayHelper, ChromeHelper
-from app.rsschecker import RssChecker
-from app.scheduler import run_scheduler, restart_scheduler
-from app.sync import run_monitor, restart_monitor
-from app.torrentremover import TorrentRemover
-from app.speedlimiter import SpeedLimiter
-from check_config import update_config, check_config
-from version import APP_VERSION
+if multiprocessing.current_process().name == "MainProcess":
+    from config import Config
+    import log
+    from web.main import App
+    from app.utils import SystemUtils, ConfigLoadCache, Torrent
+    from app.utils.commons import INSTANCES
+    from app.db import close_db, init_db, update_db, init_data
+    from app.helper import DisplayHelper, ChromeHelper
+    from app.rsschecker import RssChecker
+    from app.scheduler import run_scheduler, restart_scheduler
+    from app.sync import run_monitor, restart_monitor
+    from app.torrentremover import TorrentRemover
+    from app.speedlimiter import SpeedLimiter
+    from check_config import update_config, check_config
+    from version import APP_VERSION
 
 
 def sigal_handler(num, stack):
@@ -43,6 +44,12 @@ def sigal_handler(num, stack):
     信号处理
     """
     log.warn('捕捉到退出信号：%s，开始退出...' % num)
+    from app.media.recognition.refresh_worker import stop_refresh_service
+    from app.media.recognition.tasks import shutdown_task_services
+    from app.media.recognition.runtime import shutdown_runtime
+    stop_refresh_service()
+    shutdown_task_services()
+    shutdown_runtime()
     if SystemUtils.is_docker():
         # 停止虚拟显示
         DisplayHelper().quit()
@@ -77,8 +84,9 @@ def get_run_config():
 
 
 # 退出事件
-signal.signal(signal.SIGINT, sigal_handler)
-signal.signal(signal.SIGTERM, sigal_handler)
+if multiprocessing.current_process().name == "MainProcess":
+    signal.signal(signal.SIGINT, sigal_handler)
+    signal.signal(signal.SIGTERM, sigal_handler)
 
 
 def init_system():
@@ -114,10 +122,17 @@ def init_system():
     try:
         from app.media.recognition.records import replay_recognition_spool
         replay_recognition_spool()
+        from app.media.recognition.admission import recover_gate
+        from app.media.recognition.tasks import recover_tasks
+        recover_gate()
+        recover_tasks()
     except Exception as e:
         log.error(f"恢复识别记录暂存失败：{e}")
     # 本地缓存布局升级与旧数据导入必须在定时任务和后台服务启动前完成。
     try:
+        # Cache format initialization needs exclusive maintenance ownership;
+        # release startup-only ORM read transactions before requesting it.
+        close_db()
         from app.utils.cache_backend import STORE
         STORE.initialize()
         from app.utils.cache_migration import verify_cache_startup
@@ -134,10 +149,16 @@ def init_system():
     # Startup runs on the long-lived main thread. Do not carry its read
     # transaction into the schedulers or web server after initialization.
     close_db()
+    from app.media.recognition.runtime import get_runtime
+    runtime = get_runtime()
+    for name in ("parser", "tmdb"):
+        runtime.pools[name].prewarm()
 
 
 def start_service():
     log.console("开始启动服务...")
+    from app.media.recognition.tasks import get_task_service
+    get_task_service()
     # 启动虚拟显示
     DisplayHelper()
     # 启动定时服务
@@ -211,14 +232,11 @@ def monitor_config():
     _observer.start()
 
 
-# 系统初始化
-init_system()
-
-# 启动服务
-start_service()
-
-# 监听配置文件变化
-monitor_config()
+# Spawn workers import this entry point without starting schedulers/services.
+if multiprocessing.current_process().name == "MainProcess":
+    init_system()
+    start_service()
+    monitor_config()
 
 # 本地运行
 if __name__ == '__main__':

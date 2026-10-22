@@ -2,6 +2,7 @@ import os
 import shutil
 import sys
 import tempfile
+import json
 from copy import deepcopy
 from threading import Lock, RLock
 import ruamel.yaml
@@ -163,6 +164,18 @@ class Config(object):
             database["username_set"] = bool(database.get("username"))
             database["password"] = ""
             database["username"] = ""
+        providers = (config.get("recognition") or {}).get("providers") or {}
+        if isinstance(providers, dict):
+            from app.media.recognition.trace import redact
+            for name, options in list(providers.items()):
+                if isinstance(options, dict):
+                    sanitized = redact(json.loads(json.dumps(options)))
+                    for field in ("api_key", "authorization", "password", "token", "secret"):
+                        sanitized.pop(field, None)
+                    if name == "openai":
+                        from app.media.recognition.secrets import SecretManager
+                        sanitized.update(SecretManager().metadata())
+                    providers[name] = sanitized
         return config
 
     def save_config(self, new_cfg):

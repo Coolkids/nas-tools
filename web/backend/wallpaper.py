@@ -12,17 +12,24 @@ def get_login_wallpaper(today=datetime.datetime.strftime(datetime.datetime.now()
     """
     获取Base64编码的壁纸图片
     """
-    wallpaper = Config().get_config('app').get('wallpaper')
-    tmdbkey = Config().get_config('app').get('rmt_tmdbkey')
-    if (not wallpaper or wallpaper == "themoviedb") and tmdbkey:
-        img_url = __get_themoviedb_wallpaper(today)
-    else:
-        img_url = __get_bing_wallpaper(today)
-    if img_url:
-        res = RequestUtils().get_res(img_url)
-        if res and res.status_code == 200:
-            return base64.b64encode(res.content).decode()
-    return ""
+    try:
+        app_config = Config().get_config('app') or {}
+        wallpaper = app_config.get('wallpaper')
+        tmdbkey = app_config.get('rmt_tmdbkey')
+        if (not wallpaper or wallpaper == "themoviedb") and tmdbkey:
+            img_url = __get_themoviedb_wallpaper(today)
+        else:
+            img_url = __get_bing_wallpaper(today)
+        if img_url:
+            res = RequestUtils().get_res(img_url)
+            if res and res.status_code == 200:
+                return base64.b64encode(res.content).decode()
+    except Exception as err:
+        ExceptionUtils.exception_traceback(err)
+        # A transient network/configuration failure must not be persisted as a
+        # successful empty wallpaper; the next request can retry the source.
+        return None
+    return None
 
 
 def __get_themoviedb_wallpaper(today):

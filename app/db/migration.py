@@ -1259,7 +1259,7 @@ def _calibrate_sequences(engine):
 def _verify_probe(engine):
     with engine.begin() as connection:
         connection.execute(text("SELECT 1")).scalar_one()
-        for table_name in ("CONFIG_USERS", "SYSTEM_DICT", "RECOGNITION_REQUEST",
+        for table_name in ("CONFIG_USERS", "SYSTEM_DICT", "RECOGNITION_TRACE",
                            "MEDIASYNC_ITEMS", "MEDIASYNC_STATISTICS"):
             table = Base.metadata.tables[table_name]
             connection.execute(select(func.count()).select_from(table)).scalar_one()

@@ -3,36 +3,47 @@ import os.path
 import sys
 import time
 import unicodedata
+from dataclasses import asdict
 import regex as re
 
 import log
 from app.helper import WordsHelper
 from app.media.meta.metaanime import MetaAnime
 from app.media.meta.metavideo import MetaVideo
-from app.media.recognition import RecognitionRequest, registry
-from app.media.recognition.records import current_recorder, recognition_scope, recognition_config
-from app.media.recognition.service import recognition_service
-from app.media.recognition.settings import (
-    profile_allows_provider, profile_network_allowed, profile_tmdb_allowed,
-    provider_disabled_reason, provider_enabled, provider_endpoint,
-    provider_requires_network,
+from app.media.recognition.records import (
+    current_recorder, recognition_scope, recognition_config,
+    initialize_recognition_budget, recognition_remaining_seconds,
 )
+from app.media.recognition.settings import profile_network_allowed
 from app.utils.types import MediaType
+from app.media.recognition.preprocessor import preprocess_with_details, snapshot_rules
 from config import RMT_MEDIAEXT
 
 
 def prepare_media_title(title, subtitle=None):
     """统一应用自定义识别词，供本地解析和外部解析器共用。"""
-    title, msg, used_info = WordsHelper().process(title)
-    if subtitle:
-        subtitle, subtitle_msg, subtitle_used_info = WordsHelper().process(subtitle)
-        msg.extend(subtitle_msg)
-        for key in ("ignored", "replaced", "offset"):
-            used_info.setdefault(key, []).extend(subtitle_used_info.get(key, []))
+    if title is None:
+        return title, subtitle, {"ignored": [], "replaced": [], "offset": []}
+    rules = snapshot_rules(WordsHelper())
+    from app.media.recognition.runtime import supervised_enabled, get_runtime, WorkItem
+    if supervised_enabled():
+        from app.media.recognition.records import recognition_stage
+        with recognition_stage("preprocess"):
+            remaining = recognition_remaining_seconds()
+            outcome = get_runtime().submit("parser", WorkItem("preprocess", {
+                "title": title, "secondary_title": subtitle, "rules": asdict(rules)["groups"],
+                "normalize": False}),
+                deadline=time.monotonic()+remaining if remaining is not None else None,
+                cancellation=current_recorder().cancellation).result()
+            if outcome.status != "success":
+                raise TimeoutError(outcome.reason)
+            prepared, used_info, msg = outcome.value
+    else:
+        prepared, used_info, msg = preprocess_with_details(title, subtitle, rules=rules, normalize=False)
     if msg:
         for msg_item in msg:
             log.warn("【Meta】%s" % msg_item)
-    return title, subtitle, used_info
+    return prepared.clean_title, prepared.clean_secondary_title, used_info
 
 
 def _parse_meta_info(title, subtitle=None, mtype=None, apply_custom_words=True):
@@ -151,7 +162,7 @@ def MetaInfo(title, subtitle=None, mtype=None, apply_custom_words=True,
                                     pre_parsed=pre_parsed)
         if result is not None:
             result.recognition_request_id = recorder.request_id
-        selected_provider = recorder.context.get("selected_provider", "local_rules")
+        selected_provider = recorder.context.get("selected_provider", "anitopy")
         parse_conflict = recorder.context.get("decision_reason") == "parse_conflict"
         recorder.set_overall(
             status="success" if result and result.get_name() and not parse_conflict else "failed",
@@ -161,26 +172,6 @@ def MetaInfo(title, subtitle=None, mtype=None, apply_custom_words=True,
             selected_provider=selected_provider,
         )
         return result
-
-
-def _enabled(provider_id, settings):
-    if provider_id == "local_rules":
-        return True
-    provider = ((settings.get("providers") or {}).get(provider_id) or {})
-    if provider_id == "anitopy_ml":
-        return provider_enabled(provider_id, settings, recognition_config("laboratory"))
-    return bool(provider.get("enabled", False))
-
-
-def _provider_options(provider_id, provider_class, settings):
-    provider_settings = ((settings.get("providers") or {}).get(provider_id) or {})
-    provider_values = {**provider_settings, **(provider_settings.get("options") or {})}
-    schema = provider_class.descriptor.config_schema or {}
-    options = {key: provider_values[key] for key in schema if key in provider_values}
-    if provider_id == "anitopy_ml":
-        options.setdefault("endpoint", provider_endpoint(
-            provider_id, settings, recognition_config("laboratory")))
-    return options, provider_settings
 
 
 def _merge_parse_results(results):
@@ -193,11 +184,11 @@ def _merge_parse_results(results):
     if not candidates:
         # 保留只有季集或资源字段的局部解析对象；整体结果仍会标记为无名称失败。
         partial = next(((provider_id, result) for provider_id, result in results
-                        if result is not None), ("local_rules", None))
+                        if result is not None), ("anitopy", None))
         return partial[1], partial[0]
     selected_provider, selected = next(
         ((provider_id, result) for provider_id, result in candidates
-         if provider_id == "local_rules"), candidates[0])
+         if provider_id == "anitopy"), candidates[0])
     conflicts = []
     for provider_id, candidate in candidates:
         if candidate is selected:
@@ -266,175 +257,6 @@ def _merge_parse_results(results):
     return selected, selected_provider
 
 
-def _record_meta_parse(recorder, title, subtitle, mtype, apply_custom_words,
-                       include_ai=True, ai_skip_reason=None, pre_parsed=None):
-    if recorder is not None and recorder.deadline_monotonic is None:
-        execution = (recognition_config("recognition") or {}).get("execution") or {}
-        try:
-            timeout_seconds = max(float(execution.get("total_timeout_seconds", 30)), 0.001)
-        except (TypeError, ValueError):
-            timeout_seconds = 30
-        recorder.deadline_monotonic = time.monotonic() + timeout_seconds
-    original_title, original_subtitle = title, subtitle
-    if pre_parsed is not None:
-        title = getattr(pre_parsed, "_recognition_processed_title", title)
-        subtitle = getattr(pre_parsed, "_recognition_processed_subtitle", subtitle)
-        used_info = getattr(pre_parsed, "_recognition_used_info", {}) or {}
-    elif apply_custom_words:
-        title, subtitle, used_info = prepare_media_title(title, subtitle)
-    else:
-        used_info = {"ignored": [], "replaced": [], "offset": []}
-    if recorder is not None and (apply_custom_words or title != original_title
-                                 or subtitle != original_subtitle):
-        recorder.action("preprocess", input={"title": original_title, "subtitle": original_subtitle},
-                        output={"title": title, "subtitle": subtitle, "rules": used_info})
-
-    settings = recognition_config("recognition") or {}
-    stage = recorder.stage if recorder is not None else "parse_only"
-    resolve_parse_only = stage == "resolve" and not profile_tmdb_allowed(stage, settings)
-    request_context = {"mtype": mtype, "apply_custom_words": False}
-    local_allowed = profile_allows_provider(stage, "local_rules", settings)
-    provider = (None if pre_parsed is not None or not local_allowed
-                else registry.create("local_rules"))
-    if not local_allowed:
-        local_meta = None
-        if recorder is not None:
-            recorder.add_provider_result("local_rules", "skipped", input={"title": title},
-                                         error="provider_excluded_by_profile")
-    elif pre_parsed is not None:
-        local_meta = copy.copy(pre_parsed)
-        if recorder is not None:
-            recorder.add_provider_result(
-                "local_rules", "success" if local_meta.get_name() else "no_result",
-                input={"title": title, "subtitle": subtitle,
-                       "mtype": getattr(mtype, "value", mtype)},
-                normalized_result=_meta_snapshot(local_meta))
-    elif provider is None:
-        local_meta = _parse_meta_info(title, subtitle, mtype, apply_custom_words=False)
-        if recorder is not None:
-            recorder.add_provider_result("local_rules", "success" if local_meta else "no_result",
-                                         input={"title": title, "subtitle": subtitle},
-                                         normalized_result=_meta_snapshot(local_meta))
-    else:
-        try:
-            local_result = provider.parse(RecognitionRequest(
-                title=title, subtitle=subtitle, context=request_context))
-            local_meta = local_result.parsed
-            if local_meta is None and local_result.status == "error":
-                local_meta = _parse_meta_info(title, subtitle, mtype, apply_custom_words=False)
-            if recorder is not None:
-                recorder.add_provider_result(
-                    local_result.provider_id, local_result.status,
-                    input={"title": title, "subtitle": subtitle,
-                           "mtype": getattr(mtype, "value", mtype)},
-                    raw_result=local_result.raw_result,
-                    normalized_result=_meta_snapshot(local_meta),
-                    elapsed_ms=local_result.elapsed_ms, error=local_result.error)
-        finally:
-            registry.release(provider)
-    if local_meta:
-        local_meta.ignored_words = used_info.get("ignored", [])
-        local_meta.replaced_words = used_info.get("replaced", [])
-        local_meta.offset_words = used_info.get("offset", [])
-
-    candidates = [("local_rules", local_meta)]
-    ai_allowed = include_ai and (stage == "parse_only" or resolve_parse_only)
-    for provider_id, provider_class in sorted(registry.discover().items()):
-        if provider_id == "local_rules":
-            continue
-        # Media.resolve owns all non-local attempts for its enclosing request.
-        if stage == "resolve" and not resolve_parse_only:
-            continue
-        if not profile_allows_provider(stage, provider_id, settings):
-            if recorder is not None:
-                recorder.add_provider_result(provider_id, "skipped",
-                                             input={"title": title},
-                                             error="provider_excluded_by_profile")
-            continue
-        if provider_requires_network(provider_class) and not profile_network_allowed(
-                stage, settings):
-            if recorder is not None:
-                recorder.add_provider_result(provider_id, "skipped",
-                                             input={"title": title},
-                                             error="network_disallowed_by_profile")
-            continue
-        if not _enabled(provider_id, settings):
-            if recorder is not None:
-                laboratory = recognition_config("laboratory") or {}
-                if provider_id == "anitopy_ml" and not provider_enabled(
-                        provider_id, settings, laboratory):
-                    reason = provider_disabled_reason(provider_id, settings, laboratory)
-                elif provider_id == "anitopy_ml" and not provider_endpoint(
-                        provider_id, settings, laboratory):
-                    reason = "ai_inference_endpoint_missing"
-                else:
-                    reason = "provider_disabled"
-                recorder.add_provider_result(provider_id, "skipped",
-                                             input={"title": title}, error=reason)
-            continue
-        if not title:
-            if recorder is not None:
-                recorder.add_provider_result(provider_id, "skipped", input={"title": title},
-                                             error="empty_title")
-            continue
-        if provider_id == "anitopy_ml" and not ai_allowed:
-            if recorder is not None:
-                recorder.add_provider_result(
-                    provider_id, "skipped", input={"title": title},
-                    error=ai_skip_reason or ("ai_deferred_to_resolve" if recorder.stage == "resolve"
-                                             else "ai_deferred_by_caller"))
-            continue
-        if not include_ai and provider_id != "anitopy_ml":
-            if recorder is not None:
-                recorder.add_provider_result(provider_id, "skipped", input={"title": title},
-                                             error=ai_skip_reason or "provider_deferred_by_caller")
-            continue
-
-        options, provider_settings = _provider_options(provider_id, provider_class, settings)
-        timeout = None
-        if recorder is not None and recorder.deadline_monotonic is not None:
-            timeout = max(recorder.deadline_monotonic - time.monotonic(), 0.001)
-        request_context = {"mtype": getattr(mtype, "value", mtype)}
-        if recorder is not None and recorder.deadline_monotonic is not None:
-            request_context.update({"deadline_monotonic": recorder.deadline_monotonic,
-                                    "remaining_timeout_seconds": timeout})
-        result = recognition_service.run_provider(
-            provider_id,
-            RecognitionRequest(title=title, subtitle=subtitle,
-                               context=request_context),
-            options=options,
-            cache_payload=({"title": title,
-                            "model_revision": provider_settings.get(
-                                "model_revision", (provider_settings.get("options") or {}).get(
-                                    "model_revision", "unknown"))}
-                           if provider_id == "anitopy_ml" else None),
-            timeout=timeout,
-        )
-        if result.status != "success":
-            continue
-        if provider_id == "anitopy_ml":
-            from app.media.recognition.adapters import meta_from_anitopy_result
-            provider_meta = meta_from_anitopy_result(title, result.parsed, subtitle, used_info)
-        else:
-            from app.media.recognition.adapters import meta_from_standard_result
-            provider_meta = meta_from_standard_result(title, result.parsed, subtitle, used_info)
-        if provider_meta:
-            if mtype:
-                provider_meta.type = mtype
-            candidates.append((provider_id, provider_meta))
-
-    selected, selected_provider = _merge_parse_results(candidates)
-    if recorder is not None:
-        recorder.context["selected_provider"] = selected_provider
-    if selected is not None:
-        selected._recognition_original_title = original_title
-        selected._recognition_original_subtitle = original_subtitle
-        selected._recognition_processed_title = title
-        selected._recognition_processed_subtitle = subtitle
-        selected._recognition_used_info = used_info
-    return selected
-
-
 def is_anime(name):
     """
     判断是否为动漫
@@ -453,3 +275,71 @@ def is_anime(name):
     if re.search(r'\[[+0-9XVPI-]+]\s*\[', name, re.IGNORECASE):
         return True
     return False
+
+
+def _record_meta_parse(recorder, title, subtitle, mtype, apply_custom_words,
+                       include_ai=True, ai_skip_reason=None, pre_parsed=None):
+    """Keep cheap local probes; all enabled external engines use the shared pool."""
+    from app.media.recognition.coordinator import effective_settings
+    from app.media.recognition.budget import RecognitionBudget
+    from app.media.recognition.parser_manager import ParserManager
+    from app.media.recognition.adapters import meta_from_normalized
+    from app.media.recognition.preprocessor import RuleSnapshot
+
+    settings = effective_settings(recognition_config())
+    initialize_recognition_budget(recorder, settings["recognition"])
+    original_title, original_subtitle = title, subtitle
+    reused = pre_parsed is not None and getattr(pre_parsed, "_recognition_original_title", None) == title
+    if reused:
+        local_meta = copy.copy(pre_parsed)
+        title = getattr(pre_parsed, "_recognition_processed_title", title)
+        subtitle = getattr(pre_parsed, "_recognition_processed_subtitle", subtitle)
+        used_info = getattr(pre_parsed, "_recognition_used_info", {}) or {}
+    else:
+        if apply_custom_words:
+            title, subtitle, used_info = prepare_media_title(title, subtitle)
+        else:
+            used_info = {"ignored": [], "replaced": [], "offset": []}
+        local_meta = _parse_meta_info(title, subtitle, mtype, apply_custom_words=False)
+    candidates = [("anitopy", local_meta)]
+    if include_ai:
+        # The title has already had custom rules applied, so this snapshot must
+        # not apply them again inside any parser.
+        prepared, _, _ = preprocess_with_details(title or "", subtitle, rules=RuleSnapshot())
+        budget = recorder.budget if recorder is not None else RecognitionBudget(settings["recognition"]["timeouts"]["total_ms"])
+        def emit(event, provider_id=None, status=None, **payload):
+            if recorder is not None:
+                recorder.action(event, provider_id=provider_id, status=status, output=payload)
+        batch = ParserManager(settings, budget=budget, emit=emit).run(prepared,
+            network_allowed=profile_network_allowed("parse_only", settings["recognition"]))
+        if recorder is not None:
+            from app.media.recognition.llm_usage import combine_usage
+            recorder.context["llm_usage"] = combine_usage(parsed.llm["usage"] for parsed in batch.results if parsed.llm)
+        for parsed in batch.results:
+            if recorder is not None:
+                recorder.add_provider_result(parsed.provider_id, parsed.status,
+                    normalized_result=asdict(parsed), error=parsed.error, elapsed_ms=parsed.duration_ms)
+            if parsed.status == "success" and parsed.title:
+                meta = meta_from_normalized(prepared, parsed)
+                if parsed.provider_id == "anitopy":
+                    # Preserve technical fields used by file transfer and filters.
+                    for field in ("resource_type", "resource_pix", "resource_effect", "resource_team", "video_encode", "audio_encode", "part"):
+                        setattr(meta, field, getattr(local_meta, field, None))
+                    candidates[0] = ("anitopy", meta)
+                else:
+                    candidates.append((parsed.provider_id, meta))
+    elif recorder is not None:
+        recorder.add_provider_result("anitopy", "success" if local_meta.get_name() else "no_result",
+                                     normalized_result=_meta_snapshot(local_meta))
+        for provider in ("anitopy_ml", "openai"):
+            recorder.add_provider_result(provider, "skipped", error=ai_skip_reason or "local_parse_only")
+    selected, selected_provider = _merge_parse_results(candidates)
+    if recorder is not None:
+        recorder.context["selected_provider"] = selected_provider
+    if selected is not None:
+        selected._recognition_original_title = original_title
+        selected._recognition_original_subtitle = original_subtitle
+        selected._recognition_processed_title = title
+        selected._recognition_processed_subtitle = subtitle
+        selected._recognition_used_info = used_info
+    return selected

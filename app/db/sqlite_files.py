@@ -217,11 +217,11 @@ def _upgrade_snapshot(path, config_path, target_revision="head"):
         source.close()
     engine = create_engine(URL.create("sqlite", database=path), connect_args={"timeout": 30})
     try:
-        with engine.connect() as connection:
-            alembic_cfg = AlembicConfig()
-            alembic_cfg.set_main_option("script_location", script_location)
-            alembic_cfg.attributes["connection"] = connection
-            command.upgrade(alembic_cfg, target_revision)
+        from app.db.recognition_upgrade import upgrade_engine
+        # This file is already an isolated snapshot. Keep its own pre-upgrade
+        # proof beside it; never rotate the active database's generation here.
+        upgrade_engine(engine, os.path.dirname(path), {"type": "sqlite"},
+                       target=target_revision, active=False)
         source = _connect(path, read_only=True)
         try:
             versions = [row[0] for row in source.execute(
@@ -438,7 +438,8 @@ def _copy_domain(connection, source_path, domain, expected_tables, excluded_tabl
             names = ", ".join(sorted(name for _kind, name in unsupported_objects))
             raise RuntimeError(f"旧{domain}数据库包含无法迁移的视图或触发器：{names}")
         source_tables = _table_names(connection, alias)
-        unknown = source_tables - expected_tables - _RETIRED_TABLES - _VERSION_TABLES
+        from db_scripts.recognition_legacy import TABLES as retired_recognition
+        unknown = source_tables - expected_tables - _RETIRED_TABLES - _VERSION_TABLES - set(retired_recognition)
         if unknown:
             raise RuntimeError(f"旧{domain}数据库包含未识别表：{', '.join(sorted(unknown))}")
         wrong_domain = (source_tables & MEDIA_TABLES if domain == "main"
@@ -485,45 +486,6 @@ def _copy_domain(connection, source_path, domain, expected_tables, excluded_tabl
     finally:
         if attached_sources is None:
             _execute(connection, f"DETACH DATABASE {_quote(alias)}")
-
-
-def _backfill_recognition_search(connection):
-    """合并旧主库后回填识别筛选索引字段。"""
-    if "RECOGNITION_REQUEST" not in _table_names(connection):
-        return
-    from app.db.models import portable_key_digest, recognition_search_projection
-
-    last_request_id = None
-    while True:
-        statement = "SELECT REQUEST_ID, OVERALL_RESULT, ACTIONS FROM RECOGNITION_REQUEST"
-        parameters = ()
-        if last_request_id is not None:
-            statement += " WHERE REQUEST_ID > ?"
-            parameters = (last_request_id,)
-        statement += " ORDER BY REQUEST_ID LIMIT 500"
-        rows = _execute(connection, statement, parameters).fetchall()
-        if not rows:
-            break
-        for request_id, overall_result, actions in rows:
-            projection = recognition_search_projection(overall_result, actions)
-            _execute(connection, """UPDATE RECOGNITION_REQUEST SET
-                STATUS_SUMMARY=?, BUSINESS_STATUS_SUMMARY=?, REASON_SUMMARY=?, REASON_HASH=?,
-                BUSINESS_REASON_SUMMARY=?, BUSINESS_REASON_HASH=? WHERE REQUEST_ID=?""",
-                      (projection["STATUS_SUMMARY"], projection["BUSINESS_STATUS_SUMMARY"],
-                       projection["REASON_SUMMARY"], projection["REASON_HASH"],
-                       projection["BUSINESS_REASON_SUMMARY"],
-                       projection["BUSINESS_REASON_HASH"], request_id))
-            for action_type in projection["ACTION_TYPES"]:
-                action_id = portable_key_digest((request_id, action_type))
-                action_hash = portable_key_digest((action_type,))
-                existing = _execute(connection, """SELECT REQUEST_ID, ACTION_TYPE
-                    FROM RECOGNITION_REQUEST_ACTION WHERE ID=?""", (action_id,)).fetchone()
-                if existing and existing != (request_id, action_type):
-                    raise RuntimeError("识别动作摘要冲突，拒绝覆盖不同记录")
-                _execute(connection, """INSERT OR IGNORE INTO RECOGNITION_REQUEST_ACTION
-                    (ID, REQUEST_ID, ACTION_TYPE, ACTION_HASH) VALUES (?, ?, ?, ?)""",
-                          (action_id, request_id, action_type, action_hash))
-        last_request_id = rows[-1][0]
 
 
 def _write_completion(connection, job_id, sources):
@@ -696,7 +658,6 @@ def _prepare_sqlite_database():
                                          excluded_tables={"MEDIASYNC_SYNC_JOBS"},
                                          attached_sources=attached_sources)
                         cleanup_legacy_startup_data(connection)
-                        _backfill_recognition_search(connection)
                         head = current_schema_revision()
                         connection.exec_driver_sql(
                             "CREATE TABLE IF NOT EXISTS alembic_version "

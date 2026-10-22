@@ -7,7 +7,6 @@ from .main_db import DbPersist
 from .main_db import get_db_metrics
 from .media_db import MediaDb
 from alembic.config import Config as AlembicConfig
-from alembic.command import upgrade as alembic_upgrade
 
 
 def close_db():
@@ -45,14 +44,24 @@ def init_data():
 
 
 def update_db():
+    from app.utils.storage_jobs import STORAGE_JOBS
+    with STORAGE_JOBS.maintenance_lock(exclusive=True):
+        return _update_db()
+
+
+def _update_db():
     """升级活动数据库；旧 SQLite revision 只在 SQLite 后端执行。"""
     script_location = os.path.join(Config().get_root_path(), 'db_scripts')
     log.console('开始更新数据库...')
     engine = DATABASE.engine
+    if os.path.exists(os.path.join(Config().get_config_path(), '.maintenance',
+                                   'recognition-upgrade-gate.json')):
+        from sqlalchemy import inspect
+        if "alembic_version" not in inspect(engine).get_table_names():
+            raise RuntimeError("升级维护门禁存在但数据库版本丢失，拒绝初始化空库")
     alembic_cfg = AlembicConfig()
     alembic_cfg.set_main_option('script_location', script_location)
     if DATABASE.backend.name == "sqlite":
-        from alembic import command
         from alembic.script import ScriptDirectory
         from sqlalchemy import inspect, text
         from app.db.models import Base
@@ -77,9 +86,8 @@ def update_db():
         elif "alembic_version" not in tables:
             raise RuntimeError("现有 SQLite 数据库缺少结构版本，拒绝跳过升级")
         else:
-            with engine.connect() as connection:
-                alembic_cfg.attributes["connection"] = connection
-                alembic_upgrade(alembic_cfg, 'head')
+            from app.db.recognition_upgrade import upgrade_engine
+            upgrade_engine(engine, Config().get_config_path(), DATABASE._settings)
     else:
         # 历史 revision 含 SQLite 专用 SQL。新的远程空库直接按统一 metadata
         # 建立完整基线；已有远程结构必须由后续版本化迁移明确升级。
@@ -91,18 +99,8 @@ def update_db():
         inspector = inspect(engine)
         tables = set(inspector.get_table_names())
         if "alembic_version" in tables:
-            with engine.connect() as connection:
-                versions = [row[0] for row in connection.execute(
-                    text("SELECT version_num FROM alembic_version"))]
-            if versions != [head]:
-                scripts = ScriptDirectory.from_config(alembic_cfg)
-                head_revision = scripts.get_revision(head)
-                if (head_revision is None or not isinstance(head_revision.down_revision, str)
-                        or versions != [head_revision.down_revision]):
-                    raise RuntimeError("远程数据库结构版本不受支持，需先执行受控升级")
-                with engine.connect() as connection:
-                    alembic_cfg.attributes["connection"] = connection
-                    alembic_upgrade(alembic_cfg, head)
+            from app.db.recognition_upgrade import upgrade_engine
+            upgrade_engine(engine, Config().get_config_path(), DATABASE._settings)
         elif tables:
             raise RuntimeError("远程数据库不是空库，拒绝覆盖或直接标记结构版本")
         else:
@@ -118,5 +116,9 @@ def update_db():
     missing_tables = required_tables - available_tables
     if missing_tables:
         raise RuntimeError(f"数据库缺少应用表，结构升级未完成：{', '.join(sorted(missing_tables))}")
+    from app.db.recognition_upgrade import generation
+    from app.db.migration import _fingerprint
+    if generation(_fingerprint(DATABASE._settings), Config().get_config_path()) is None:
+        raise RuntimeError("识别 generation 控制文件损坏，拒绝开放业务")
     DATABASE.optimize()
     log.console('数据库更新完成')

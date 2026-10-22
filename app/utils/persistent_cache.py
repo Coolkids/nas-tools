@@ -76,6 +76,12 @@ class PersistentCache:
             record = self.store.get(self.name, key)
             return (record[1], record[2]) if record is not None else (None, None)
 
+    def get_envelope(self, key, *, hit=True, allow_stale=False):
+        return self.store.envelope_get(self.name, key, hit=hit, allow_stale=allow_stale)
+
+    def compare_and_set_envelope(self, key, value, expected, **lease):
+        return self.store.envelope_put(self.name, key, value, expected=expected, **lease)
+
     def set_with_expiration(self, key, value, expires):
         """按绝对过期时间写入，不因格式迁移重新授予 TTL。"""
         with self._lock:

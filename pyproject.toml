@@ -76,3 +76,10 @@ anitopy = { path = "third_party/anitopy" }
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+markers = [
+    "recognition_v3: media recognition V3 acceptance contract",
+    "v3_integration: requires isolated real storage or HTTP services",
+    "v3_migration: destructive migration checks against owned test databases",
+    "v3_process: supervised worker and cancellation integration checks",
+    "v3_load: opt-in recognition accuracy and resource measurements",
+]

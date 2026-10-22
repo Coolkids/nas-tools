@@ -10,14 +10,17 @@ import time
 import uuid
 import requests.exceptions
 from functools import wraps
+from contextlib import contextmanager
 from enum import Enum
 from threading import Condition, Lock
 from app.media.recognition.settings import (
     provider_enabled, profile_tmdb_allowed, recognition_record_mode,
 )
+from app.media.recognition.budget import CancellationToken, RecognitionBudget, total_timeout_ms
 
 
 _current = contextvars.ContextVar("media_recognition_recorder", default=None)
+_stage_budget = contextvars.ContextVar("media_recognition_stage_budget", default=None)
 _spool_lock = Lock()
 _active_spool_paths = set()
 _recognition_condition = Condition()
@@ -33,11 +36,31 @@ def quiesce_recognition(timeout=120):
         if _recognition_paused:
             raise RuntimeError("识别请求已处于维护暂停状态")
         _recognition_paused = True
+    # Do not hold the condition while joining workers: finishing recognition
+    # needs the same condition to release its maintenance lease.
+    from app.media.recognition.runtime import shutdown_runtime
+    tasks_quiesced = False
+    try:
+        from app.media.recognition.tasks import quiesce_tasks
+        quiesce_tasks(timeout=max(0, deadline-time.monotonic()))
+        tasks_quiesced = True
+        shutdown_runtime()
+    except BaseException:
+        if tasks_quiesced:
+            from app.media.recognition.tasks import resume_tasks
+            resume_tasks()
+        with _recognition_condition:
+            _recognition_paused = False
+            _recognition_condition.notify_all()
+        raise
+    with _recognition_condition:
         while _active_recognitions:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 _recognition_paused = False
                 _recognition_condition.notify_all()
+                from app.media.recognition.tasks import resume_tasks
+                resume_tasks()
                 raise TimeoutError("等待在途识别请求结束超时，数据库维护已中止")
             _recognition_condition.wait(remaining)
 
@@ -45,9 +68,47 @@ def quiesce_recognition(timeout=120):
 def resume_recognition():
     """解除数据库维护期间的识别请求暂停。"""
     global _recognition_paused
+    from app.media.recognition.tasks import resume_tasks
+    resume_tasks()
     with _recognition_condition:
         _recognition_paused = False
         _recognition_condition.notify_all()
+
+
+@contextmanager
+def v3_recognition_lease(budget):
+    """Maintenance admission with the request budget, including unlimited waits."""
+    from app.utils.storage_jobs import STORAGE_JOBS
+    from app.media.recognition.admission import gate
+    global _active_recognitions
+    lock = None
+    while lock is None:
+        budget.check()
+        with _recognition_condition:
+            if _recognition_paused or gate():
+                _recognition_condition.wait(.05)
+                continue
+        candidate = STORAGE_JOBS.maintenance_lock(exclusive=False, timeout=.1)
+        try:
+            candidate.__enter__()
+        except TimeoutError:
+            continue
+        with _recognition_condition:
+            if _recognition_paused or gate() or STORAGE_JOBS.maintenance_gate("database"):
+                candidate.__exit__(None, None, None)
+            else:
+                lock = candidate
+                _active_recognitions += 1
+        if lock is None:
+            time.sleep(.02)
+    try:
+        budget.check()
+        yield
+    finally:
+        lock.__exit__(None, None, None)
+        with _recognition_condition:
+            _active_recognitions -= 1
+            _recognition_condition.notify_all()
 
 
 def _recognition_generation():
@@ -59,7 +120,9 @@ def _recognition_generation():
             from app.db.migration import _current_settings
             settings = _current_settings()
         from app.db.migration import _fingerprint
-        return _fingerprint(settings)
+        from app.db.recognition_upgrade import generation
+        from config import Config
+        return generation(_fingerprint(settings), Config().get_config_path())
     except Exception:
         return None
 
@@ -83,11 +146,12 @@ def _retire_mismatched_spool(path, generation):
 def _acquire_recognition_lease(timeout=120):
     """Hold a shared cross-process maintenance lease for the full request."""
     from app.utils.storage_jobs import STORAGE_JOBS
+    from app.media.recognition.admission import gate
 
     deadline = time.monotonic() + timeout
     while True:
         with _recognition_condition:
-            while _recognition_paused:
+            while _recognition_paused or gate():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError("数据库维护期间等待识别请求恢复超时")
@@ -102,7 +166,7 @@ def _acquire_recognition_lease(timeout=120):
 
         with _recognition_condition:
             paused = _recognition_paused
-        if paused or STORAGE_JOBS.maintenance_gate("database"):
+        if paused or gate() or STORAGE_JOBS.maintenance_gate("database"):
             lock.__exit__(None, None, None)
             if time.monotonic() >= deadline:
                 raise TimeoutError("数据库维护期间等待识别请求恢复超时")
@@ -113,128 +177,36 @@ def _acquire_recognition_lease(timeout=120):
 
 def _spool_directory():
     from config import Config
-    return os.path.join(Config().get_config_path(), "recognition_spool")
+    return os.path.join(Config().get_config_path(), "recognition_v3_spool")
 
 
 def _write_spool(payload):
-    directory = _spool_directory()
-    os.makedirs(directory, mode=0o700, exist_ok=True)
-    final_path = os.path.join(directory, f"{payload['request_id']}.json")
-    temporary_path = final_path + f".{os.getpid()}.{uuid.uuid4().hex}.tmp"
-    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    with open(temporary_path, "x", encoding="utf-8") as spool_file:
-        spool_file.write(encoded)
-        spool_file.flush()
-        os.fsync(spool_file.fileno())
-    os.replace(temporary_path, final_path)
-    try:
-        directory_fd = os.open(directory, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    except OSError:
-        pass
-    return final_path
+    from app.media.recognition.compatibility import bundle
+    from app.media.recognition.trace import write_spool
+    return str(write_spool(bundle(payload)))
 
 
 def replay_recognition_spool():
-    """数据库恢复可写后，回放已暂存的识别记录。"""
-    with _spool_lock:
-        try:
-            directory = _spool_directory()
-            paths = [os.path.join(directory, name) for name in os.listdir(directory)
-                     if name.endswith(".json") and os.path.join(directory, name)
-                     not in _active_spool_paths]
-        except FileNotFoundError:
-            return {"replayed": 0, "pending": 0, "invalid": 0}
-        except Exception as error:
-            try:
-                import log
-                log.error(f"【Recognition】读取识别暂存目录失败：{error}")
-            except Exception:
-                pass
-            return {"replayed": 0, "pending": 0, "invalid": 0}
-
-        replayed = 0
-        invalid = 0
-        retired = 0
-        active_generation = _recognition_generation()
-        for path in sorted(paths):
-            try:
-                with open(path, "r", encoding="utf-8") as spool_file:
-                    payload = json.load(spool_file)
-                if not isinstance(payload, dict) or not payload.get("request_id"):
-                    invalid += 1
-                    import log
-                    log.error(f"【Recognition】识别暂存记录格式无效，保留文件供排查：{path}")
-                    continue
-                spool_generation = payload.get("database_generation")
-                if (spool_generation and active_generation
-                        and spool_generation != active_generation):
-                    _retire_mismatched_spool(path, spool_generation)
-                    retired += 1
-                    continue
-                overall = payload.get("overall_result")
-                actions = payload.get("actions")
-                if not isinstance(overall, dict) or not isinstance(actions, list):
-                    invalid += 1
-                    import log
-                    log.error(f"【Recognition】识别暂存记录结构无效，保留文件供排查：{path}")
-                    continue
-                if overall.get("lifecycle") == "running" or overall.get("status") == "running":
-                    overall.update({
-                        "status": "failed",
-                        "reason": "process_interrupted",
-                        "lifecycle": "interrupted",
-                    })
-                    sequence = max((int(action.get("sequence", 0)) for action in actions
-                                    if isinstance(action, dict)), default=0) + 1
-                    actions.append({
-                        "action_id": f"{payload['request_id']}:{sequence}",
-                        "sequence": sequence,
-                        "action_type": "request_recovered",
-                        "provider_id": None,
-                        "attempt_id": None,
-                        "status": "interrupted",
-                        "input": {},
-                        "output": {"reason": "process_interrupted"},
-                        "reason": "process_interrupted",
-                        "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
-                    })
-                from app.helper.db_helper import DbHelper
-                if DbHelper().insert_recognition_record(payload):
-                    os.remove(path)
-                    replayed += 1
-            except (json.JSONDecodeError, UnicodeDecodeError) as error:
-                invalid += 1
-                try:
-                    import log
-                    log.error(f"【Recognition】识别暂存记录损坏，保留文件供排查 {os.path.basename(path)}：{error}")
-                except Exception:
-                    pass
-            except Exception as error:
-                try:
-                    import log
-                    log.error(f"【Recognition】回放识别记录失败 {os.path.basename(path)}：{error}")
-                except Exception:
-                    pass
-        pending = len(paths) - replayed - retired
-        if pending:
-            try:
-                import log
-                log.warn(f"【Recognition】识别暂存恢复完成：成功 {replayed} 条，待处理 {pending} 条，无效 {invalid} 条；查看 recognition_spool 目录日志")
-            except Exception:
-                pass
-        return {"replayed": replayed, "pending": pending, "invalid": invalid,
-                "retired": retired}
+    """Recover current-schema history; never import retired legacy spool bodies."""
+    from app.media.recognition.trace import recover_spool
+    result = recover_spool()
+    return {"replayed": result["recovered"], "pending": result["pending"],
+            "invalid": result["invalid"], "retired": result["retired"]}
 
 
 def json_safe(value):
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
     if isinstance(value, Enum):
-        return value.value
+        return json_safe(value.value)
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, str):
+        return str(value)
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        return float(value)
     if isinstance(value, dict):
         return {str(key): json_safe(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set)):
@@ -317,12 +289,24 @@ def recognition_config(section=None):
 
 class RecognitionRecorder:
     def __init__(self, original_name, source="unknown", stage="resolve", context=None):
-        self.request_id = str(uuid.uuid4())
+        self.request_id = uuid.uuid4().hex
         self.original_name = original_name
         self.source = source
         self.stage = stage
         self.context = json_safe(context or {})
+        self.actor_id = "0"
+        from flask import has_request_context
+        if has_request_context():
+            from flask_login import current_user
+            if current_user.is_authenticated:
+                self.actor_id = str(current_user.get_id())
         self.started = time.monotonic()
+        from app.media.recognition.repository import utc_now
+        self.created_at = utc_now()
+        self.started_ns = time.monotonic_ns()
+        self.finished_at = None
+        self._payload_bytes = 0
+        self._actions_truncated = False
         self.actions = []
         self.provider_results = []
         self.tmdb_results = []
@@ -334,11 +318,15 @@ class RecognitionRecorder:
         self._runtime_config = None
         self._record_mode = "failed"
         self.deadline_monotonic = None
+        self._budget_initialized = False
+        self.budget = None
+        self.cancellation = CancellationToken()
         self._tmdb_timeout_count = 0
         self._tmdb_timeout_reason = None
         self._tmdb_failure_events = []
         self._registered = False
         self._maintenance_lock = None
+        self._runtime_foreground = None
 
     def __enter__(self):
         parent = _current.get()
@@ -355,6 +343,21 @@ class RecognitionRecorder:
         self._runtime_config = _runtime_config_snapshot()
         recognition = (self._runtime_config or {}).get("recognition", {})
         self._record_mode = recognition_record_mode(recognition)
+        if recognition:
+            try:
+                initialize_recognition_budget(self, recognition)
+                from app.media.recognition.runtime import get_runtime
+                self._runtime_foreground = get_runtime().foreground(deadline=self.deadline_monotonic, cancellation=self.cancellation)
+                self._runtime_foreground.__enter__()
+            except BaseException:
+                self._runtime_foreground = None
+                self._maintenance_lock.__exit__(None, None, None)
+                self._maintenance_lock = None
+                with _recognition_condition:
+                    _active_recognitions -= 1
+                    self._registered = False
+                    _recognition_condition.notify_all()
+                raise
         config_version, config_snapshot = _recognition_config_snapshot()
         if self._runtime_config is not None:
             recognition_config_value = self._runtime_config.get("recognition", {})
@@ -389,6 +392,8 @@ class RecognitionRecorder:
     def __exit__(self, exc_type, exc_value, traceback):
         if self._delegate is not None:
             return False
+        from app.media.recognition.repository import utc_now
+        self.finished_at = utc_now()
         if exc_type:
             # 保留异常发生前已经收集的解析、TMDB 和决策数据。整体替换结果会丢失
             # 部分完成请求中最有用的证据。
@@ -445,6 +450,9 @@ class RecognitionRecorder:
                     except Exception:
                         pass
         finally:
+            if self._runtime_foreground is not None:
+                self._runtime_foreground.__exit__(None, None, None)
+                self._runtime_foreground = None
             if self._maintenance_lock is not None:
                 self._maintenance_lock.__exit__(None, None, None)
                 self._maintenance_lock = None
@@ -475,6 +483,8 @@ class RecognitionRecorder:
 
     def action(self, action_type, status="success", input=None, output=None,
                provider_id=None, attempt_id=None, reason=None):
+        if self._actions_truncated and action_type != "request_finish":
+            return None
         self._sequence += 1
         action = {
             "action_id": f"{self.request_id}:{self._sequence}",
@@ -489,7 +499,21 @@ class RecognitionRecorder:
         if reason:
             action["reason"] = str(reason)
         action["time"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+        from app.media.recognition.trace import redact
+        action = redact(action)
+        action["offset_ns"] = max(0, time.monotonic_ns()-self.started_ns)
+        size = len(json.dumps(action).encode())
+        if (self._payload_bytes+size > 256*1024 or len(self.actions) >= 510) and action_type != "request_finish":
+            self._actions_truncated = True
+            action.update(action_type="events_truncated", input={}, output={"reason": "legacy_audit_limit"})
+        self._payload_bytes += min(size, 256*1024)
         self.actions.append(action)
+        if self._record_mode == "all" and self.overall_result:
+            try:
+                from app.media.recognition.compatibility import LegacyHistory
+                LegacyHistory().insert(self.as_dict())
+            except Exception:
+                pass  # The bounded current-schema spool remains recoverable.
         # 每完成一个阶段就写入暂存，确保进程意外退出后能保留有效的部分轨迹，
         # 而不只是 request_start 标记。
         if self._spool_path:
@@ -518,7 +542,14 @@ class RecognitionRecorder:
             "elapsed_ms": elapsed_ms,
             "error": str(error) if error else None,
         }
-        self.provider_results.append(item)
+        from app.media.recognition.trace import redact
+        item = redact(item)
+        if len(json.dumps(item).encode()) > 32768:
+            item["raw_result"] = {"truncated": True}
+        size = len(json.dumps(item).encode())
+        if self._payload_bytes+size <= 256*1024 and len(self.provider_results) < 64:
+            self.provider_results.append(item)
+            self._payload_bytes += size
         self.action("provider_parse", status=status, input=item["input"],
                     output={"attempt_id": attempt_id, "result": item["normalized_result"]},
                     provider_id=provider_id, attempt_id=attempt_id, reason=error)
@@ -528,7 +559,12 @@ class RecognitionRecorder:
         status = status or ("success" if result else "no_result")
         item = {"provider_id": provider_id, "query": json_safe(query),
                 "status": status, "result": json_safe(result), "reason": reason}
-        self.tmdb_results.append(item)
+        from app.media.recognition.trace import redact
+        item = redact(item)
+        size = len(json.dumps(item).encode())
+        if self._payload_bytes+size <= 256*1024 and len(self.tmdb_results) < 64:
+            self.tmdb_results.append(item)
+            self._payload_bytes += size
         for attempt in reversed(self.provider_results):
             if attempt.get("provider_id") == provider_id:
                 attempt.setdefault("tmdb_results", []).append(item)
@@ -548,6 +584,8 @@ class RecognitionRecorder:
         }
         if self.stage == "parse_only":
             self.overall_result["tmdb_status"] = "not_requested"
+        if "llm_usage" in self.context:
+            self.overall_result["llm_usage"] = json_safe(self.context["llm_usage"])
         if self.context.get("shadow_result") is not None:
             self.overall_result["shadow_result"] = json_safe(self.context["shadow_result"])
         metrics = self.context.get("decision_metrics") or {}
@@ -566,7 +604,9 @@ class RecognitionRecorder:
             "source": self.source,
             "stage": self.stage,
             "database_generation": _recognition_generation(),
-            "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
+            "schema_version": 3, "record_mode": self._record_mode, "actor_id": self.actor_id,
+            "created_at": self.created_at, "finished_at": self.finished_at,
+            "started_monotonic_ns": self.started_ns, "in_progress": self.finished_at is None,
             "context": public_context,
             "actions": self.actions,
             "provider_results": self.provider_results,
@@ -613,39 +653,9 @@ def annotate_business_short_circuit(meta_info, action_type, reason, details=None
             log.warn(f"【Recognition】补记业务短路原因失败 {request_id}：{error}")
         except Exception:
             pass
-    # DB 暂不可用时，修改原请求的持久化暂存，不新建重复请求记录。
-    try:
-        spool_path = os.path.join(_spool_directory(), f"{request_id}.json")
-        if not os.path.exists(spool_path):
-            return False
-        with open(spool_path, "r", encoding="utf-8") as spool_file:
-            payload = json.load(spool_file)
-        actions = payload.setdefault("actions", [])
-        attempts = payload.setdefault("provider_results", [])
-        sequence = max((int(item.get("sequence", 0)) for item in actions
-                        if isinstance(item, dict)), default=0) + 1
-        attempt_id = None
-        for attempt in reversed(attempts):
-            if attempt.get("provider_id") == "anitopy_ml" \
-                    and attempt.get("status") == "skipped":
-                attempt_id = attempt.get("attempt_id")
-                if str(attempt.get("error") or "").startswith("ai_deferred"):
-                    attempt["error"] = reason
-                break
-        actions.append({
-            "action_id": f"{request_id}:{sequence}", "sequence": sequence,
-            "action_type": action_type, "provider_id": "anitopy_ml",
-            "attempt_id": attempt_id, "status": business_status, "input": {},
-            "output": details, "reason": reason,
-            "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
-        })
-        payload.setdefault("overall_result", {})["business_result"] = {
-            "status": business_status, "reason": reason, "details": details,
-        }
-        _write_spool(payload)
-        return True
-    except Exception:
-        return False
+    # A retained Trace can be annotated transactionally; missing/none/cleared
+    # history is not recreated from an old spool or a copied input.
+    return False
 
 
 def record_business_short_circuit(original_name, source, action_type, reason,
@@ -733,11 +743,99 @@ def record_deferred_parse_result(meta_info, original_name, source, action_type, 
         return recorder.request_id
 
 
+def initialize_recognition_budget(recorder, settings=None):
+    """Pin once, including maintenance/queue time; None is an initialized limit."""
+    if recorder is None:
+        return None
+    if not recorder._budget_initialized:
+        settings = (recognition_config("recognition") or {}) if settings is None else settings
+        recorder.budget = RecognitionBudget(
+            total_timeout_ms(settings), started_ns=int(recorder.started * 1_000_000_000),
+            clock_ns=lambda: int(time.monotonic() * 1_000_000_000),
+            cancellation=recorder.cancellation)
+        if recorder.deadline_monotonic is None:
+            deadline_ns = recorder.budget.total_deadline_ns
+            recorder.deadline_monotonic = None if deadline_ns is None else deadline_ns / 1_000_000_000
+        else:
+            recorder.budget.total_deadline_ns = int(recorder.deadline_monotonic * 1_000_000_000)
+        recorder._budget_initialized = True
+    return recorder.budget
+
+
+def recognition_budget_active():
+    recorder = current_recorder()
+    return recorder is not None and (recorder._budget_initialized or recorder.deadline_monotonic is not None)
+
+
+@contextmanager
+def recognition_stage(name):
+    """A local stage timeout never cancels other evidence in the request."""
+    recorder = current_recorder()
+    if recorder is None:
+        yield None
+        return
+    root = initialize_recognition_budget(recorder)
+    settings = recognition_config("recognition") or {}
+    timeout = (settings.get("timeouts") or {}).get(f"{name}_ms")
+    parent = _stage_budget.get() or root
+    stage = parent.stage(name, timeout)
+    token = _stage_budget.set(stage)
+    try:
+        yield stage
+    finally:
+        _stage_budget.reset(token)
+
+
+def recognition_abort_reason(recorder=None):
+    recorder = current_recorder() if recorder is None else recorder
+    if recorder is None:
+        return None
+    if recorder.cancellation.reason is not None:
+        return recorder.cancellation.reason.value
+    deadline = recorder.deadline_monotonic
+    if deadline is not None and time.monotonic() >= deadline:
+        return "recognition_deadline_exceeded"
+    return None
+
+
 def recognition_remaining_seconds():
     """返回当前解析请求剩余的网络时间预算；未设置时返回空值。"""
     recorder = current_recorder()
+    if recorder is not None and recorder.cancellation.reason is not None:
+        return 0.0
     deadline = getattr(recorder, "deadline_monotonic", None) if recorder else None
-    return max(deadline - time.monotonic(), 0.0) if deadline is not None else None
+    limits = [max(deadline - time.monotonic(), 0.0)] if deadline is not None else []
+    stage = _stage_budget.get()
+    if stage is not None:
+        stage_remaining = stage.remaining_seconds()
+        if stage_remaining is not None:
+            limits.append(stage_remaining)
+    return min(limits) if limits else None
+
+
+def recognition_timeout_reason():
+    """Keep stage expiration distinct from cancellation of the whole request."""
+    abort = recognition_abort_reason()
+    if abort:
+        return abort
+    stage = _stage_budget.get()
+    if stage is not None and stage.remaining_seconds() == 0:
+        return f"{stage.name}_deadline_exceeded"
+    return "recognition_deadline_exceeded"
+
+
+def recognition_delay(seconds, *, sleeper=None):
+    """Wait cooperatively; retries cannot outlive their request or stage."""
+    sleeper = time.sleep if sleeper is None else sleeper
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = recognition_remaining_seconds()
+        if remaining is not None and remaining <= 0:
+            return False
+        delay = deadline - time.monotonic()
+        if delay <= 0:
+            return True
+        sleeper(min(delay, 0.1, remaining) if remaining is not None else min(delay, 0.1))
 
 
 def note_tmdb_timeout(error):

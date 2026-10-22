@@ -3,7 +3,7 @@ from collections.abc import Mapping
 import hashlib
 import json
 
-from sqlalchemy import BigInteger, Column, Float, Index, Integer, LargeBinary, String, Table, Text, event, text
+from sqlalchemy import BigInteger, Column, Float, ForeignKey, Index, Integer, LargeBinary, String, Table, Text, event, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import deferred
 from sqlalchemy.dialects.mysql import LONGBLOB, LONGTEXT
@@ -41,65 +41,6 @@ def portable_key_digest(values):
         digest.update(len(encoded).to_bytes(8, "big"))
         digest.update(encoded)
     return digest.hexdigest()
-
-
-def recognition_search_projection(overall_result, actions):
-    """从完整结果中提取可索引筛选字段，原始 JSON 保持不变。"""
-    def decoded(value, expected_type):
-        if isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except (TypeError, json.JSONDecodeError) as error:
-                raise ValueError("识别记录 JSON 无法解析，拒绝静默丢失筛选数据") from error
-        if value is None:
-            return expected_type()
-        if expected_type is list and value == {}:
-            # 兼容旧版把空动作列表序列化为空对象的记录。
-            return []
-        if not isinstance(value, expected_type):
-            raise ValueError("识别记录 JSON 结构不符合筛选索引格式")
-        return value
-
-    overall = decoded(overall_result, dict)
-    business = overall.get("business_result")
-    if business is None:
-        business = {}
-    elif not isinstance(business, dict):
-        raise ValueError("识别业务结果 JSON 结构不符合筛选索引格式")
-
-    def status_value(value):
-        if value is None:
-            return None
-        result = str(value).casefold()
-        if len(result) > 64:
-            raise ValueError("识别状态超过 64 个字符，无法建立兼容索引")
-        return result
-
-    def reason_value(value):
-        if value is None:
-            return None, None
-        result = str(value)
-        return result, portable_key_digest((result,))
-
-    reason, reason_hash = reason_value(overall.get("reason"))
-    business_reason, business_reason_hash = reason_value(business.get("reason"))
-    action_values = set()
-    for item in decoded(actions, list):
-        if not isinstance(item, dict) or item.get("action_type") is None:
-            raise ValueError("识别动作 JSON 缺少动作类型，无法建立筛选索引")
-        action_type = str(item["action_type"]).casefold()
-        if len(action_type) > 256:
-            raise ValueError("识别动作类型超过 256 个字符，无法建立兼容索引")
-        action_values.add(action_type)
-    return {
-        "STATUS_SUMMARY": status_value(overall.get("status")),
-        "BUSINESS_STATUS_SUMMARY": status_value(business.get("status")),
-        "REASON_SUMMARY": reason,
-        "REASON_HASH": reason_hash,
-        "BUSINESS_REASON_SUMMARY": business_reason,
-        "BUSINESS_REASON_HASH": business_reason_hash,
-        "ACTION_TYPES": action_values,
-    }
 
 
 def _digest_default(*columns):
@@ -480,83 +421,76 @@ class SEARCHTASK(Base):
     MESSAGE = Column(Text)
 
 
-class AIRECOGNITIONRECORD(Base):
-    """需要人工核对的本地解析、AI解析和TMDB匹配记录。"""
-    __tablename__ = 'AI_RECOGNITION_RECORD'
-
-    ID = Column(Integer, primary_key=True)
-    TITLE = Column(Text, index=True)
-    ANITOPY_RESULT = Column(LargeText)
-    AI_RESULT = Column(LargeText)
-    ANITOPY_TMDB = Column(LargeText)
-    AI_TMDB = Column(LargeText)
-    STATUS = Column(Text)
-    ADD_TIME = Column(Text)
-
-    def as_dict(self):
-        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
-
-
-class RECOGNITIONREQUEST(Base):
-    """One media-name recognition call and its aggregated raw outcomes."""
-    __tablename__ = 'RECOGNITION_REQUEST'
-    __table_args__ = (
-        Index('IDX_RECOG_STATUS_SUMMARY', 'STATUS_SUMMARY'),
-        Index('IDX_RECOG_BUSINESS_STATUS', 'BUSINESS_STATUS_SUMMARY'),
-        Index('IDX_RECOG_REASON_HASH', 'REASON_HASH'),
-        Index('IDX_RECOG_BUSINESS_REASON', 'BUSINESS_REASON_HASH'),
-        Index('IDX_RECOG_CREATED_REQUEST', 'CREATED_AT', 'REQUEST_ID'),
-        Index('IDX_RECOG_SOURCE_CREATED_REQUEST', 'SOURCE', 'CREATED_AT', 'REQUEST_ID'),
-    )
-
+class RECOGNITIONTRACE(Base):
+    __tablename__ = "RECOGNITION_TRACE"
     REQUEST_ID = Column(String(128), primary_key=True)
-    ORIGINAL_NAME = Column(Text, index=True)
-    SOURCE = Column(Text)
-    STAGE = Column(Text)
-    CREATED_AT = Column(Text)
-    SUMMARY = Column(Text)
-    STATUS_SUMMARY = Column(String(64))
-    BUSINESS_STATUS_SUMMARY = Column(String(64))
-    REASON_SUMMARY = Column(Text)
-    REASON_HASH = Column(String(64))
-    BUSINESS_REASON_SUMMARY = Column(Text)
-    BUSINESS_REASON_HASH = Column(String(64))
-    CONTEXT = deferred(Column(LargeText))
-    ACTIONS = deferred(Column(LargeText))
-    PROVIDER_RESULTS = deferred(Column(LargeText))
-    OVERALL_RESULT = deferred(Column(LargeText))
-    TMDB_RESULTS = deferred(Column(LargeText))
+    STARTED_AT = Column(String(32), nullable=False, index=True)
+    FINISHED_AT = Column(String(32), index=True)
+    STARTED_MONOTONIC_NS = Column(BigInteger, nullable=False)
+    STATUS = Column(String(32), nullable=False, index=True)
+    RECORD_MODE = Column(String(16), nullable=False)
+    SOURCE = Column(String(128), nullable=False)
+    VERSION = Column(Integer, nullable=False, default=0)
+    INPUT = deferred(Column(LargeText))
+    OUTCOME = deferred(Column(LargeText))
+    EXPORT_UNTIL = Column(Float(precision=53), nullable=False, default=0)
+    __table_args__ = (Index("IDX_V3_TRACE_FINISH_ID", "FINISHED_AT", "REQUEST_ID"),)
 
 
-class RECOGNITIONATTEMPT(Base):
-    """A discoverable provider attempt attached to a recognition request."""
-    __tablename__ = 'RECOGNITION_ATTEMPT'
+class RECOGNITIONEVENT(Base):
+    __tablename__ = "RECOGNITION_EVENT"
+    REQUEST_ID = Column(String(128), ForeignKey("RECOGNITION_TRACE.REQUEST_ID", ondelete="CASCADE"), primary_key=True)
+    SEQ = Column(Integer, primary_key=True)
+    NODE_ID = Column(String(191), nullable=False)
+    STATUS = Column(String(32), nullable=False)
+    PAYLOAD = deferred(Column(LargeText, nullable=False))
 
-    ID = Column(Integer, primary_key=True)
+
+class RECOGNITIONCANDIDATE(Base):
+    __tablename__ = "RECOGNITION_CANDIDATE"
+    REQUEST_ID = Column(String(128), ForeignKey("RECOGNITION_TRACE.REQUEST_ID", ondelete="CASCADE"), primary_key=True)
+    MEDIA_TYPE = Column(String(16), primary_key=True)
+    TMDB_ID = Column(Integer, primary_key=True)
+    RANK = Column(Integer)
+    PAYLOAD = deferred(Column(LargeText, nullable=False))
+
+
+class RECOGNITIONTASK(Base):
+    __tablename__ = "RECOGNITION_TASK"
+    TASK_ID = Column(String(128), primary_key=True)
     REQUEST_ID = Column(String(128), index=True)
-    ATTEMPT_ID = Column(String(128), index=True)
-    PROVIDER_ID = Column(String(128), index=True)
-    STATUS = Column(Text, index=True)
-    INPUT = Column(LargeText)
-    RAW_RESULT = Column(LargeText)
-    NORMALIZED_RESULT = Column(LargeText)
-    TMDB_RESULTS = Column(LargeText)
-    ERROR = Column(LargeText)
-    ELAPSED_MS = Column(Integer)
+    OWNER_ID = Column(String(128), nullable=False)
+    KIND = Column(String(32), nullable=False)
+    STATE = Column(String(32), nullable=False, index=True)
+    LEASE_UNTIL = Column(Float(precision=53), nullable=False, default=0)
+    CREATED_AT = Column(String(32), nullable=False)
+    CANCEL_REASON = Column(String(64))
+    CONTROL = Column(LargeText)
+    # CONTROL is strictly allowlisted operational metadata, never input/result.
 
 
-class RECOGNITIONREQUESTACTION(Base):
-    """将动作类型单独索引，避免扫描完整请求 JSON。"""
-    __tablename__ = 'RECOGNITION_REQUEST_ACTION'
-    __table_args__ = (
-        Index('IDX_RECOG_ACTION_HASH', 'ACTION_HASH'),
-        Index('IDX_RECOG_ACTION_REQUEST', 'REQUEST_ID'),
-    )
+class RECOGNITIONOVERRIDE(Base):
+    __tablename__ = "RECOGNITION_OVERRIDE"
+    OVERRIDE_KEY = Column(String(64), primary_key=True)
+    VERSION = Column(Integer, nullable=False)
+    PAYLOAD = Column(LargeText, nullable=False)
 
-    ID = Column(String(64), primary_key=True)
-    REQUEST_ID = Column(String(128), nullable=False)
-    ACTION_TYPE = Column(String(256), nullable=False)
-    ACTION_HASH = Column(String(64), nullable=False)
+
+class RECOGNITIONSECRET(Base):
+    __tablename__ = "RECOGNITION_SECRET"
+    NAME = Column(String(128), primary_key=True)
+    KEY_ID = Column(String(128), nullable=False)
+    CIPHERTEXT = Column(LargeBinary().with_variant(LONGBLOB(), "mysql", "mariadb"), nullable=False)
+
+
+class RECOGNITIONRECORDSTATE(Base):
+    __tablename__ = "RECOGNITION_RECORD_STATE"
+    STATE_ID = Column(String(64), primary_key=True)
+    VERSION = Column(Integer, nullable=False, default=0)
+    CLEAR_FINISHED_BEFORE = Column(String(32))
+    CLEANUP_OWNER = Column(String(128))
+    CLEANUP_UNTIL = Column(Float(precision=53), nullable=False, default=0)
+    STATE = Column(LargeText)
 
 
 class SYNCHISTORY(Base):
@@ -731,14 +665,17 @@ class DATABASEMIGRATIONMARKER(Base):
 
 # 非唯一全文索引在 MySQL/MariaDB 使用固定前缀，在 PostgreSQL 上不创建可能
 # 因超长路径或标题而失败的 btree 索引；SQLite 继续保留完整索引。
-for _table in Base.metadata.tables.values():
-    for _index in _table.indexes:
-        _text_columns = [column for column in _index.columns
-                         if isinstance(column.type, Text)]
-        if _text_columns and not _index.unique:
-            text_prefixes = {
-                column.name: 191 for column in _text_columns
-            }
-            _index.dialect_options["mysql"]["length"] = text_prefixes
-            _index.dialect_options["mariadb"]["length"] = text_prefixes
-            _index.ddl_if(dialect=("sqlite", "mysql", "mariadb"))
+def configure_portable_indexes(metadata):
+    # Table.to_metadata does not retain Index dialect options / DDL conditions.
+    # Archived portable restore schemas need the same policy as runtime tables.
+    for table in metadata.tables.values():
+        for index in table.indexes:
+            text_columns = [column for column in index.columns if isinstance(column.type, Text)]
+            if text_columns and not index.unique:
+                text_prefixes = {column.name: 191 for column in text_columns}
+                index.dialect_options["mysql"]["length"] = text_prefixes
+                index.dialect_options["mariadb"]["length"] = text_prefixes
+                index.ddl_if(dialect=("sqlite", "mysql", "mariadb"))
+
+
+configure_portable_indexes(Base.metadata)

@@ -1160,6 +1160,18 @@ class WebAction:
         """
         cfg = deepcopy(Config().get_config())
         data = deepcopy(data or {})
+        from app.media.recognition.configuration import reject_retired_settings
+        try:
+            reject_retired_settings(data)
+        except ValueError as error:
+            return {"code": 1, "msg": str(error)}
+        def has_recognition_secret(value):
+            if not isinstance(value, dict):
+                return False
+            return any((str(key).split(".")[-1].replace("_", "").replace("-", "").casefold() in {"apikey", "authorization", "token", "password", "secret", "clearapikey", "secretrevision", "apikeyset"})
+                       or has_recognition_secret(item) for key, item in value.items())
+        if any(str(key).startswith("recognition") and (has_recognition_secret({key: item})) for key, item in data.items()):
+            return {"code": 1, "msg": "识别密钥请通过加密凭据接口管理"}
         deprecated_cache_limits = {
             "recognition.cache.parse.max_entries",
             "recognition.cache.parse.max_bytes",
@@ -1182,76 +1194,9 @@ class WebAction:
             return {"code": 1, "msg": "缓存保存方式需通过缓存迁移流程修改"}
         if any(key == "database" or key.startswith("database.") for key in data):
             return {"code": 1, "msg": "数据库连接配置需通过受控数据库迁移流程修改"}
-        strategy = data.get("recognition.decision.strategy")
-        if strategy and strategy not in ("legacy", "title_evidence"):
-            return {"code": 1, "msg": "媒体识别策略无效"}
         record_mode_key = "recognition.records.mode"
-        if record_mode_key in data and data[record_mode_key] not in (
-                "all", "failed", "none"):
+        if record_mode_key in data and data[record_mode_key] not in ("all", "failed", "none"):
             return {"code": 1, "msg": "媒体识别记录类型无效"}
-        for key in (
-                "recognition.decision.title_evidence.min_cjk_chars_for_strong",
-                "recognition.decision.title_evidence.min_latin_chars_for_strong"):
-            if key in data:
-                try:
-                    if int(data[key]) < 1:
-                        return {"code": 1, "msg": "名称长度阈值必须大于 0"}
-                except (TypeError, ValueError):
-                    return {"code": 1, "msg": "名称长度阈值必须为整数"}
-        preferred_genre_key = "recognition.decision.title_evidence.preferred_genre_id"
-        if preferred_genre_key in data:
-            try:
-                preferred_genre_id = float(data[preferred_genre_key])
-                if not isfinite(preferred_genre_id) or preferred_genre_id < 0 \
-                        or not preferred_genre_id.is_integer():
-                    return {"code": 1, "msg": "TMDB 优先类型 ID 必须是非负整数"}
-            except (TypeError, ValueError):
-                return {"code": 1, "msg": "TMDB 优先类型 ID 必须是非负整数"}
-        fuzzy_key = "recognition.decision.title_evidence.fuzzy_min_score"
-        if fuzzy_key in data:
-            try:
-                if not 0 < float(data[fuzzy_key]) <= 1:
-                    return {"code": 1, "msg": "标题相似度阈值必须介于 0 和 1 之间"}
-            except (TypeError, ValueError):
-                return {"code": 1, "msg": "标题相似度阈值无效"}
-        timeout_key = "recognition.execution.total_timeout_seconds"
-        if timeout_key in data:
-            try:
-                timeout_value = float(data[timeout_key])
-                if not isfinite(timeout_value) or not 0.1 <= timeout_value <= 300:
-                    return {"code": 1, "msg": "识别总超时必须介于 0.1 和 300 秒之间"}
-            except (TypeError, ValueError):
-                return {"code": 1, "msg": "识别总超时必须为数字"}
-        agreement_key = "recognition.decision.agreement_bonus"
-        if agreement_key in data:
-            try:
-                bonus = float(data[agreement_key])
-                if not isfinite(bonus) or not 0 <= bonus <= 1:
-                    return {"code": 1, "msg": "解析器一致性加分必须介于 0 和 1 之间"}
-            except (TypeError, ValueError):
-                return {"code": 1, "msg": "解析器一致性加分无效"}
-        for provider_id in ("local_rules", "anitopy_ml"):
-            reliability_key = f"recognition.providers.{provider_id}.reliability"
-            if reliability_key in data:
-                try:
-                    reliability = float(data[reliability_key])
-                    if not isfinite(reliability) or not 0 <= reliability <= 1:
-                        return {"code": 1, "msg": "解析器可信度必须介于 0 和 1 之间"}
-                except (TypeError, ValueError):
-                    return {"code": 1, "msg": "解析器可信度必须为数字"}
-        for key in (
-                "recognition.decision.weights.title_match",
-                "recognition.decision.weights.year_match",
-                "recognition.decision.weights.type_match",
-                "recognition.decision.weights.season_episode_match",
-                "recognition.decision.weights.input_evidence",
-                "recognition.decision.weights.provider_reliability"):
-            if key in data:
-                try:
-                    if float(data[key]) < 0:
-                        return {"code": 1, "msg": "识别权重不能小于 0"}
-                except (TypeError, ValueError):
-                    return {"code": 1, "msg": "识别权重必须为数字"}
         config_test = StringUtils.to_bool(data.get("test"), False)
         history_cleanup_paths = [
             f"history.cleanup.{name}"
@@ -1264,21 +1209,6 @@ class WebAction:
             "cache.connect_timeout": float, "cache.retry_interval": float,
             "pt.search_rss_interval": int,
             "recognition.records.cleanup.retention_days": int,
-            "recognition.execution.total_timeout_seconds": float,
-            "recognition.execution.max_inflight_provider_requests": int,
-            "recognition.decision.agreement_bonus": float,
-            "recognition.providers.local_rules.reliability": float,
-            "recognition.providers.anitopy_ml.reliability": float,
-            "recognition.decision.title_evidence.min_cjk_chars_for_strong": int,
-            "recognition.decision.title_evidence.min_latin_chars_for_strong": int,
-            "recognition.decision.title_evidence.preferred_genre_id": int,
-            "recognition.decision.title_evidence.fuzzy_min_score": float,
-            "recognition.decision.weights.title_match": float,
-            "recognition.decision.weights.year_match": float,
-            "recognition.decision.weights.type_match": float,
-            "recognition.decision.weights.season_episode_match": float,
-            "recognition.decision.weights.input_evidence": float,
-            "recognition.decision.weights.provider_reliability": float,
             "recognition.cache.parse.ttl_seconds": int,
         }
         for cleanup_path in cleanup_paths:
@@ -1298,19 +1228,11 @@ class WebAction:
             "recognition.profiles.resolve.tmdb_allowed",
         }
         boolean_fields.update(f"{cleanup_path}.enabled" for cleanup_path in cleanup_paths)
-        profile_provider_keys = {
-            "recognition.profiles.parse_only.providers",
-            "recognition.profiles.resolve.providers",
-        }
         cfgs = dict(data).items()
         # Candidate config is detached from the live Config singleton.
         for key, value in cfgs:
             if key == "test":
                 continue
-            # 兼容设置页把特殊选项序列化为单元素数组的情况。
-            # all_enabled 是特殊值，不是一个具体的解析器 ID。
-            if key in profile_provider_keys and value == ["all_enabled"]:
-                value = "all_enabled"
             if key == "recognition.providers.anitopy_ml.enabled":
                 value = StringUtils.to_bool(value, False)
             elif key in boolean_fields:
@@ -1384,116 +1306,11 @@ class WebAction:
                 if not 1 <= legacy_days <= 36500:
                     return {"code": 1, "msg": "媒体识别记录保留天数必须介于 1 和 36500 天之间"}
 
-        # 旧设置页和新识别配置共用一个有效 AI 开关和接口地址。
-        legacy_enabled_key = "laboratory.ai_inference"
-        provider_enabled_key = "recognition.providers.anitopy_ml.enabled"
-        if provider_enabled_key in data:
-            ai_enabled = StringUtils.to_bool(data[provider_enabled_key], False)
-        elif legacy_enabled_key in data:
-            ai_enabled = StringUtils.to_bool(data[legacy_enabled_key], False)
-        else:
-            ai_enabled = None
-        if ai_enabled is not None:
-            cfg = self.set_config_value(cfg, provider_enabled_key, ai_enabled)
-            cfg = self.set_config_value(cfg, legacy_enabled_key, ai_enabled)
-
-        legacy_endpoint_key = "laboratory.ai_inference_url"
-        provider_endpoint_key = "recognition.providers.anitopy_ml.endpoint"
-        if provider_endpoint_key in data:
-            ai_endpoint = str(data[provider_endpoint_key] or "").strip()
-        elif legacy_endpoint_key in data:
-            ai_endpoint = str(data[legacy_endpoint_key] or "").strip()
-        else:
-            ai_endpoint = None
-        if ai_endpoint is not None:
-            cfg = self.set_config_value(cfg, provider_endpoint_key, ai_endpoint)
-            cfg = self.set_config_value(cfg, legacy_endpoint_key, ai_endpoint)
-
-        recognition = cfg.get("recognition") or {}
-        profiles = recognition.get("profiles") or {}
-        for profile_name in ("parse_only", "resolve"):
-            profile = profiles.get(profile_name) or {}
-            if not isinstance(profile, dict):
-                return {"code": 1, "msg": f"识别配置 {profile_name} 必须为对象"}
-            selected_providers = profile.get("providers", "all_enabled")
-            if selected_providers != "all_enabled" and (
-                    not isinstance(selected_providers, list)
-                    or any(not isinstance(provider_id, str) or not provider_id.strip()
-                           for provider_id in selected_providers)):
-                return {"code": 1, "msg": f"识别配置 {profile_name} 的 providers 必须为 all_enabled 或名称列表"}
-            if isinstance(selected_providers, list) and "local_rules" not in selected_providers:
-                return {"code": 1, "msg": f"识别配置 {profile_name} 必须保留 local_rules 基础解析器"}
-            for field in ("network_allowed", "tmdb_allowed"):
-                if field in profile and not isinstance(profile[field], bool):
-                    return {"code": 1, "msg": f"识别配置 {profile_name}.{field} 必须为布尔值"}
-            if profile_name == "parse_only" and profile.get("tmdb_allowed", False):
-                return {"code": 1, "msg": "parse_only profile 不允许查询 TMDB"}
-            if profile_name == "parse_only" \
-                    and profile.get("conflict_policy", "unresolved") != "unresolved":
-                return {"code": 1, "msg": "parse_only profile 的冲突策略必须为 unresolved"}
-        ai_provider = ((recognition.get("providers") or {}).get("anitopy_ml") or {})
-        ai_enabled = bool(ai_provider.get("enabled", False))
-        ai_endpoint = (ai_provider.get("endpoint")
-                       or (ai_provider.get("options") or {}).get("endpoint")
-                       or (cfg.get("laboratory") or {}).get("ai_inference_url"))
-        if ai_enabled and not str(ai_endpoint or "").strip():
-            return {"code": 1, "msg": "启用AI推理前请输入接口地址"}
-        decision = recognition.get("decision") or {}
-        selected_strategy = decision.get("strategy", "legacy")
-        if selected_strategy not in ("legacy", "title_evidence"):
-            return {"code": 1, "msg": "媒体识别策略无效"}
-        execution = recognition.get("execution") or {}
-        if execution.get("mode", "all") != "all":
-            return {"code": 1, "msg": "当前只支持完整执行所有启用的识别方式"}
         try:
-            timeout_value = float(execution.get("total_timeout_seconds", 30))
-            if not isfinite(timeout_value) or not 0.1 <= timeout_value <= 300:
-                return {"code": 1, "msg": "识别总超时必须介于 0.1 和 300 秒之间"}
-        except (TypeError, ValueError):
-            return {"code": 1, "msg": "识别总超时必须为数字"}
-        try:
-            inflight_limit = int(execution.get("max_inflight_provider_requests", 4))
-            if not 1 <= inflight_limit <= 128:
-                return {"code": 1, "msg": "识别并发上限必须介于 1 和 128 之间"}
-        except (TypeError, ValueError):
-            return {"code": 1, "msg": "识别并发上限必须为整数"}
-        parse_cache = ((recognition.get("cache") or {}).get("parse") or {})
-        try:
-            if int(parse_cache.get("ttl_seconds", 86400)) < 1:
-                return {"code": 1, "msg": "解析缓存 TTL 必须大于 0"}
-        except (TypeError, ValueError):
-            return {"code": 1, "msg": "解析缓存 TTL 必须为整数"}
-        weights = decision.get("weights") or {}
-        try:
-            weight_values = [float(weights.get(key, 0) or 0) for key in (
-                "title_match", "year_match", "type_match", "season_episode_match",
-                "input_evidence", "provider_reliability")]
-            if any(not isfinite(value) or value < 0 for value in weight_values) \
-                    or sum(weight_values) <= 0:
-                return {"code": 1, "msg": "识别权重必须为有限非负数且总和大于 0"}
-        except (TypeError, ValueError):
-            return {"code": 1, "msg": "识别权重必须为数字"}
-        title_cfg = decision.get("title_evidence") or {}
-        if title_cfg.get("on_multiple_matches", "fail") != "fail":
-            return {"code": 1, "msg": "多个 TMDB 条目命中时必须按失败处理"}
-        try:
-            agreement_bonus = float(decision.get("agreement_bonus", 0) or 0)
-            if not isfinite(agreement_bonus) or not 0 <= agreement_bonus <= 1:
-                return {"code": 1, "msg": "解析器一致性加分必须介于 0 和 1 之间"}
-        except (TypeError, ValueError):
-            return {"code": 1, "msg": "解析器一致性加分无效"}
-        for provider_id, provider_cfg in (recognition.get("providers") or {}).items():
-            if not isinstance(provider_cfg, dict) or "reliability" not in provider_cfg:
-                continue
-            try:
-                reliability = float(provider_cfg["reliability"])
-                if not isfinite(reliability) or not 0 <= reliability <= 1:
-                    return {"code": 1, "msg": f"解析器 {provider_id} 可信度必须介于 0 和 1 之间"}
-            except (TypeError, ValueError):
-                return {"code": 1, "msg": f"解析器 {provider_id} 可信度无效"}
-        if selected_strategy == "title_evidence" \
-                and (recognition.get("execution") or {}).get("mode") == "cascade":
-            return {"code": 1, "msg": "title_evidence 策略不能使用 cascade 执行模式"}
+            from app.media.recognition.coordinator import effective_settings
+            cfg = effective_settings(cfg)
+        except ValueError as error:
+            return {"code": 1, "msg": str(error)}
 
         # 保存配置
         if not config_test:
@@ -2687,28 +2504,26 @@ class WebAction:
         """
         名称识别测试
         """
-        from app.media.recognition.records import recognition_scope
+        from app.media.recognition.coordinator import RecognitionCoordinator
 
         name = data.get("name")
         if not name:
             return {"code": -1, "msg": "请输入资源名称"}
-        # 复用内层识别记录，直接返回本次决策原因，避免查询历史记录或重复识别。
         try:
-            with recognition_scope(name, source="web", stage="resolve",
-                                   context={"action": "name_test"}) as recorder:
-                media_info = Media().get_media_info(title=name)
+            resolution = RecognitionCoordinator().resolve(name, source="web")
+            result = self.mediainfo_dict(resolution.meta) if resolution.meta else {"name": "无法识别"}
+            result.update({
+                "recognition_status": resolution.outcome.status.value,
+                "recognition_reason": resolution.outcome.failure_code,
+                "recognition_request_id": resolution.outcome.request_id,
+            })
+            return {"code": 0, "data": result}
         except Exception as error:
             return {"code": 0, "data": {
                 "name": "无法识别",
-                "recognition_status": "failed",
+                "recognition_status": "FAILED",
                 "recognition_reason": str(error) or "recognition_not_completed",
             }}
-        result = self.mediainfo_dict(media_info) if media_info else {"name": "无法识别"}
-        result.update({
-            "recognition_status": recorder.overall_result.get("status"),
-            "recognition_reason": recorder.overall_result.get("reason"),
-        })
-        return {"code": 0, "data": result}
 
     @staticmethod
     def mediainfo_dict(media_info):
@@ -5016,6 +4831,13 @@ class WebAction:
         return {"code": 0, "config": cfg}
 
     @staticmethod
+    def _recognition_access():
+        from flask import has_request_context
+        if has_request_context() and current_user.is_authenticated:
+            return {"actor": str(current_user.get_id())}
+        return {}
+
+    @staticmethod
     def __get_ai_recognition_records(data):
         """查询本地解析与 AI 解析不一致或同时未命中的记录。"""
         data = data or {}
@@ -5025,7 +4847,7 @@ class WebAction:
             page_size = min(max(int(data.get("page_size") or 20), 1), 100)
         except (TypeError, ValueError):
             return {"code": 1, "msg": "分页参数无效"}
-        total, records = DbHelper().get_ai_recognition_records(title=title, page=page, page_size=page_size)
+        total, records = DbHelper().get_ai_recognition_records(title=title, page=page, page_size=page_size, **WebAction._recognition_access())
 
         def decode(value):
             try:
@@ -5076,11 +4898,14 @@ class WebAction:
     @staticmethod
     def __update_system_cache_ttl(data=None):
         from app.utils.system_cache import update_cache_ttl
+        from app.media.recognition.configuration import RecognitionConfigurationConflict
 
         data = data or {}
         try:
-            seconds = update_cache_ttl(data.get("name"), data.get("value"), data.get("unit"))
+            seconds = update_cache_ttl(data.get("name"), data.get("value"), data.get("unit"), data.get("expected_version"))
             return {"code": 0, "ttl_seconds": seconds}
+        except RecognitionConfigurationConflict:
+            return {"code": 409, "msg": "识别与缓存配置已变化，请重新读取后保存"}
         except ValueError as error:
             return {"code": 1, "msg": str(error)}
         except Exception as error:
@@ -5325,7 +5150,7 @@ class WebAction:
             created_from=created_from,
             created_to=created_to,
             page=page,
-            page_size=page_size,
+            page_size=page_size, **WebAction._recognition_access(),
         )
         decode = WebAction.__decode_recognition_json
 
@@ -5362,7 +5187,7 @@ class WebAction:
         request_id = (data or {}).get("request_id")
         if not request_id:
             return {"code": 1, "msg": "缺少识别记录 ID"}
-        request, attempts = DbHelper().get_recognition_record(request_id)
+        request, attempts = DbHelper().get_recognition_record(request_id, **WebAction._recognition_access())
         if not request:
             return {"code": 1, "msg": "识别记录不存在"}
         decode = WebAction.__decode_recognition_json
@@ -5399,7 +5224,7 @@ class WebAction:
         title = (title or "").strip()
         helper = DbHelper()
         _, records = helper.get_ai_recognition_records(
-            title=title, page=1, page_size=100, include_total=False)
+            title=title, page=1, page_size=100, include_total=False, **cls._recognition_access())
 
         def compact(value):
             if not value:
@@ -5413,69 +5238,36 @@ class WebAction:
         rows = [["ID", "标题", "状态", "时间", "本地解析结果", "AI解析结果", "本地TMDB结果", "AI TMDB结果"]]
         while records:
             rows.extend([
-                [record.ID, record.TITLE, record.STATUS, record.ADD_TIME,
+                [str(record.ID), record.TITLE, record.STATUS, record.ADD_TIME,
                  compact(record.ANITOPY_RESULT), compact(record.AI_RESULT),
                  compact(record.ANITOPY_TMDB), compact(record.AI_TMDB)]
                 for record in records
             ])
-            before_id = records[-1].ID
+            before_id = getattr(records[-1], "CURSOR", records[-1].ID)
             _, records = helper.get_ai_recognition_records(
                 title=title, page=1, page_size=100, before_id=before_id,
-                include_total=False)
+                include_total=False, **cls._recognition_access())
         return cls._make_rss_import_xlsx(rows)
 
     @classmethod
     def iter_recognition_jsonl(cls, title=None, source=None, status=None,
                                provider_id=None, action_type=None, reason=None,
-                               created_from=None, created_to=None, page_size=100):
+                               created_from=None, created_to=None, page_size=100, **canonical_filters):
         """Stream one stable database snapshot as newline-delimited JSON."""
-        page_size = min(max(int(page_size or 100), 1), 100)
-        snapshot_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-        before_cursor = None
+        from app.media.recognition.compatibility import LegacyHistory
+        from app.media.recognition.repository import RecognitionRepository
+        helper = DbHelper()
         if created_from:
             datetime.datetime.strptime(created_from, "%Y-%m-%d")
             created_from += " 00:00:00.000000"
         if created_to:
             datetime.datetime.strptime(created_to, "%Y-%m-%d")
             created_to += " 23:59:59.999999"
-        helper = DbHelper()
-        session = getattr(helper._db, "session", None)
-        transaction = (session.begin() if session is not None and not session.in_transaction()
-                      else nullcontext())
-        if session is not None and session.get_bind().dialect.name == "sqlite":
-            connection = session.connection()
-            driver_connection = getattr(connection.connection, "driver_connection", None)
-            if driver_connection is not None and not driver_connection.in_transaction:
-                # sqlite3's legacy transaction mode does not BEGIN for SELECT;
-                # issue it explicitly so later pages share the first read view.
-                connection.exec_driver_sql("BEGIN")
-        with transaction:
-            while True:
-                _, records = helper.get_recognition_records(
-                    title=(title or "").strip(), source=(source or "").strip(),
-                    status=(status or "").strip(), provider_id=(provider_id or "").strip(),
-                    action_type=(action_type or "").strip(), reason=(reason or "").strip(),
-                    created_from=(created_from or "").strip(), created_to=(created_to or "").strip(),
-                    page=1, page_size=page_size, snapshot_at=snapshot_at,
-                    before_cursor=before_cursor, include_total=False)
-                if not records:
-                    break
-                for record in records:
-                    yield json.dumps({
-                        "schema_version": 1,
-                        "request_id": record.REQUEST_ID,
-                        "original_name": record.ORIGINAL_NAME,
-                        "source": record.SOURCE,
-                        "stage": record.STAGE,
-                        "created_at": record.CREATED_AT,
-                        "context": cls.__decode_recognition_json(record.CONTEXT) or {},
-                        "actions": cls.__decode_recognition_json(record.ACTIONS) or [],
-                        "provider_results": cls.__decode_recognition_json(record.PROVIDER_RESULTS) or [],
-                        "overall_result": cls.__decode_recognition_json(record.OVERALL_RESULT) or {},
-                        "tmdb_results": cls.__decode_recognition_json(record.TMDB_RESULTS) or [],
-                    }, ensure_ascii=False, separators=(",", ":")) + "\n"
-                last_record = records[-1]
-                before_cursor = (last_record.CREATED_AT, last_record.REQUEST_ID)
+        yield from LegacyHistory(RecognitionRepository(helper._db.database_manager)).export(
+            title=(title or "").strip(), source=(source or "").strip(), status=(status or "").strip(),
+            provider_id=(provider_id or "").strip(), action_type=(action_type or "").strip(), reason=(reason or "").strip(),
+            created_from=created_from, created_to=created_to, page_size=min(max(int(page_size or 100), 1), 100),
+            **canonical_filters, **cls._recognition_access())
 
     @staticmethod
     def _recognition_xlsx_row_xml(row_number, values):

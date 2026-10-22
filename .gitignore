@@ -8,6 +8,7 @@ user.db
 venv
 .venv
 /tests/
+/.test-runtime/
 
 ### IntelliJ IDEA ###
 .idea

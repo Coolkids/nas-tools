@@ -7,6 +7,8 @@ import random
 import requests
 import requests.exceptions
 import threading
+import ast
+from functools import wraps
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -31,6 +33,30 @@ def _note_recognition_tmdb_timeout(error):
         note_tmdb_timeout(error)
     except Exception:
         pass
+
+
+def _recognition_budget_active():
+    from app.media.recognition.records import recognition_budget_active
+    return recognition_budget_active()
+
+
+def _check_recognition_budget():
+    remaining = _recognition_remaining_seconds()
+    if remaining is not None and remaining <= 0:
+        from app.media.recognition.records import recognition_timeout_reason
+        raise requests.exceptions.Timeout(recognition_timeout_reason())
+
+
+def _recognition_request(method):
+    @wraps(method)
+    def wrapped(*args, **kwargs):
+        from app.media.recognition.records import recognition_stage
+        with recognition_stage("tmdb_request"):
+            _check_recognition_budget()
+            response = method(*args, **kwargs)
+            _check_recognition_budget()
+            return response
+    return wrapped
 
 
 class TMDb(object):
@@ -60,6 +86,7 @@ class TMDb(object):
         self._debug = False
         self._cache = True
         self._metadata = {}
+        self.include_adult = False
 
         self._api_keys = []
         self._load_api_keys()
@@ -181,27 +208,36 @@ class TMDb(object):
             return [AsObj(**res) for res in result[key]]
 
     @classmethod
+    @_recognition_request
     def cached_request(cls, cache_key, method, url, data, proxies):
+        _check_recognition_budget()
         with cls._parsed_cache_lock:
             cached = cls._parsed_cache.get(cache_key)
         if cached is not None:
-            cls._cache_hits += 1
-            return cached
+            try:
+                cls._validate_payload(cached, url)
+            except TMDbException:
+                with cls._parsed_cache_lock:
+                    cls._parsed_cache.pop(cache_key, None)
+            else:
+                cls._cache_hits += 1
+                return cached
         cls._cache_misses += 1
 
         def _request_once(timeout):
-            proxies_dict = eval(proxies) if proxies else None
-            response = cls._cache_session.request(
-                method=method,
-                url=url,
-                data=data,
-                proxies=proxies_dict,
-                verify=False,
-                timeout=timeout,
-            )
-            if response.status_code >= 500:
+            proxies_dict = ast.literal_eval(proxies) if proxies else None
+            from app.media.recognition.runtime import supervised_enabled, execute_http
+            if supervised_enabled():
+                response = execute_http({"method": method, "url": url, "data": data,
+                                         "proxies": proxies_dict, "timeout": timeout})
+            else:
+                response = cls._cache_session.request(method=method, url=url, data=data,
+                    proxies=proxies_dict, verify=True, timeout=timeout)
+            if response.status_code >= 400:
                 response.raise_for_status()
             payload = response.json()
+            cls._validate_payload(payload, url)
+            _check_recognition_budget()
             with cls._parsed_cache_lock:
                 # 容量由统一缓存适配层控制，避免远程模式每次写入遍历所有键。
                 cls._parsed_cache[cache_key] = payload
@@ -221,18 +257,25 @@ class TMDb(object):
 
         try:
             remaining = _recognition_remaining_seconds()
-            if remaining is not None:
-                if remaining <= 0:
-                    raise requests.exceptions.Timeout("recognition_deadline_exceeded")
+            if remaining is not None or _recognition_budget_active():
+                _check_recognition_budget()
                 # Recognition requests use the remaining end-to-end budget and
                 # never sleep/retry beyond that request's deadline.
-                return _request_once(timeout=min(30, remaining))
+                return _request_once(timeout=remaining)
             return _request_with_retry()
         except requests.exceptions.RequestException as e:
             if isinstance(e, requests.exceptions.Timeout):
                 _note_recognition_tmdb_timeout(e)
-            log.error("【TMDB-API】 cached_request请求失败！%s" % (ExceptionUtils.exception_traceback(e)))
+            log.error("【TMDB-API】 cached_request请求失败：%s" % type(e).__name__)
             raise
+
+    @staticmethod
+    def _validate_payload(payload, url):
+        if not isinstance(payload, dict) or payload.get("success") is False or "errors" in payload or "status_code" in payload and payload.get("success") is not True:
+            raise TMDbException("invalid_tmdb_response")
+        if "/search/" in urlsplit(url).path and (not isinstance(payload.get("results"), list) or any(not isinstance(x, dict) for x in payload["results"])):
+            raise TMDbException("invalid_tmdb_search_response")
+        return payload
 
     def cache_clear(self):
         with self._parsed_cache_lock:
@@ -258,17 +301,22 @@ class TMDb(object):
 
     @staticmethod
     def _session_request_once(session, method, url, data, proxies, timeout):
-        proxies_dict = eval(proxies) if proxies else None
+        proxies_dict = ast.literal_eval(proxies) if proxies else None
         try:
-            response = session.request(method, url, data=data, proxies=proxies_dict,
-                                       timeout=timeout, verify=False)
-            if response.status_code >= 500:
+            from app.media.recognition.runtime import supervised_enabled, execute_http
+            if supervised_enabled():
+                response = execute_http({"method": method, "url": url, "data": data,
+                                         "proxies": proxies_dict, "timeout": timeout})
+            else:
+                response = session.request(method, url, data=data, proxies=proxies_dict,
+                                           timeout=timeout, verify=True)
+            if response.status_code >= 400:
                 response.raise_for_status()
             return response
         except requests.exceptions.RequestException as e:
             if isinstance(e, requests.exceptions.Timeout):
                 _note_recognition_tmdb_timeout(e)
-            log.error("【TMDB-API】 session_request请求失败！%s" % (ExceptionUtils.exception_traceback(e)))
+            log.error("【TMDB-API】 session_request请求失败：%s" % type(e).__name__)
             raise
 
     @retry(
@@ -283,29 +331,29 @@ class TMDb(object):
     def _session_request_with_retry(self, session, method, url, data, proxies):
         return self._session_request_once(session, method, url, data, proxies, timeout=10)
 
+    @_recognition_request
     def session_request(self, session, method, url, data, proxies):
         remaining = _recognition_remaining_seconds()
-        if remaining is None:
+        if remaining is None and not _recognition_budget_active():
             return self._session_request_with_retry(session, method, url, data, proxies)
-        if remaining <= 0:
+        if remaining is not None and remaining <= 0:
             error = requests.exceptions.Timeout("recognition_deadline_exceeded")
             _note_recognition_tmdb_timeout(error)
             raise error
         # Avoid Tenacity's retry backoff while an end-to-end recognition
         # deadline is active; retries are available for non-recognition calls.
-        return self._session_request_once(
-            session, method, url, data, proxies, timeout=min(10, remaining))
+        response = self._session_request_once(
+            session, method, url, data, proxies, timeout=remaining)
+        _check_recognition_budget()
+        return response
 
     def _call(
             self, action, append_to_response, call_cached=True, method="GET", data=None
     ):
-        url = "%s%s?api_key=%s&%s&language=%s&include_adult=true" % (
-            self.domain,
-            action,
-            self.api_key,
-            append_to_response,
-            self.language,
-        )
+        parameters = dict(parse_qsl(append_to_response, keep_blank_values=True))
+        parameters.update(api_key=self.api_key, language=self.language)
+        parameters.setdefault("include_adult", str(self.include_adult).lower())
+        url = self.domain + action + "?" + urlencode(parameters)
 
         if self.cache and self.obj_cached and call_cached and method != "POST":
             req = self.cached_request(self._cache_key(url, data, self.proxies),
@@ -313,6 +361,7 @@ class TMDb(object):
         else:
             response = self.session_request(self._session, method, url, data, self.proxies)
             req = response.json()
+            self._validate_payload(req, url)
 
         headers = response.headers if 'response' in locals() else {}
 
@@ -327,7 +376,7 @@ class TMDb(object):
             sleep_time = self._reset - current_time
 
             recognition_remaining = _recognition_remaining_seconds()
-            if self.wait_on_rate_limit and recognition_remaining is None:
+            if self.wait_on_rate_limit and recognition_remaining is None and not _recognition_budget_active():
                 log.warn("【TMDB-API】 Rate limit reached. Sleeping for: %d" % sleep_time)
                 time.sleep(abs(sleep_time))
                 return self._call(action, append_to_response, call_cached, method, data)

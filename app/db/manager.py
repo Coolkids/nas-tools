@@ -160,6 +160,9 @@ class DatabaseManager:
 
     @staticmethod
     def _guard_database_session(session):
+        from app.media.recognition.admission import upgrade_gate
+        if upgrade_gate() and not STORAGE_JOBS.owns_exclusive_lock():
+            raise RuntimeError("识别结构升级未完成，暂时拒绝业务读写")
         if STORAGE_JOBS.maintenance_gate("database") and not STORAGE_JOBS.owns_exclusive_lock():
             raise RuntimeError("数据库正在维护，暂时拒绝业务读写")
         if STORAGE_JOBS.owns_exclusive_lock() or session.info.get("_storage_lock"):
@@ -169,7 +172,7 @@ class DatabaseManager:
         lock.__enter__()
         DATABASE._record_metric("maintenance_lock_wait_seconds",
                                 time.perf_counter() - started)
-        if STORAGE_JOBS.maintenance_gate("database"):
+        if STORAGE_JOBS.maintenance_gate("database") or upgrade_gate():
             lock.__exit__(None, None, None)
             raise RuntimeError("数据库正在维护，暂时拒绝业务读写")
         session.info["_storage_lock"] = lock

@@ -15,12 +15,13 @@ import time
 import uuid
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from threading import RLock
+from threading import RLock, local
 
 import redis
 import valkey
 from cachelib import FileSystemCache, RedisCache, SimpleCache, ValkeyCache
 from app.utils.storage_jobs import STORAGE_JOBS
+from app.utils.cache_atomic import AtomicCacheMixin, V3_NAMESPACES
 
 logger = logging.getLogger(__name__)
 REMOTE_ERRORS = (redis.exceptions.RedisError, valkey.exceptions.ValkeyError, OSError)
@@ -38,7 +39,7 @@ CACHE_NAMESPACE_REGISTRY = (
     "TmdbSeasonDetailCache", "SubtitleCache", "tmdb_metadata", "bangumi", "douban_api",
     "douban_detail", "douban_user", "fanart", "web_request", "wallpaper", "tmdb_request",
     "recognition_tmdb", "recognition_decision", "recognition_parse",
-)
+) + V3_NAMESPACES
 
 
 def validate_settings(settings):
@@ -217,6 +218,21 @@ class _SQLiteCache:
                 "SELECT value FROM cache_metadata_v2 WHERE key=?", ("format_version",)).fetchone()
             if not version or version[0] != str(self.FORMAT_VERSION):
                 raise sqlite3.DatabaseError("缓存 SQLite 结构版本不受支持")
+            # Install V3 cache-only tables before publishing disk stamps. Doing
+            # DDL during a later snapshot read would change the source revision.
+            connection.execute("""CREATE TABLE IF NOT EXISTS recognition_cache_v3 (
+                namespace TEXT NOT NULL, cache_key TEXT NOT NULL, data TEXT NOT NULL,
+                hits INTEGER NOT NULL, last_access REAL,
+                PRIMARY KEY(namespace, cache_key))""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS recognition_cache_lease_v3 (
+                namespace TEXT NOT NULL, cache_key TEXT NOT NULL, owner TEXT,
+                expires REAL NOT NULL, fence INTEGER NOT NULL,
+                PRIMARY KEY(namespace, cache_key))""")
+            from app.utils.cache_rank import ensure_disk_index
+            ensure_disk_index(connection)
+            connection.execute("""CREATE TABLE IF NOT EXISTS recognition_cache_reads_v3 (
+                namespace TEXT PRIMARY KEY, hits INTEGER NOT NULL, miss INTEGER NOT NULL,
+                stale_reads INTEGER NOT NULL, since REAL NOT NULL)""")
 
     def _connect(self):
         connection = sqlite3.connect(self._path, timeout=10, isolation_level=None)
@@ -350,12 +366,13 @@ class _SQLiteCache:
             )""", (time.time(),))
 
 
-class CacheStore:
+class CacheStore(AtomicCacheMixin):
     def __init__(self, path=None, settings=None, maintenance=True):
         self.path = path
         self._settings_override = settings
         self._maintenance_enabled = maintenance
         self._lock = RLock()
+        self._layout_lock_state = local()
         self._signature = None
         self._settings = dict(DEFAULT_SETTINGS)
         self._pending_settings = None
@@ -528,6 +545,7 @@ class CacheStore:
             self._backends.clear()
             self._revision += 1
         self._actual = "memory"
+        self._cancel_recognition_refreshes()
         # 不向日志、接口暴露包含密码/地址的异常文本。
         self._reason = f"{self._settings['backend']} 连接不可用（{type(error).__name__}）"
         self._retry_at = time.monotonic() + float(self._settings["retry_interval"])
@@ -602,17 +620,30 @@ class CacheStore:
     def freeze(self):
         with self._lock:
             self._frozen = True
+            self._cancel_recognition_refreshes()
+
+    def _cancel_recognition_refreshes(self):
+        module = sys.modules.get("app.media.recognition.refresh_worker")
+        if module is not None:
+            module.cancel_refreshes(self)
 
     def unfreeze(self):
         with self._lock:
             self._frozen = False
+            module = sys.modules.get("app.media.recognition.lease")
+            if module is not None:
+                module.resume_refreshes(self)
 
     def initialize(self):
+        self._initialize_storage()
+        self.rebuild_recognition_indexes()
+
+    def _initialize_storage(self):
         """在后台服务启动前完成本地缓存格式升级和已知命名空间导入。"""
         with STORAGE_JOBS.maintenance_lock(exclusive=True):
             if STORAGE_JOBS.maintenance_gate("cache"):
                 return
-            with self._lock:
+            with self._lock, self._layout_guard():
                 self._sync()
                 if self._invalid:
                     raise ValueError("缓存后端配置无效，无法升级缓存存储")
@@ -749,30 +780,52 @@ class CacheStore:
             self.path = os.path.join(Config().get_config_path(), "cache")
         return self.path
 
+    @contextmanager
+    def _backend_layout_guard(self):
+        if self._actual != "memory_disk":
+            yield
+            return
+        guard = self._layout_guard()
+        try:
+            guard.__enter__()
+        except OSError as error:
+            self._reason = f"磁盘缓存不可用（{type(error).__name__}）"
+            logger.warning("%s，使用内存缓存", self._reason)
+            self._actual = "memory"
+            self._backends.clear()
+            self._revision += 1
+            yield
+        else:
+            try:
+                yield
+            finally:
+                guard.__exit__(None, None, None)
+
     def _backend(self, namespace):
         self._sync()
         if namespace not in self._backends:
-            memory = _UnboundedSimpleCache(threshold=0, default_timeout=0)
-            disk = None
-            if self._actual == "memory_disk":
-                try:
-                    self._prepare_storage()
-                    disk = _SQLiteCache(os.path.join(self._directory(), "system.sqlite3"), namespace)
-                except (OSError, sqlite3.DatabaseError) as error:
-                    self._reason = f"磁盘缓存不可用（{type(error).__name__}）"
-                    logger.warning("%s，使用内存缓存", self._reason)
-                    self._actual = "memory"
-                    self._backends.clear()
-                    self._revision += 1
-            elif self._actual in {"redis", "valkey"}:
-                cache_class = ValkeyCache if self._actual == "valkey" else RedisCache
-                memory = cache_class(self._client, key_prefix=self._prefix(namespace), default_timeout=0)
-            self._backends[namespace] = (memory, disk)
-            if disk is not None:
-                try:
-                    self._migrate(namespace, disk)
-                except (OSError, sqlite3.DatabaseError, ValueError):
-                    logger.warning("旧缓存导入失败：%s", namespace)
+            with self._backend_layout_guard():
+                memory = _UnboundedSimpleCache(threshold=0, default_timeout=0)
+                disk = None
+                if self._actual == "memory_disk":
+                    try:
+                        self._prepare_storage()
+                        disk = _SQLiteCache(os.path.join(self._directory(), "system.sqlite3"), namespace)
+                    except (OSError, sqlite3.DatabaseError) as error:
+                        self._reason = f"磁盘缓存不可用（{type(error).__name__}）"
+                        logger.warning("%s，使用内存缓存", self._reason)
+                        self._actual = "memory"
+                        self._backends.clear()
+                        self._revision += 1
+                elif self._actual in {"redis", "valkey"}:
+                    cache_class = ValkeyCache if self._actual == "valkey" else RedisCache
+                    memory = cache_class(self._client, key_prefix=self._prefix(namespace), default_timeout=0)
+                self._backends[namespace] = (memory, disk)
+                if disk is not None:
+                    try:
+                        self._migrate(namespace, disk)
+                    except (OSError, sqlite3.DatabaseError, ValueError):
+                        logger.warning("旧缓存导入失败：%s", namespace)
         memory, disk = self._backends[namespace]
         if disk is not None:
             stamp = self._disk_stamp(disk._path)
@@ -1172,7 +1225,68 @@ class CacheStore:
             state["retired_legacy_files"] = retired_files
         self._write_layout_state(state_path, state)
 
+    @contextmanager
+    def _layout_guard(self):
+        """Publish a complete cache schema before another process inspects it."""
+        if getattr(self._layout_lock_state, "depth", 0):
+            self._layout_lock_state.depth += 1
+            try:
+                yield
+            finally:
+                self._layout_lock_state.depth -= 1
+            return
+        from app.utils.storage_jobs import fcntl, msvcrt
+        directory = self._directory()
+        os.makedirs(directory, exist_ok=True)
+        descriptor = os.open(os.path.join(directory, ".layout.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        with os.fdopen(descriptor, "a+b") as stream:
+            deadline = time.monotonic()+10
+            while True:
+                try:
+                    if fcntl is not None:
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    elif msvcrt is not None:  # pragma: no cover - Windows
+                        stream.seek(0)
+                        if not stream.read(1):
+                            stream.write(b"0")
+                            stream.flush()
+                        stream.seek(0)
+                        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:  # pragma: no cover - unsupported platform
+                        raise RuntimeError("cache layout locking unavailable")
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise OSError("cache layout lock unavailable") from None
+                    time.sleep(.01)
+            try:
+                self._layout_lock_state.depth = 1
+                yield
+            finally:
+                self._layout_lock_state.depth = 0
+                if fcntl is not None:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                else:  # pragma: no cover - Windows
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+
     def _prepare_storage(self):
+        if self._storage_ready:
+            return
+        with self._layout_guard():
+            if self._storage_ready:
+                return
+            try:
+                self._prepare_storage_layout()
+                if self._actual == "memory_disk":
+                    # Opening SQLite creates a file before CREATE/format_version
+                    # finish. Keep that entire interval behind the same lock.
+                    _SQLiteCache(os.path.join(self._directory(), "system.sqlite3"), "__layout__")
+            except BaseException:
+                self._storage_ready = False
+                raise
+
+    def _prepare_storage_layout(self):
         if self._storage_ready:
             return
         directory = self._directory()
@@ -1307,6 +1421,9 @@ class CacheStore:
                     return invoke(memory, disk)
 
     def get(self, namespace, key):
+        if namespace in V3_NAMESPACES:
+            value = self.envelope_get(namespace, key)
+            return (key, value, value["stale_until"]) if value is not None else None
         wire_key = self._key(key)
 
         def read(memory, disk):
@@ -1327,6 +1444,8 @@ class CacheStore:
         return self._call(namespace, read)
 
     def put(self, namespace, key, value, expires=None):
+        if namespace in V3_NAMESPACES:
+            return self.envelope_restore(namespace, key, value)
         record, wire_key = (key, value, expires), self._key(key)
 
         def write(memory, disk):
@@ -1353,6 +1472,8 @@ class CacheStore:
         self._call(namespace, write, blocked=False)
 
     def put_many(self, namespace, records):
+        if namespace in V3_NAMESPACES:
+            return sum(bool(self.envelope_restore(namespace, key, value)) for key, value, _expires in records)
         records = list(records)
         if namespace == "wallpaper" and len(records) > 1:
             records = [max(records, key=lambda record: (record[2] or 0,
@@ -1406,6 +1527,8 @@ class CacheStore:
                         raise sqlite3.OperationalError("缓存 SQLite WAL 检查点未完成")
 
     def delete(self, namespace, key):
+        if namespace in V3_NAMESPACES:
+            return self.envelope_delete(namespace, key)
         def remove(memory, disk):
             if self._is_frozen() and (self._frozen or not STORAGE_JOBS.owns_exclusive_lock()):
                 return False
@@ -1445,6 +1568,8 @@ class CacheStore:
         return len(results)
 
     def clear(self, namespace):
+        if namespace in V3_NAMESPACES:
+            return self.envelope_clear(namespace)
         def remove(memory, disk):
             if self._is_frozen() and (self._frozen or not STORAGE_JOBS.owns_exclusive_lock()):
                 return False
@@ -1463,6 +1588,9 @@ class CacheStore:
         """在独占维护锁内流式读取快照，不触发过期清理或壁纸修剪。"""
         if not STORAGE_JOBS.owns_exclusive_lock():
             raise RuntimeError("流式缓存读取需要独占维护锁")
+        if namespace in V3_NAMESPACES:
+            yield from self.envelope_records(namespace)
+            return
         with self._lock:
             self._sync()
             memory, disk = self._backend(namespace)
@@ -1502,6 +1630,8 @@ class CacheStore:
                 yield record
 
     def load(self, namespace, strict=False):
+        if namespace in V3_NAMESPACES:
+            return self.envelope_records(namespace)
         def read(memory, disk):
             if self._actual in {"redis", "valkey"}:
                 prefix = self._prefix(namespace)
@@ -1543,6 +1673,13 @@ class CacheStore:
         return self._call(namespace, read, blocked=[])
 
     def memory_info(self, namespace):
+        if namespace in V3_NAMESPACES:
+            records = self.envelope_records(namespace)
+            size = sum(len(json.dumps(value).encode()) for _, value, _ in records)
+            actual = self.capabilities()["actual_backend"]
+            return {"entries": len(records), "bytes": size, "memory_bytes": size if actual == "memory" else 0,
+                    "store_bytes": size if actual != "memory" else None,
+                    "backend": actual, "persistent": actual == "memory_disk"}
         def measure(memory, disk, actual, client, prefix):
             if disk is not None:
                 entries, size = disk.stats()
@@ -1627,6 +1764,8 @@ class CacheStore:
                 return measure(memory, disk, actual, client, prefix)
 
     def prune_expired(self, namespace):
+        if namespace in V3_NAMESPACES:
+            return self.envelope_prune(namespace)
         def prune(memory, disk):
             if self._is_frozen() and (self._frozen or not STORAGE_JOBS.owns_exclusive_lock()):
                 return 0

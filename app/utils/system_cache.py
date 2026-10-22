@@ -1,6 +1,6 @@
 """系统缓存管理入口，仅管理可重建的数据。"""
 
-import math
+from decimal import Decimal, InvalidOperation, localcontext
 import time
 from copy import deepcopy
 
@@ -90,7 +90,7 @@ def cache_info():
     return result
 
 
-def update_cache_ttl(name, value, unit):
+def update_cache_ttl(name, value, unit, expected_version=None):
     """只更新有效期策略，不修改缓存连接和迁移配置。"""
     from config import CONFIG_LOCK, Config
 
@@ -98,22 +98,34 @@ def update_cache_ttl(name, value, unit):
         "recognition_parse", "recognition_tmdb", "recognition_decision", "tmdb_metadata"}
     if not isinstance(name, str) or name not in valid:
         raise ValueError("缓存类型无效")
-    factors = {"minute": 60, "hour": 3600, "day": 86400}
+    factors = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}
     if not isinstance(unit, str) or unit not in {*factors, "forever"}:
         raise ValueError("有效期单位无效")
     if unit == "forever":
         seconds = 0
     else:
         try:
-            duration = float(value) * factors[unit]
-            if isinstance(value, bool) or not math.isfinite(duration) or not 1 <= duration <= MAX_TTL_SECONDS:
+            raw = str(value)
+            if len(raw) > 128:
                 raise ValueError
-            seconds = round(duration)
-        except (TypeError, ValueError, OverflowError):
-            raise ValueError("有效期必须大于 0，且不超过 36500 天") from None
+            # Default Decimal precision can round a long fractional second to
+            # an integer before validation. Keep every accepted input digit.
+            with localcontext() as context:
+                context.prec = 256
+                duration = Decimal(raw) * factors[unit]
+            if (isinstance(value, bool) or not duration.is_finite()
+                    or duration != duration.to_integral_value() or not 1 <= duration <= MAX_TTL_SECONDS):
+                raise ValueError
+            seconds = int(duration)
+        except (InvalidOperation, TypeError, ValueError, OverflowError):
+            raise ValueError("有效期必须精确为正整数秒，且不超过 36500 天") from None
     with STORAGE_JOBS.maintenance_lock(exclusive=False):
         if STORE.status().get("maintenance"):
             raise ValueError("缓存迁移期间不能修改有效期")
+        if expected_version is not None:
+            from app.media.recognition.settings_service import save_settings
+            save_settings({"cache": {"ttl_seconds": {cache_category(name): seconds}}}, expected_version)
+            return seconds
         with CONFIG_LOCK:
             config = deepcopy(Config().get_config())
             settings = config.get("cache") or {}

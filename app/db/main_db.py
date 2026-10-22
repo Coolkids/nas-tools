@@ -53,6 +53,10 @@ def _split_sql_script(script):
 class MainDb:
 
     @property
+    def database_manager(self):
+        return DATABASE
+
+    @property
     def session(self):
         return DATABASE.session
 

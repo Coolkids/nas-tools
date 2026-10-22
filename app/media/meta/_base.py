@@ -273,6 +273,9 @@ class MetaBase(object):
 
     # 返回集字符串
     def get_episode_string(self):
+        explicit = getattr(self, "explicit_episode_numbers", None)
+        if explicit and list(explicit) != list(range(min(explicit), max(explicit) + 1)):
+            return "".join(f"E{value:02d}" for value in explicit)
         if self.begin_episode is not None:
             return "E%s" % str(self.begin_episode).rjust(2, "0") \
                 if self.end_episode is None \
@@ -285,6 +288,9 @@ class MetaBase(object):
 
     # 返回集的数组
     def get_episode_list(self):
+        explicit = getattr(self, "explicit_episode_numbers", None)
+        if explicit is not None:
+            return list(explicit)
         if self.begin_episode is None:
             return []
         elif self.end_episode is not None:

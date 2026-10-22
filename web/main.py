@@ -161,7 +161,12 @@ def index_health():
 @App.route('/wallpaper', methods=['GET'])
 def get_wallpaper():
     from web.backend.wallpaper import get_login_wallpaper
-    return {"code": 0, "wallpaper": get_login_wallpaper()}
+    try:
+        wallpaper = get_login_wallpaper() or ""
+    except Exception as err:
+        ExceptionUtils.exception_traceback(err)
+        wallpaper = ""
+    return {"code": 0, "wallpaper": wallpaper}
 
 
 # JSON 登录接口（供 Vue 前端使用，前后端分离）
@@ -228,28 +233,13 @@ def do():
     return WebAction().action(cmd, data)
 
 
-def _is_same_origin_request():
-    """敏感表单只接受带有与当前 Host 一致的 Origin 或 Referer。"""
-    source = request.headers.get("Origin")
-    if not source:
-        source = request.headers.get("Referer")
-    if not source:
-        return False
-    try:
-        supplied = parse.urlparse(source)
-        expected = parse.urlparse(request.host_url)
-        if supplied.scheme not in {"http", "https"} or not supplied.hostname:
-            return False
-        supplied_port = supplied.port or (443 if supplied.scheme == "https" else 80)
-        expected_port = request.headers.get("X-Forwarded-Port") or expected.port
-        if expected_port is not None and supplied_port != int(expected_port):
-            return False
-        if expected_port is None and supplied.port is not None and supplied_port not in {80, 443}:
-            return False
-        # 反向代理可能终止 TLS，因此比较域名和可见端口，不比较内部与外部 scheme。
-        return supplied.hostname.lower() == (expected.hostname or "").lower()
-    except ValueError:
-        return False
+from web.browser_security import is_same_origin_request as _is_same_origin_request
+
+
+from web.recognition_v3 import register_recognition_foundation
+register_recognition_foundation(App, _is_same_origin_request)
+from web.recognition import register_recognition
+register_recognition(App)
 
 
 @App.route('/api/v1/database/backups/upload', methods=['POST'])
@@ -923,6 +913,24 @@ def ai_recognition_export():
     )
 
 
+def _recognition_export_extra_filters():
+    """Validate native UI filters before opening a streaming export response."""
+    from app.media.recognition.query_service import HistoryQuery
+    values = {}
+    if "type" in request.args:
+        values["type"] = request.args["type"]
+    if "cache_hit" in request.args:
+        raw = request.args["cache_hit"]
+        if raw not in {"true", "false"}:
+            raise ValueError("缓存筛选必须为 true 或 false")
+        values["cache_hit"] = raw == "true"
+    for key in ("duration_min_ms", "duration_max_ms"):
+        if key in request.args:
+            values[key] = float(request.args[key])
+    HistoryQuery().conditions("0", values)
+    return values
+
+
 @App.route('/recognition_export.jsonl', methods=['GET'])
 @login_required
 def recognition_export_jsonl():
@@ -946,6 +954,10 @@ def recognition_export_jsonl():
         "created_from": created_from,
         "created_to": created_to,
     }
+    try:
+        data.update(_recognition_export_extra_filters())
+    except ValueError:
+        return make_response("识别导出筛选条件无效", 400)
     response = Response(
         stream_with_context(WebAction.iter_recognition_jsonl(**data)),
         mimetype="application/x-ndjson",
@@ -977,6 +989,10 @@ def recognition_export_xlsx():
         "created_from": created_from,
         "created_to": created_to,
     }
+    try:
+        data.update(_recognition_export_extra_filters())
+    except ValueError:
+        return make_response("识别导出筛选条件无效", 400)
     return send_file(
         WebAction.get_recognition_xlsx(**data),
         as_attachment=True,

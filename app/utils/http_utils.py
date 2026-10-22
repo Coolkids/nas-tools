@@ -25,7 +25,8 @@ class RequestUtils:
                  session=None,
                  timeout=None,
                  referer=None,
-                 content_type=None):
+                 content_type=None,
+                 allow_unlimited_timeout=False):
         if not content_type:
             content_type = "application/x-www-form-urlencoded; charset=UTF-8"
         if headers:
@@ -54,7 +55,9 @@ class RequestUtils:
             self._proxies = proxies
         if session:
             self._session = session
-        if timeout:
+        if timeout is None and allow_unlimited_timeout:
+            self._timeout = None
+        elif timeout:
             self._timeout = timeout
 
     @property

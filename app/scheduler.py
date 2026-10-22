@@ -63,6 +63,8 @@ class Scheduler:
         """
         # Scheduler 是单例；配置更新后重启时需重新读取，避免沿用旧的识别清理开关。
         self.init_config()
+        from app.media.recognition.refresh_worker import start_refresh_service
+        start_refresh_service()
         self.SCHEDULER = PersistentBackgroundScheduler(namespace='main', timezone=Config().get_timezone(),
                                              executors={
                                                  'default': ThreadPoolExecutor(20)
@@ -166,6 +168,8 @@ class Scheduler:
         self.SCHEDULER.add_interval_job('app.db.main_db:MainDb.wal_checkpoint', id='wal_checkpoint', hours=6)
 
         self._schedule_database_statistics()
+        from app.media.recognition.refresh_worker import sync_schedule
+        sync_schedule(self.SCHEDULER)
 
         # 定时清理超过保留期限的媒体识别记录。
         record_cleanup = (((self._recognition or {}).get('records') or {}).get('cleanup') or {})
@@ -215,6 +219,8 @@ class Scheduler:
         停止定时服务
         """
         try:
+            from app.media.recognition.refresh_worker import stop_refresh_service
+            stop_refresh_service()
             if self.SCHEDULER:
                 self.SCHEDULER.shutdown()
                 self.SCHEDULER = None

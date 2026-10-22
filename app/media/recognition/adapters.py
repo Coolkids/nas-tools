@@ -4,6 +4,8 @@ from app.media.meta.metaanime import MetaAnime
 from app.media.meta.metavideo import MetaVideo
 from app.utils import StringUtils
 from app.utils.types import MediaType
+from copy import copy, deepcopy
+from app.media.recognition.contracts import NormalizedParse, PreprocessResult, RecognitionStatus
 
 
 def _media_type(value):
@@ -18,136 +20,57 @@ def _media_type(value):
     return mapping.get(str(value or "").lower()) or mapping.get(str(value or ""))
 
 
-def _first_value(value):
-    return value[0] if isinstance(value, (list, tuple)) and value else value
+def meta_from_normalized(prepared: PreprocessResult, parsed: NormalizedParse, *, episode_context=None):
+    """Construct a compatibility object without parsing/applying rules again."""
+    kind = _media_type(parsed.media_type)
+    meta = (MetaAnime if kind == MediaType.ANIME else MetaVideo)("", fileflag=False)
+    meta.org_string, meta.subtitle, meta.type = prepared.raw_title, prepared.raw_secondary_title, kind
+    meta.alternative_names = list(dict.fromkeys(value for value in (parsed.title, parsed.secondary_title, *parsed.aliases) if value))
+    meta.cn_name = next((value for value in meta.alternative_names if StringUtils.is_chinese(value)), None)
+    meta.en_name = next((value for value in meta.alternative_names if not StringUtils.is_chinese(value)), None)
+    meta.year = str(parsed.year) if parsed.year is not None else None
+    meta.recognition_source = parsed.provider_id
+    meta._recognition_preprocess = prepared
+    meta._recognition_original_title, meta._recognition_original_subtitle = prepared.raw_title, prepared.raw_secondary_title
+    meta._recognition_processed_title, meta._recognition_processed_subtitle = prepared.clean_title, prepared.clean_secondary_title
+    meta._recognition_used_info = {"ignored": [], "replaced": [], "offset": []}
+    season, episodes = parsed.season, parsed.episodes
+    if episode_context is not None:
+        season, episodes = episode_context.season, episode_context.episodes
+        meta.recognition_review_reason = episode_context.review_reason
+        if episode_context.numbering == "absolute":
+            episodes = ()
+    _apply_episode_context(meta, season, episodes)
+    return meta
 
 
-def _values(value):
-    if value is None:
-        return []
-    return list(value) if isinstance(value, (list, tuple)) else [value]
+def _apply_episode_context(meta, season, episodes):
+    if season is not None and (type(season) is not int or season < 0):
+        raise ValueError("invalid season")
+    if any(type(value) is not int or value <= 0 for value in episodes):
+        raise ValueError("invalid episodes")
+    meta.begin_season, meta.end_season = season, None
+    meta.explicit_episode_numbers = tuple(episodes)
+    meta.begin_episode = episodes[0] if episodes else None
+    meta.end_episode = episodes[-1] if len(episodes) > 1 else None
 
 
-def _episode_value(value):
-    if isinstance(value, dict):
-        value = value.get("value")
-    try:
-        number = float(value)
-        return int(number) if number.is_integer() and number > 0 else None
-    except (TypeError, ValueError):
-        return None
-
-
-def meta_from_anitopy_result(title, result, subtitle=None, used_info=None):
-    """适配 anitopy-ml 原始结构，不通过 MetaInfo 再次解析。"""
-    if not isinstance(result, dict):
-        return None
-    extracted = result.get("extracted") if isinstance(result.get("extracted"), dict) else result
-    names = []
-    parsed_title = (extracted.get("title") or extracted.get("anime_title")
-                    or extracted.get("name"))
-    title_spans = extracted.get("title_spans") or []
-    if not parsed_title and title_spans and isinstance(title_spans[0], dict):
-        parsed_title = title_spans[0].get("text")
-    if not parsed_title:
-        parsed_title = _first_value(extracted.get("all_titles"))
-    aliases = (extracted.get("title_aliases") or extracted.get("all_titles")
-               or extracted.get("titles") or [])
-    for name in [parsed_title, *_values(aliases)]:
-        if isinstance(name, str) and name.strip() and name.strip() not in names:
-            names.append(name.strip())
-    if not names:
-        return None
-
-    media_type = _media_type(extracted.get("media_type") or extracted.get("type"))
-    raw_seasons = (extracted.get("seasons") or extracted.get("season")
-                   or extracted.get("season_number") or extracted.get("anime_season"))
-    seasons = [int(value) for value in _values(raw_seasons)
-               if str(value).isdigit() and int(value) > 0]
-    raw_episodes = (extracted.get("episodes") or extracted.get("episode")
-                    or extracted.get("episode_number"))
-    episodes = [value for value in (_episode_value(item) for item in _values(raw_episodes))
-                if value is not None]
-    if not media_type:
-        if extracted.get("anime_title") or extracted.get("all_titles") \
-                or extracted.get("anime_year") is not None:
-            media_type = MediaType.ANIME
-        elif seasons or episodes or extracted.get("release_kind") in ("episode", "season_pack"):
-            media_type = MediaType.TV
-        elif extracted.get("release_kind") == "movie":
-            media_type = MediaType.MOVIE
-    if not media_type:
-        return None
-
-    meta_class = MetaAnime if media_type == MediaType.ANIME else MetaVideo
-    meta_info = meta_class("", subtitle=subtitle, fileflag=False)
-    meta_info.type = media_type
-    meta_info.org_string = title
-    meta_info.subtitle = subtitle
-    meta_info.recognition_source = "ai"
-    used_info = used_info or {"ignored": [], "replaced": [], "offset": []}
-    meta_info.ignored_words = used_info.get("ignored", [])
-    meta_info.replaced_words = used_info.get("replaced", [])
-    meta_info.offset_words = used_info.get("offset", [])
-    meta_info.alternative_names = names
-    for name in names:
-        if StringUtils.is_chinese(name) and not meta_info.cn_name:
-            meta_info.cn_name = name
-        elif not meta_info.en_name:
-            meta_info.en_name = StringUtils.str_title(name)
-    if not meta_info.cn_name and not meta_info.en_name:
-        meta_info.en_name = names[0]
-    year = extracted.get("year") or extracted.get("anime_year")
-    if year is not None:
-        meta_info.year = str(year)
-    if seasons:
-        meta_info.begin_season = seasons[0]
-        meta_info.end_season = seasons[-1] if len(seasons) > 1 else None
-    if episodes:
-        meta_info.begin_episode = episodes[0]
-        meta_info.end_episode = episodes[-1] if len(episodes) > 1 else None
-    meta_info.resource_type = _first_value(
-        extracted.get("source") or extracted.get("release_type"))
-    meta_info.resource_pix = _first_value(
-        extracted.get("resolution") or extracted.get("video_resolution"))
-    meta_info.video_encode = _first_value(
-        extracted.get("video_codecs") or extracted.get("video_encoders")
-        or extracted.get("video_term"))
-    meta_info.audio_encode = _first_value(
-        extracted.get("audio_codecs") or extracted.get("audio_term"))
-    meta_info.resource_team = _first_value(
-        extracted.get("release_groups") or extracted.get("release_group"))
-    return meta_info
-
-
-def meta_from_standard_result(title, parsed, subtitle=None, used_info=None):
-    """适配其他识别器的标准化字段，不再次执行解析。"""
-    if not isinstance(parsed, dict):
-        return None
-    name = parsed.get("name") or parsed.get("title")
-    media_type = _media_type(parsed.get("media_type") or parsed.get("type"))
-    if not name or not media_type:
-        return None
-    meta_class = MetaAnime if media_type == MediaType.ANIME else MetaVideo
-    meta_info = meta_class("", subtitle=subtitle, fileflag=False)
-    meta_info.org_string = title
-    meta_info.type = media_type
-    meta_info.recognition_source = "provider"
-    used_info = used_info or {"ignored": [], "replaced": [], "offset": []}
-    meta_info.ignored_words = used_info.get("ignored", [])
-    meta_info.replaced_words = used_info.get("replaced", [])
-    meta_info.offset_words = used_info.get("offset", [])
-    meta_info.alternative_names = parsed.get("alternative_names") or [name]
-    if StringUtils.is_chinese(name):
-        meta_info.cn_name = name
-    else:
-        meta_info.en_name = StringUtils.str_title(name)
-    meta_info.year = str(parsed.get("year")) if parsed.get("year") is not None else None
-    for source, target in (("season", "begin_season"), ("episode", "begin_episode"),
-                           ("part", "part"), ("resource_type", "resource_type"),
-                           ("resource_pix", "resource_pix"), ("resource_team", "resource_team"),
-                           ("video_encode", "video_encode"), ("audio_encode", "audio_encode")):
-        value = parsed.get(source)
-        if value is not None:
-            setattr(meta_info, target, value)
-    return meta_info
+def meta_from_outcome(outcome, parsed_meta, detail=None):
+    meta = copy(parsed_meta)
+    meta.tmdb_info, meta.tmdb_id, meta.tvdb_id, meta.imdb_id, meta.douban_id = {}, 0, 0, "", 0
+    meta.recognition_request_id = outcome.request_id
+    meta.recognition_status = outcome.status.value
+    if outcome.status != RecognitionStatus.MATCHED:
+        return meta
+    identity = outcome.business_identity
+    if not isinstance(detail, dict) or detail.get("id") != identity.tmdb_id:
+        raise ValueError("verified identity requires matching TMDB details")
+    supplied = _media_type(detail.get("media_type"))
+    expected = MediaType.MOVIE if identity.media_type == "movie" else MediaType.TV
+    if supplied is not None and supplied not in ({MediaType.TV, MediaType.ANIME} if expected == MediaType.TV else {expected}):
+        raise ValueError("TMDB entity type mismatch")
+    info = deepcopy(detail)
+    info["media_type"] = expected
+    meta.set_tmdb_info(info)
+    _apply_episode_context(meta, outcome.season, outcome.episodes)
+    return meta

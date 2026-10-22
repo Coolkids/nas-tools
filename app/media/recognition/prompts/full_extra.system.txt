@@ -1,0 +1,3 @@
+
+额外字段：release_group、source、resolution、video_codec、audio_codec、subtitles。它们必须是 JSON 字符串或 null，不能猜测，也不能与名称混淆。release_group 为明确发布组；source 为 WebRip/BluRay/WEB-DL 等发布来源；不要把编码误当成来源。
+完整 JSON 示例：{"title":"海边日记","aliases":["Beach Notes"],"media_type":"tv","year":null,"season":null,"episode":7,"release_group":"ExampleGroup","source":"WebRip","resolution":"1080p","video_codec":"HEVC","audio_codec":"AAC","subtitles":null}。

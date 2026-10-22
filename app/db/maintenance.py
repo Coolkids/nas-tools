@@ -994,12 +994,13 @@ def _sha256_path(path, job_id=None):
     return digest.hexdigest()
 
 
-def _manifest_schema():
+def _manifest_schema(metadata=None):
+    metadata = Base.metadata if metadata is None else metadata
     from app.db.schema import LOGICAL_DOMAIN_TABLES
     domains = {table: domain for domain, names in LOGICAL_DOMAIN_TABLES.items()
                for table in names}
     schema = {}
-    for table in Base.metadata.sorted_tables:
+    for table in metadata.sorted_tables:
         schema[table.name] = {
             "domain": domains.get(table.name, "main"),
             "columns": [{"name": column.name, "type": str(column.type),
@@ -1164,7 +1165,7 @@ def _convert_legacy_dual_backup(path, upload_id, job_id):
     """Upgrade an old complete SQLite pair into the current portable backup format."""
     from app.db.migration import _new_engine, _sqlite_integrity, _write_schema_revision
     from app.db.schema import MEDIA_TABLES
-    from app.db.sqlite_files import (_MEDIA_UPGRADE_BASE, _backfill_recognition_search,
+    from app.db.sqlite_files import (_MEDIA_UPGRADE_BASE,
                                      _copy_domain, _copy_snapshot,
                                      _fsync_directory, _upgrade_legacy_media_snapshot,
                                      _upgrade_snapshot,
@@ -1221,7 +1222,6 @@ def _convert_legacy_dual_backup(path, upload_id, job_id):
                                  excluded_tables={"MEDIASYNC_SYNC_JOBS"},
                                  attached_sources=attached_sources)
                     cleanup_legacy_startup_data(connection)
-                    _backfill_recognition_search(connection)
             finally:
                 for alias in reversed(attached_sources):
                     connection.exec_driver_sql(f"DETACH DATABASE \"{alias}\"")
@@ -1526,34 +1526,37 @@ def _fsync_file_and_directory(path):
         pass
 
 
-def _retire_recognition_spool(job_id):
-    config_path = _config().get_config_path()
-    source = os.path.join(config_path, "recognition_spool")
-    if not os.path.isdir(source):
-        return None
-    root = os.path.join(_maintenance_root(), "database-retired-spool")
-    _secure_directory(root)
-    destination = os.path.join(root, job_id)
-    if not os.path.exists(destination):
+def _retire_recognition_spool(job_id, config_path=None):
+    config_path = config_path or _config().get_config_path()
+    changed = False
+    for name in ("recognition_spool", "recognition_v3_spool"):
+        source = os.path.join(config_path, name)
+        if not os.path.isdir(source):
+            continue
+        root = os.path.join(config_path, ".maintenance", "database-retired-spool", job_id)
+        _secure_directory(root)
+        destination = os.path.join(root, name+"-"+uuid.uuid4().hex)
         os.replace(source, destination)
-    elif os.path.isdir(source) and os.listdir(source):
-        continued = os.path.join(destination, f"continued-{uuid.uuid4().hex}")
-        os.replace(source, continued)
-    _secure_directory(source)
-    return True
+        _secure_directory(source)
+        changed = True
+    return True if changed else None
 
 
 def _clear_restore_derived_state(job_id):
+    from app.db.recognition_upgrade import rotate_generation
+    from app.db.migration import _fingerprint
+    rotate_generation(_fingerprint(_settings()[0]), _config().get_config_path(), "restore:" + job_id)
     from app.utils.cache_backend import CACHE_NAMESPACE_REGISTRY, STORE
     for namespace in CACHE_NAMESPACE_REGISTRY:
         STORE.clear(namespace)
     return _retire_recognition_spool(job_id)
 
 
-def _validate_backup_archive(path, job_id=None):
-    expected_schema = _manifest_schema()
-    expected_tables = set(Base.metadata.tables)
-    expected_revision = current_schema_revision()
+def _validate_backup_archive(path, job_id=None, *, metadata=None, revision=None):
+    metadata = Base.metadata if metadata is None else metadata
+    expected_schema = _manifest_schema(metadata)
+    expected_tables = set(metadata.tables)
+    expected_revision = current_schema_revision() if revision is None else revision
     with zipfile.ZipFile(path, "r") as archive:
         infos = archive.infolist()
         names = [info.filename for info in infos]
@@ -1599,8 +1602,9 @@ def _validate_backup_archive(path, job_id=None):
             raise ValueError("备份结构版本不受支持，需先执行明确的版本转换")
         if manifest.get("schema") != expected_schema:
             raise ValueError("备份表结构与当前统一数据库结构不匹配")
-        expected_domains = {key: sorted(value)
-                            for key, value in LOGICAL_DOMAIN_TABLES.items()}
+        from app.db.schema import MEDIA_TABLES
+        expected_domains = {"main": sorted(expected_tables - MEDIA_TABLES),
+                            "media": sorted(expected_tables & MEDIA_TABLES)}
         if manifest.get("logical_domains") != expected_domains:
             raise ValueError("备份未覆盖当前要求的全部逻辑数据域")
         if manifest.get("source_database_type") not in {"sqlite", "postgresql", "mysql", "mariadb"}:
@@ -1610,7 +1614,7 @@ def _validate_backup_archive(path, job_id=None):
             raise ValueError("备份未覆盖全部应用表，不能作为完整数据库恢复")
         expected_files = {"manifest.json"}
         content_digests = {}
-        for table in Base.metadata.sorted_tables:
+        for table in metadata.sorted_tables:
             if job_id and STORAGE_JOBS.cancel_requested(job_id):
                 raise InterruptedError("已取消备份结构和数据检查")
             details = table_entries.get(table.name)
@@ -1656,6 +1660,76 @@ def _validate_backup_archive(path, job_id=None):
             "archive_sha256": _sha256_path(path, job_id=job_id), "size_bytes": _file_size(path)}
 
 
+def _convert_recognition_backup(path, job_id):
+    """Validate a known old full archive, upgrade its isolated table projection.
+
+    Validate even the discarded history rows before conversion. Preserve the
+    original archive for rollback; never import its obsolete history into V3.
+    """
+    from db_scripts.recognition_legacy import archive_metadata, TABLES
+    path = os.fspath(path)
+    with zipfile.ZipFile(path, "r") as archive:
+        if archive.getinfo("manifest.json").file_size > _MAX_MANIFEST_BYTES:
+            raise ValueError("备份清单超过允许大小")
+        manifest = json.loads(archive.read("manifest.json"), parse_constant=_reject_json_constant)
+    if not isinstance(manifest, dict):
+        raise ValueError("备份清单必须是对象")
+    revision = manifest.get("schema_revision")
+    if revision == current_schema_revision():
+        return _validate_backup_archive(path, job_id=job_id)
+    if revision not in {"fa0d1e2f3a4b", "fb1e2f3a4b5c"}:
+        raise ValueError("备份结构版本不受支持，需先执行明确的版本转换")
+    tables = set(manifest.get("tables") or {})
+    # fb1 archives were emitted both before and after S20 runtime retirement.
+    metadata = (Base.metadata if tables == set(Base.metadata.tables)
+                else archive_metadata(include_v3=revision == "fb1e2f3a4b5c"))
+    _validate_backup_archive(path, job_id=job_id, metadata=metadata, revision=revision)
+    originals = os.path.join(_maintenance_root(), "recognition-upgrade-imports")
+    _secure_directory(originals)
+    original = os.path.join(originals, f"{job_id}.zip")
+    if not os.path.exists(original):
+        shutil.copyfile(path, original)
+        _secure_file(original)
+        _fsync_file_and_directory(original)
+    if _sha256_path(original) != _sha256_path(path):
+        raise ValueError("旧备份保留副本校验失败")
+    converted = path + ".recognition-v3.tmp"
+    try:
+        with zipfile.ZipFile(path, "r") as source, zipfile.ZipFile(
+                converted, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as target:
+            entries = {}
+            for table in Base.metadata.sorted_tables:
+                if job_id and STORAGE_JOBS.cancel_requested(job_id):
+                    raise InterruptedError("已取消旧识别备份转换")
+                file = f"tables/{table.name}.jsonl"
+                if table.name in tables:
+                    entries[table.name] = manifest["tables"][table.name]
+                    with source.open(file) as reader, target.open(file, "w", force_zip64=True) as writer:
+                        shutil.copyfileobj(reader, writer, 1024 * 1024)
+                else:
+                    target.writestr(file, b"")
+                    entries[table.name] = {"file": file, "rows": 0,
+                                           "sha256": hashlib.sha256(b"").hexdigest()}
+            manifest.update(schema_revision=current_schema_revision(), schema=_manifest_schema(), tables=entries,
+                            logical_domains={key: sorted(value) for key, value in LOGICAL_DOMAIN_TABLES.items()},
+                            recognition_upgrade={"source_revision": revision, "retired_tables": list(TABLES),
+                                                 "history_migrated": False,
+                                                 "original_sha256": _sha256_path(original)})
+            target.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, sort_keys=True))
+        _secure_file(converted)
+        checked = _validate_backup_archive(converted, job_id=job_id)
+        _fsync_file_and_directory(converted)
+        os.replace(converted, path)
+        _fsync_file_and_directory(path)
+        checked["legacy_converted"] = True
+        return checked
+    finally:
+        try:
+            os.unlink(converted)
+        except FileNotFoundError:
+            pass
+
+
 def check_database_backup(values=None):
     upload_id = str((values or {}).get("upload_id") or "")
     path = _upload_path(upload_id)
@@ -1682,7 +1756,7 @@ def _run_backup_check(job_id, upload_id, path):
                             message="正在校验备份文件、结构和逐表数据摘要")
         with zipfile.ZipFile(path, "r") as archive:
             is_current_format = "manifest.json" in archive.namelist()
-        result = (_validate_backup_archive(path, job_id=job_id)
+        result = (_convert_recognition_backup(path, job_id)
                   if is_current_format else
                   _convert_legacy_dual_backup(path, upload_id, job_id))
         manifest = result["manifest"]

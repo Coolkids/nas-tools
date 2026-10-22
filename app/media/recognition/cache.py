@@ -10,7 +10,9 @@ from app.utils.persistent_cache import PersistentCache, STORE
 from app.utils.cache_memory import cache_memory_info
 from app.utils.cache_policy import cache_ttl
 
-from app.media.recognition.records import current_recorder, recognition_config
+from app.media.recognition.records import (
+    current_recorder, recognition_config, recognition_abort_reason, recognition_remaining_seconds,
+)
 
 
 CACHE_MISS = object()
@@ -182,10 +184,10 @@ def _cache_settings():
     return settings if isinstance(settings, dict) else {}
 
 
-def generation(namespace="parse"):
+def generation(namespace="parse", *, settings=None):
     """取得缓存代次；清理或配置变更后旧任务不得回填。"""
     if namespace == "parse":
-        return _PARSE_CACHE.generation(_cache_settings())
+        return _PARSE_CACHE.generation(_cache_settings() if settings is None else settings)
     return None
 
 
@@ -195,8 +197,8 @@ def singleflight_enabled(namespace="parse"):
     return _PARSE_CACHE.singleflight_enabled(_cache_settings())
 
 
-def get(namespace, key):
-    settings = _cache_settings()
+def get(namespace, key, *, settings=None):
+    settings = _cache_settings() if settings is None else settings
     if namespace == "parse":
         return _PARSE_CACHE.get(key, settings)
     if not settings.get("enabled", True):
@@ -208,8 +210,11 @@ def get(namespace, key):
     return CACHE_MISS if value is CACHE_MISS else copy.deepcopy(value)
 
 
-def put(namespace, key, value, negative=False, generation=None):
-    settings = _cache_settings()
+def put(namespace, key, value, negative=False, generation=None, *, settings=None):
+    remaining = recognition_remaining_seconds()
+    if recognition_abort_reason() or remaining is not None and remaining <= 0:
+        return False
+    settings = _cache_settings() if settings is None else settings
     if namespace == "parse":
         return _PARSE_CACHE.put(key, value, settings, generation=generation)
     if not settings.get("enabled", True) or namespace not in _CACHES:

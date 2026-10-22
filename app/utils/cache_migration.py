@@ -171,7 +171,7 @@ def _snapshot_namespace_digest(path, namespace):
                         raise ValueError(f"缓存快照命名空间 {namespace} 的记录结构无效")
                     yield record
 
-        return _record_digest(records(), now=float("-inf"))
+        return _record_digest(records(), now=float("-inf"), normalize_generation=False)
     except sqlite3.DatabaseError as error:
         raise ValueError("缓存快照数据库损坏") from error
     finally:
@@ -435,7 +435,7 @@ def _commit_sqlite_target(job_id):
         pass
 
 
-def _record_digest(records, now=None):
+def _record_digest(records, now=None, normalize_generation=True):
     now = time.time() if now is None else now
     count = 0
     xor_digest = 0
@@ -444,6 +444,10 @@ def _record_digest(records, now=None):
     for key, value, expires in records:
         if expires is not None and expires <= now:
             continue
+        if (normalize_generation and isinstance(value, dict) and value.get("schema_version") == 3
+                and value.get("layer") in {"identity", "search", "detail", "episode"}
+                and {"storage_generation", "cycle_id", "payload_version", "payload", "cache_key"} <= set(value)):
+            value = {**value, "storage_generation": "logical-v3-envelope"}
         item_digest = int.from_bytes(
             hashlib.sha256(pickle.dumps((key, value, expires), protocol=4)).digest(), "big")
         xor_digest ^= item_digest
@@ -678,11 +682,15 @@ def start_cache_migration(values):
 
 def _run_migration(job_id, candidate):
     from config import CONFIG_LOCK, Config
+    from app.media.recognition.lease import pause_refreshes, resume_refreshes
 
     same_store = _same_store(STORE._settings, candidate)
     staged_sqlite = candidate.get("backend") == "memory_disk" and not same_store
     target_path = _target_cache_directory(job_id) if staged_sqlite else None
     target = CacheStore(path=target_path, settings=candidate)
+    # A refresh may hold a shared maintenance lease while waiting on unlimited
+    # HTTP. Stop its admission/I/O before waiting for exclusive ownership.
+    pause_refreshes(STORE)
     try:
         with STORAGE_JOBS.maintenance_lock(exclusive=True), STORE._lock:
             _ensure_storage_idle(job_id)
@@ -872,6 +880,7 @@ def _run_migration(job_id, candidate):
                 if not STORAGE_JOBS.maintenance_gate("cache"):
                     STORE.unfreeze()
         target.close()
+        resume_refreshes(STORE)
         with _WORKERS_LOCK:
             _WORKERS.pop(job_id, None)
 
