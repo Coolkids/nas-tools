@@ -8,6 +8,27 @@ def has_cjk(value):
     return bool(re.search(r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]", value))
 
 
+def tmdb_titles(info):
+    """汇总主名称、原名、官方别名及各语言译名，用于名称和年份校验。"""
+    names = {value.strip() for key in ("title", "name", "original_title", "original_name", "_tmdb_title")
+             if isinstance((value := info.get(key)), str) and value.strip()}
+    alternatives = info.get("alternative_titles", {})
+    if isinstance(alternatives, dict):
+        for row in alternatives.get("titles", alternatives.get("results", [])):
+            if isinstance(row, dict) and isinstance(row.get("title"), str) and row["title"].strip():
+                names.add(row["title"].strip())
+    translations = info.get("translations", {})
+    if isinstance(translations, dict):
+        for row in translations.get("translations", []):
+            data = row.get("data", {}) if isinstance(row, dict) else {}
+            if not isinstance(data, dict):
+                continue
+            for key in ("title", "name"):
+                if isinstance(data.get(key), str) and data[key].strip():
+                    names.add(data[key].strip())
+    return sorted(names)
+
+
 def localize_tmdb_detail(detail, kind, language):
     """中文请求优先使用 TMDB 中文译名，并保留响应原名作为匹配证据。"""
     info = dict(detail)

@@ -5,6 +5,7 @@ import hashlib
 import unicodedata
 from app.media.recognition.contracts import QueryPlanItem
 from app.media.recognition.title_names import canonical_name, title_variants, has_cjk
+from app.media.recognition.release_year import release_year
 
 
 def canonical_title(value):
@@ -15,7 +16,7 @@ def query_planning_policy(settings):
     """让查询顺序语义与已验证身份缓存的版本规则保持一致。"""
     recognition = settings.get("recognition") or settings
     query = recognition.get("query") or {}
-    return {"version": 5, "prefer_english": bool(query.get("prefer_english", True))}
+    return {"version": 6, "prefer_english": bool(query.get("prefer_english", True))}
 
 
 def is_english_title(value):
@@ -69,7 +70,8 @@ class QueryPlanner:
             if parse.media_type in {"tv", "movie"}:
                 hints.add(parse.media_type)
             # 电视剧文件名中的年份可能指后续某一季，而非首播日期。
-            year = parse.year if parse.media_type == "movie" and not relax_year else None
+            year = (release_year(parse.year, titles=(parse.title, parse.secondary_title, *parse.aliases))
+                    if parse.media_type == "movie" and not relax_year else None)
             for field, title in (("title", parse.title), ("secondary_title", parse.secondary_title)):
                 add(title, parse.media_type, year, parse.provider_id, parse.evidence_family, field)
             for title in sorted(set(parse.aliases)):

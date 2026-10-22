@@ -17,11 +17,13 @@ from app.media.recognition.contracts import IdentityEntry, NormalizedParse, Reco
 from app.media.recognition.episode_resolver import resolve_episode, default_episode_season, merge_episode_context
 from app.media.recognition.identity import IdentityService, IdentityScope, OverrideRepository, OverrideConflict, detail_signature, media_kind, scope_for
 from app.media.recognition.preprocessor import PREPROCESSOR_VERSION, snapshot_rules
+from app.media.recognition.release_year import explicit_release_year, release_year
 from app.media.recognition.repository import RecognitionRepository, utc_now
 from app.media.recognition.runtime import WorkItem, ResourceBusy, get_runtime
 from app.media.recognition.settings import profile_network_allowed, profile_tmdb_allowed
 from app.media.recognition.tmdb_client import TMDBClient, TMDBRequestError
 from app.media.recognition.trace import Trace
+from app.media.recognition.title_names import tmdb_titles
 
 
 def effective_settings(value=None):
@@ -266,7 +268,8 @@ class RecognitionCoordinator:
                     lookup = parent_prepared
                     scope = scope_for(lookup, name=name, mtype=mtype or ("tv" if episode.episodes else None), year=year)
                     trace.emit("fallback", "parent_title_used", "success", {"title": parent_name})
-                elif parent_prepared.year_hint is not None:
+                elif (parent_prepared.year_hint is not None and (scope.media_type != "tv" or
+                        explicit_release_year(parent_prepared.year_hint, (parent_prepared.clean_title,)))):
                     scope = replace(scope, year=parent_prepared.year_hint)
         if scope is not None and episode.episodes and scope.media_type == "unknown":
             scope = replace(scope, media_type="tv")
@@ -346,7 +349,8 @@ class RecognitionCoordinator:
                         row = next((item for item in seasons if isinstance(item, dict) and item.get("season_number") == episode.season), None) if isinstance(seasons, list) else None
                         date = row.get("air_date") if row else None
                     date = date if isinstance(date, str) else ""
-                    if scope.year is not None and date[:4].isdecimal() and date[:4] != str(scope.year):
+                    checked_year = release_year(scope.year, titles=tmdb_titles(detail))
+                    if checked_year is not None and date[:4].isdecimal() and date[:4] != str(checked_year):
                         identity_miss_reason = "year_conflict"
                         identity = None
                     else:

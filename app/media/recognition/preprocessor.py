@@ -9,12 +9,13 @@ import unicodedata
 import regex
 
 from app.media.recognition.contracts import PreprocessResult, RuleApplication, RuleMatch, TokenSpan
+from app.media.recognition.release_year import plausible_release_year
 from app.utils.word_rules import WordRuleProcessor
 
 
 RULE_GROUPS = ("ignored_words_info", "ignored_words_noregex_info", "replaced_words_info",
                "replaced_words_noregex_info", "replaced_offset_words_info", "offset_words_info")
-PREPROCESSOR_VERSION = "4"
+PREPROCESSOR_VERSION = "5"
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,10 +112,11 @@ def preprocess_with_details(title, secondary_title=None, *, rules=None, normaliz
     resolutions = regex.findall(r"(?i)\b(?:\d{3,4}[pi]|[248]K)\b", technical_text)
     # 1920x1080 这类尺寸属于技术信息，不能作为发行年份。
     year_text = regex.sub(r"(?i)(?<!\d)\d{3,4}\s*[x×]\s*\d{3,4}(?!\d)", "", main)
-    years = regex.findall(r"(?<!\d)((?:19|20)\d{2})(?!\d)", year_text)
+    years = [int(value) for value in regex.findall(r"(?<!\d)((?:19|20)\d{2})(?!\d)", year_text)
+             if plausible_release_year(int(value))]
     result = PreprocessResult(title, main, rules.version, PREPROCESSOR_VERSION, secondary_title, secondary,
         candidate_titles=tuple(dict.fromkeys(item for item in (main, secondary) if item)),
-        year_hint=int(years[-1]) if years else None, season_tokens=tuple(tokens),
+        year_hint=years[-1] if years else None, season_tokens=tuple(tokens),
         episode_tokens=tuple(episodes), codecs=tuple(codecs), resolutions=tuple(resolutions),
         applied_rules=tuple(applied), token_spans=tuple(spans), rule_matches=tuple(matches))
     return result, used, errors

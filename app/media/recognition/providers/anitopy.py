@@ -7,10 +7,11 @@ from app.media.recognition.contracts import MediaNameRecognizer, ParseResult, Re
 from app.media.recognition.provider_schema import ml_extraction
 from app.media.recognition.episode_resolver import find_season, resolve_episode
 from app.media.recognition.title_names import title_variants
+from app.media.recognition.release_year import explicit_release_year, plausible_release_year
 
 
 class AnitopyRecognizer(MediaNameRecognizer):
-    descriptor = RecognizerDescriptor("anitopy", "Anitopy", "2.2-v3.5", "local_rules")
+    descriptor = RecognizerDescriptor("anitopy", "Anitopy", "2.2-v3.6", "local_rules")
 
     def __init__(self, timeout=None):
         self.timeout = timeout
@@ -51,6 +52,8 @@ class AnitopyRecognizer(MediaNameRecognizer):
             if value["year"] is None and isinstance(value["title"], str):
                 years = re.findall(r"(?i)(?<=[ ._(\[])((?:19|20)\d{2})(?=[ ._)\]]*"
                     r"(?:\d{3,4}[pi]|[248]k|bluray|web|hdtv|dvdrip|remux|h[ .]?26[45]|hevc|av1)\b)", request.title)
+                years = [year for year in years if plausible_release_year(int(year)) and
+                    (value["media_type"] != "tv" or explicit_release_year(int(year), (request.title,)))]
                 if years:
                     year = years[-1]
                     title = re.sub(r"\s+" + year + r"$", "", value["title"])

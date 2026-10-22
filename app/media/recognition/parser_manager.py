@@ -94,7 +94,7 @@ class ParserManager:
                                     any(item is not None and (not isinstance(item, str) or len(item) > 1024) for item in release.values())):
                                 raise ValueError("invalid_llm_release_cache")
                             value = value["extraction"]
-                        parsed = normalized(value, provider_id, descriptor.version, descriptor.evidence_family)
+                        parsed = normalized(value, provider_id, descriptor.version, descriptor.evidence_family, prepared=prepared)
                     except (ValueError, TypeError):
                         pass
                     else:
@@ -137,7 +137,7 @@ class ParserManager:
             if value.status == "success":
                 try:
                     results[provider_id] = normalized(value.parsed, provider_id, descriptor.version,
-                        descriptor.evidence_family, duration_ms=value.elapsed_ms)
+                        descriptor.evidence_family, duration_ms=value.elapsed_ms, prepared=prepared)
                     release = (value.raw_result or {}).get("release_metadata", {}) if provider_id == "openai" else None
                     results[provider_id] = replace(results[provider_id], release_metadata=release)
                     if cache and self.budget.failure_reason is None:

@@ -3,6 +3,7 @@
 import hashlib
 import json
 from app.media.recognition.contracts import NormalizedParse
+from app.media.recognition.release_year import explicit_release_year, release_year
 
 
 FIELDS = {"title", "secondary_title", "aliases", "media_type", "year", "season", "episodes", "episode_numbering"}
@@ -56,8 +57,13 @@ def validate_extraction(value):
     return value
 
 
-def normalized(value, provider, version, family, *, duration_ms=0):
+def normalized(value, provider, version, family, *, duration_ms=0, prepared=None):
     value = validate_extraction(value)
+    value = dict(value)
+    value["year"] = release_year(value["year"], titles=(value["title"], value["secondary_title"], *value["aliases"]))
+    if prepared is not None and (value["media_type"] == "tv" or value["season"] is not None or value["episodes"]):
+        if not explicit_release_year(value["year"], (prepared.clean_title, prepared.clean_secondary_title)):
+            value["year"] = None
     return NormalizedParse(provider, version, family, "success", **value, duration_ms=duration_ms)
 
 

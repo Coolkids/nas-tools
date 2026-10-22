@@ -16,6 +16,7 @@ from app.media.recognition.query_planner import canonical_title, query_planning_
 from app.media.recognition.ranker import MATCHING_VERSION
 from app.media.recognition.repository import RecognitionRepository, encode, utc_now
 from app.media.recognition.episode_resolver import find_season, find_bracket_episode
+from app.media.recognition.release_year import explicit_release_year, release_year
 
 
 def digest(value):
@@ -81,16 +82,18 @@ def scope_for(prepared, *, name=None, mtype=None, year=None):
             text = text[:min(boundaries)]
         text = text.rstrip(" .-_[【(")
         text = re.sub(r"(?i)(?:\s*(?:\[[^\]]*(?:字幕|简[繁体中]|繁[体中]|chs|cht|aac|flac|hdr)[^\]]*\]|【[^】]*字幕[^】]*】))+$", "", text)
-    # 类型和年份仍用于冲突校验及人工选择提示，不作为键字段。
+    kind = media_kind(mtype)
+    if kind == "unknown" and episodic:
+        kind = "tv"
+    # 自动年份不能删除标题中的数字；电视剧要求独立的年份标记。
     if year is None:
-        year = prepared.year_hint
+        year = release_year(prepared.year_hint)
+        if kind == "tv" and not explicit_release_year(year, (prepared.clean_title, prepared.clean_secondary_title)):
+            year = None
     elif isinstance(year, str) and year.isdecimal():
         year = int(year)
     if year is not None:
         text = re.sub(r"(?<!\d)"+str(year)+r"(?!\d)", " ", text)
-    kind = media_kind(mtype)
-    if kind == "unknown" and episodic:
-        kind = "tv"
     name = canonical_title(text)
     # 仅含集数的名称无法确定作品身份；协调器会使用
     # 单独准备的父目录，并保留当前文件的集数信息。

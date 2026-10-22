@@ -7,11 +7,12 @@ import math
 import re
 from app.media.recognition.contracts import RecognitionStatus
 from app.media.recognition.query_planner import canonical_title
-from app.media.recognition.title_names import official_keyword_in_title, title_variants
+from app.media.recognition.title_names import official_keyword_in_title, title_variants, tmdb_titles
+from app.media.recognition.release_year import release_year
 from app.media.recognition.episode_resolver import EpisodeContext, default_episode_season, merge_episode_context
 
 
-MATCHING_VERSION = "rank-v3.4"
+MATCHING_VERSION = "rank-v3.5"
 DEFAULT_WEIGHTS = {"title": .55, "type_episode": .20, "year": .15, "consensus": .07, "popularity": .03}
 
 
@@ -44,22 +45,7 @@ def parser_title_check(parsed, titles, threshold):
 
 
 def official_titles(candidate):
-    info = {**candidate.search_fields, **candidate.detail_fields}
-    names = {value.strip() for key in ("title", "name", "original_title", "original_name", "_tmdb_title")
-             if isinstance((value := info.get(key)), str) and value.strip()}
-    alternatives = candidate.detail_fields.get("alternative_titles", {})
-    if isinstance(alternatives, dict):
-        for row in alternatives.get("titles", alternatives.get("results", [])):
-            if isinstance(row, dict) and isinstance(row.get("title"), str):
-                names.add(row["title"])
-    translations = candidate.detail_fields.get("translations", {})
-    if isinstance(translations, dict):
-        for row in translations.get("translations", []):
-            data = row.get("data", {}) if isinstance(row, dict) else {}
-            for key in ("title", "name"):
-                if isinstance(data.get(key), str) and data[key].strip():
-                    names.add(data[key])
-    return sorted(names)
+    return tmdb_titles({**candidate.search_fields, **candidate.detail_fields})
 
 
 def sequel_number(title):
@@ -93,7 +79,6 @@ class CandidateRanker:
         episode = merge_episode_context(episode or EpisodeContext(), parsed)
         primary = sorted({name for p in parsed for value in (p.title, p.secondary_title) for name in title_variants(value)})
         types = {p.media_type for p in parsed if p.media_type in {"tv", "movie"}}
-        years = {p.year for p in parsed if p.year is not None}
         weights = settings.get("weights", DEFAULT_WEIGHTS)
         output = deepcopy(list(candidates))
         for c in output:
@@ -103,6 +88,8 @@ class CandidateRanker:
             info = {**c.search_fields, **c.detail_fields}
             adult = c.search_fields.get("adult") is True or c.detail_fields.get("adult") is True
             titles = official_titles(c)
+            # 年份证据按候选分别核对，官方名称中的同一数字属于标题。
+            years = {year for p in parsed if (year := release_year(p.year, titles=titles)) is not None}
             checks = [parser_title_check(p, titles, settings["min_name_similarity"])
                 for p in sorted(parsed, key=lambda p: p.provider_id) if p.title or p.secondary_title or p.aliases]
             name = max((check["similarity"] for check in checks), default=0)
