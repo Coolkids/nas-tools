@@ -21,7 +21,7 @@ def _media_type(value):
 
 
 def meta_from_normalized(prepared: PreprocessResult, parsed: NormalizedParse, *, episode_context=None):
-    """Construct a compatibility object without parsing/applying rules again."""
+    """构造兼容对象，不再重复解析或应用规则。"""
     kind = _media_type(parsed.media_type)
     meta = (MetaAnime if kind == MediaType.ANIME else MetaVideo)("", fileflag=False)
     meta.org_string, meta.subtitle, meta.type = prepared.raw_title, prepared.raw_secondary_title, kind

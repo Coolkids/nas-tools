@@ -1,4 +1,4 @@
-"""Four V3 cache layers using the selected CacheStore, with no business SQL."""
+"""使用选定的 CacheStore 实现四层 V3 缓存，不执行业务 SQL。"""
 
 from dataclasses import asdict, is_dataclass
 import hashlib
@@ -105,7 +105,7 @@ class CacheRepository:
 
     def load(self, layer, key, loader, *, cancellation=None, budget=None, lease_seconds=30,
              ttl_for_payload=None, validator=None, **put_options):
-        """Cross-process singleflight on shared stores; memory is process-local."""
+        """共享存储支持跨进程 singleflight；内存缓存仅限当前进程。"""
         if cancellation is not None:
             cancellation.check()
         if budget is not None:
@@ -138,7 +138,7 @@ class CacheRepository:
                 renewal = Thread(target=heartbeat, name="recognition-cache-lease", daemon=True)
                 renewal.start()
                 try:
-                    # A value may have been published between get and acquire.
+                    # 在 get 和 acquire 之间，可能已有值被发布。
                     cached = self.get(layer, key, hit=False)
                     if usable(cached):
                         return cached.payload
@@ -150,10 +150,10 @@ class CacheRepository:
                     options = dict(put_options)
                     if ttl_for_payload is not None:
                         options["ttl"] = ttl_for_payload(payload)
-                    # Replace invalid data through the same fence without
-                    # deleting it (deletion also invalidates the lease). The old
-                    # value may expire during I/O; our live fence still permits
-                    # publication. A newer owner always stays authoritative.
+                    # 通过同一栅栏替换无效数据，但不
+                    # 删除数据（删除操作也会使租约失效）。旧值
+                    # 可能在 I/O 期间过期；有效栅栏仍允许我们
+                    # 发布结果。较新的所有者始终具有优先权。
                     self.put(layer, key, payload, owner=owner, fence=fence, **options)
                     return payload
                 finally:
@@ -170,7 +170,7 @@ class CacheRepository:
         return {layer: self.store.envelope_records(self.namespace(layer)) for layer in LAYERS}
 
     def restore(self, snapshot):
-        """Absolute expiry/version/cycle/hits survive; leases never migrate."""
+        """绝对过期时间、版本、周期和命中次数都会保留；租约不会迁移。"""
         restored = 0
         for layer, records in snapshot.items():
             namespace = self.namespace(layer)

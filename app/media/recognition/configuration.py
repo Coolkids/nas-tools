@@ -1,7 +1,6 @@
-"""Multi-engine configuration contracts and upgrade conversion.
+"""多引擎配置约定及升级转换。
 
-Migration is pure: callers must explicitly save its result under the existing
-configuration lock. No import or GET request upgrades a live installation.
+迁移是纯操作：调用方必须在现有配置锁内显式保存结果。导入模块或处理 GET 请求都不会升级正在运行的安装。
 """
 
 from copy import deepcopy
@@ -26,7 +25,7 @@ MAX_DURATION_SECONDS = 36500 * 86400
 
 
 class RecognitionConfigurationError(ValueError):
-    """An invalid field; messages deliberately never interpolate its value."""
+    """无效字段；错误信息有意不包含字段值。"""
 
     def __init__(self, field, requirement):
         self.field = field
@@ -138,7 +137,7 @@ def _endpoint(value, field):
         parsed = urlsplit(value)
         valid = parsed.scheme in ("http", "https") and bool(parsed.hostname)
         valid = valid and parsed.username is None and parsed.password is None and not parsed.fragment and not parsed.query
-        parsed.port  # Validate malformed port syntax without making a request.
+        parsed.port  # 校验端口语法是否有误，不发送请求。
     except ValueError:
         valid = False
     if not valid:
@@ -146,7 +145,7 @@ def _endpoint(value, field):
 
 
 def validate_recognition_v3(config):
-    """Validate canonical effective settings without coercing null or booleans."""
+    """校验规范化后的有效设置，不将 null 或布尔值强制转换。"""
     root = _object(config, "config")
     rec = _object(root.get("recognition"), "recognition")
     reject_retired_settings(root)
@@ -247,7 +246,7 @@ def validate_recognition_v3(config):
 
 
 def migrate_recognition_v3(config):
-    """Upgrade old settings to the single multi-engine runtime without mutation."""
+    """将旧设置升级为统一的多引擎运行配置，不修改原数据。"""
     current = deepcopy(_object(config, "config"))
     rec = _object(current.setdefault("recognition", {}), "recognition")
     schema = rec.get("schema_version", 0)
@@ -278,9 +277,9 @@ def migrate_recognition_v3(config):
             cleanup["retention_value"] = cleanup["retention_days"]
             cleanup.setdefault("retention_unit", "day")
     rec["schema_version"] = 3
-    # Move the former laboratory switch into the canonical recognition settings.
-    # Keep explicit values in recognition.query authoritative; older installations
-    # inherit their existing laboratory value and fresh installs default to enabled.
+    # 将原实验室开关迁移到规范的识别设置中。
+    # 保留 recognition.query 中显式设置的优先级；旧安装
+    # 沿用原有实验室开关值，新安装默认启用。
     query = _object(rec.setdefault("query", {}), "recognition.query")
     if "prefer_english" not in query:
         laboratory = current.get("laboratory") or {}
@@ -313,7 +312,7 @@ def recognition_settings_version(config):
 
 
 def prepare_recognition_settings_update(current, patch, expected_version):
-    """Prepare a validated update; persistence and permission checks belong to the caller."""
+    """准备经过校验的更新；持久化和权限检查由调用方负责。"""
     if not isinstance(expected_version, str) or expected_version != recognition_settings_version(current):
         raise RecognitionConfigurationConflict("识别配置已变化，请重新读取后保存")
     patch = _object(patch, "patch")
@@ -344,7 +343,7 @@ def prepare_recognition_settings_update(current, patch, expected_version):
 
 
 def reject_retired_settings(value, prefix=""):
-    """Reject writes to removed runtime controls; migration may still read them."""
+    """拒绝写入已移除的运行时控制项；迁移仍可读取这些旧项。"""
     if not isinstance(value, dict):
         return
     retired = ("recognition.execution.implementation", "recognition.decision",

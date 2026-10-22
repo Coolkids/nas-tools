@@ -1,4 +1,4 @@
-"""One request/Trace per file; only verified outcomes cross the business boundary."""
+"""每个文件对应一个请求和一条 Trace；只有经过验证的结果才能进入业务层。"""
 
 from contextlib import nullcontext, ExitStack
 from copy import deepcopy
@@ -28,7 +28,7 @@ def effective_settings(value=None):
     if value is None:
         from config import Config
         value = Config().get_config()
-    # Config uses round-trip YAML scalar subclasses; the runtime contract is JSON.
+    # Config 使用可往返的 YAML 标量子类；运行时约定使用 JSON。
     return migrate_recognition_v3(json.loads(json.dumps(value, allow_nan=False)))
 
 
@@ -166,7 +166,7 @@ class RecognitionCoordinator:
                                 try:
                                     self.cache.get("identity", state["identity_hit_key"])
                                 except Exception:
-                                    pass  # Statistics loss never invalidates verified details.
+                                    pass  # 统计信息丢失不会使已验证的详情失效。
                         result = replace(result, duration_ms=(budget.clock_ns()-budget.started_ns)/1e6)
                         result = trace.finish(result, validated_at_ns=validated_at)
                         publication = state.get("publication")
@@ -177,7 +177,7 @@ class RecognitionCoordinator:
                                     origin=publication["origin"], language=publication["language"], lease=publication["lease"],
                                     verification=publication["verification"])
                             except Exception:
-                                # Cache loss never rolls back the validated business result.
+                                # 缓存丢失不会回滚已验证的业务结果。
                                 pass
                 except (BudgetExceeded, RecognitionCancelled, TMDBRequestError, ResourceBusy, ValueError) as error:
                     result = self._failure(request_id, error)
@@ -293,7 +293,7 @@ class RecognitionCoordinator:
         language = "zh-CN" if chinese else "en-US"
         if scope is None:
             return outcome(RecognitionStatus.REVIEW_REQUIRED, "identity_scope_unresolved"), parsed_meta, None, None, None
-        # Always read persisted user intent before any automatic identity.
+        # 在自动识别身份前，始终先读取已保存的用户选择。
         override = self.overrides.get(scope)
         versions = self.identities.versions(lookup)
         key = self.identities.key(scope)
@@ -338,8 +338,8 @@ class RecognitionCoordinator:
                     if self.rec["matching"]["adult_policy"] == "exclude" and detail.get("adult") is True:
                         trace.emit("identity", "identity_rejected", "review", {"reason": "adult_excluded"})
                         return outcome(RecognitionStatus.REVIEW_REQUIRED, "adult_excluded"), parsed_meta, None, scope, None
-                    # Validate namesake years against current TMDB data, rather
-                    # than partitioning the title key by the first file's year.
+                    # 根据当前 TMDB 数据校验同名作品的年份，
+                    # 而不是按首个文件的年份拆分标题键。
                     date = detail.get("release_date" if identity.media_type == "movie" else "first_air_date")
                     if identity.media_type == "tv" and episode.season is not None and episode.season > 1:
                         seasons = detail.get("seasons")
@@ -446,8 +446,8 @@ class RecognitionCoordinator:
                                 "name_similarity": selected.scores["name_similarity"], "score": selected.score,
                                 "gap": selected.gap, "detail_verified": True, "hard_reject": []}}
                         state["publication"]["verification"]["detail_signature"] = detail_signature(detail)
-        # Re-read intent after network/cache work. A late automatic result never
-        # supersedes a human choice, even when cache invalidation was delayed.
+        # 完成网络或缓存操作后重新读取用户选择。较晚返回的自动结果
+        # 不能覆盖人工选择，即使缓存失效处理有所延迟。
         current = self.overrides.get(scope)
         if provided is None and current["version"] != identity.override_version:
             if current["choice"] is None:
@@ -458,9 +458,9 @@ class RecognitionCoordinator:
             source = "override"
             state.pop("publication", None)
         if identity.media_type == "tv":
-            # Identity caches contain works, never this file's coordinates. A
-            # cache/provided-ID path still needs one local episode extraction;
-            # a full parse of this file already supplied it and is reused.
+            # 身份缓存保存作品信息，不保存当前文件的集数坐标。缓存或
+            # 已提供 ID 的路径仍需在本地提取一次集数信息；
+            # 若已完整解析当前文件，则直接复用已有结果。
             protected = {"override", "absolute_mapping"}
             if episode_input.season_source not in protected or episode_input.episodes_source not in protected:
                 reused = file_parses is not None
@@ -482,14 +482,16 @@ class RecognitionCoordinator:
             else:
                 adopt_episode(default_episode_season(episode_input))
         try:
-            self._check_episode(detail, episode, identity.media_type)
+            self._check_episode(detail, episode, identity.media_type,
+                trust_tv_coordinates=provided is not None)
         except ValueError as error:
             trace.emit("episode", "episode_validation_failed", "review",
                 {"output": asdict(episode), "reason": str(error), "source": episode.source})
             raise
         trace.emit("episode", "episode_coordinates_verified", "success",
             {"output": asdict(episode), "source": episode.source})
-        if self.rec["query"].get("episode_details_enabled") and identity.media_type == "tv" and episode.episodes:
+        if (provided is None and self.rec["query"].get("episode_details_enabled")
+                and identity.media_type == "tv" and episode.episodes):
             from concurrent.futures import ThreadPoolExecutor
             stage = budget.stage("episode", self.rec["timeouts"].get("episode_ms"))
             def load_episode(number):
@@ -508,12 +510,18 @@ class RecognitionCoordinator:
         return outcome(RecognitionStatus.MATCHED, identity=identity, source=source), parsed_meta, detail, scope, validated_at
 
     @staticmethod
-    def _check_episode(detail, episode, kind):
+    def _check_episode(detail, episode, kind, trust_tv_coordinates=False):
         if episode.review_reason:
             raise ValueError(episode.review_reason)
         if kind == "movie" and (episode.season is not None or episode.episodes):
             raise ValueError("movie_episode_conflict")
         if kind == "tv" and (episode.season is not None or episode.episodes):
+            # 手动提供 TMDB 身份属于明确的用户选择。
+            # 即使 TMDB 缺少季信息（动漫中很常见），也保留文件中的
+            # 季和集坐标；自动识别仍走正常的
+            # 校验流程。
+            if trust_tv_coordinates:
+                return
             rows = detail.get("seasons")
             row = next((item for item in rows if isinstance(item, dict) and item.get("season_number") == episode.season), None) if isinstance(rows, list) else None
             if row is None:

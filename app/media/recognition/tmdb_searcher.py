@@ -1,4 +1,4 @@
-"""Bounded query/page/detail orchestration; only worker processes perform I/O."""
+"""有界地编排查询、分页和详情请求；只有工作进程执行 I/O。"""
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass

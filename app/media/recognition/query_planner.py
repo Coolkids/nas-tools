@@ -1,4 +1,4 @@
-"""Deterministic, bounded search plans preserving title provenance and coverage."""
+"""生成确定且有界的搜索计划，并保留标题来源和覆盖信息。"""
 
 from dataclasses import dataclass, replace
 import hashlib
@@ -12,14 +12,14 @@ def canonical_title(value):
 
 
 def query_planning_policy(settings):
-    """Share query-order semantics with verified identity cache versioning."""
+    """让查询顺序语义与已验证身份缓存的版本规则保持一致。"""
     recognition = settings.get("recognition") or settings
     query = recognition.get("query") or {}
     return {"version": 5, "prefer_english": bool(query.get("prefer_english", True))}
 
 
 def is_english_title(value):
-    """Recognize Latin-script names without mistaking mixed CJK titles for English."""
+    """识别拉丁字母名称，同时避免将中日韩混合标题误判为英文。"""
     letters = [char for char in unicodedata.normalize("NFKC", value) if char.isalpha()]
     return bool(letters) and all("LATIN" in unicodedata.name(char, "") for char in letters)
 
@@ -68,19 +68,19 @@ class QueryPlanner:
                 continue
             if parse.media_type in {"tv", "movie"}:
                 hints.add(parse.media_type)
-            # TV filename year may describe a later season, not its first air date.
+            # 电视剧文件名中的年份可能指后续某一季，而非首播日期。
             year = parse.year if parse.media_type == "movie" and not relax_year else None
             for field, title in (("title", parse.title), ("secondary_title", parse.secondary_title)):
                 add(title, parse.media_type, year, parse.provider_id, parse.evidence_family, field)
             for title in sorted(set(parse.aliases)):
                 add(title, parse.media_type, year, parse.provider_id, parse.evidence_family, "alias")
-        # Only preprocessor-identified titles, never raw technical filename noise.
+        # 只使用预处理器识别出的标题，不使用文件名中的原始技术噪声。
         for title in prepared.candidate_titles if not grouped else ():
             if not any(key[0] == canonical_title(title) for key in grouped):
                 add(title, prepared.media_type_hint, None, "preprocess", "local_rules", "candidate_title")
-        # A single engine may split punctuation inside a real title (e.g.
-        # 魔法★探险家 -> 魔法 / 探险家). Do not expand such fragments into broad
-        # mandatory searches when independent engines agree on the full name.
+        # 单个引擎可能会拆分真实标题中的标点（例如
+        # “魔法★探险家 -> 魔法 / 探险家”）。如果其他引擎认同完整名称，
+        # 就不要把这些片段扩展成范围过大的必选搜索。
         raw_names = [canonical_title(value) for value in (prepared.clean_title, prepared.clean_secondary_title) if value]
         raw_titles = {key for key in grouped if any(f" {key[0]} " in f" {raw} " for raw in raw_names)}
         providers = {key: {sources[source]["provider_id"] for source in group["sources"]}
@@ -99,8 +99,8 @@ class QueryPlanner:
             for full in raw_titles:
                 if key == full or key[1:] != full[1:]:
                     continue
-                # Shared complete aliases also corroborate a full title in a
-                # different language; this works with Anitopy + ML alone.
+                # 多个引擎共享的完整别名也能佐证另一种语言的
+                # 完整标题；仅使用 Anitopy 和 ML 时也适用。
                 confirmed = full in supported or any((key[1:], provider, other) in corroborated
                     for other in providers[full])
                 if not confirmed:

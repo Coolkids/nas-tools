@@ -1,4 +1,4 @@
-"""Final admission of recognition identities to automated business callers."""
+"""最终校验识别身份是否可提供给自动化业务调用方。"""
 
 from dataclasses import replace
 
@@ -7,11 +7,11 @@ from app.media.recognition.contracts import RecognitionStatus
 
 
 def admit_outcome(outcome, budget, *, allow_partial_success=False, validated_at_ns=None):
-    """Only an explicitly completed validation can survive the total deadline.
+    """只有明确完成的校验结果才能在总时限结束后保留。
 
-    A parser result or candidate timestamp is not validation evidence. The
-    resolver supplies this internal timestamp after all verification finishes.
-    User cancellation and shutdown always take precedence over partial success.
+    解析器结果或候选时间戳不构成校验证据。所有验证完成后，
+    resolver 才会提供此内部时间戳。
+    用户取消和关停始终优先于部分成功。
     """
     reason = budget.failure_reason
     if reason is None:

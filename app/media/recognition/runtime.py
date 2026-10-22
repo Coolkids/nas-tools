@@ -1,4 +1,4 @@
-"""Bounded, reusable spawn workers. Only confirmed exits release busy slots."""
+"""使用有界且可复用的 spawn 工作进程。只有确认退出后才释放繁忙槽位。"""
 
 import atexit
 from contextlib import contextmanager
@@ -23,8 +23,8 @@ _IN_WORKER = False
 def _connection_ready(connection):
     if os.name != "posix":
         return connection.poll(0)
-    # A single kernel poll has no Python-clock retry loop. DefaultSelector also
-    # supports descriptors above select()'s FD_SETSIZE on busy Linux servers.
+    # 单次内核轮询不会依赖 Python 时钟重试。DefaultSelector 还
+    # 支持繁忙 Linux 服务器上超过 select() FD_SETSIZE 的文件描述符。
     with selectors.DefaultSelector() as selector:
         selector.register(connection, selectors.EVENT_READ)
         return bool(selector.select(0))
@@ -38,7 +38,7 @@ class WorkItem:
     def __post_init__(self):
         if self.kind not in {"ping", "preprocess", "parse", "http"}:
             raise ValueError("unsupported recognition work kind")
-        # No functions, sessions, ORM entities or locks may cross the boundary.
+        # 函数、会话、ORM 实体和锁都不得跨越此边界。
         if len(json.dumps(self.payload, ensure_ascii=False, allow_nan=False).encode()) > 1024 * 1024:
             raise ValueError("work input exceeds 1 MiB")
 
@@ -137,8 +137,8 @@ def _execute_work(item, http, cancelled):
 def _worker(connection, cancelled, parent_pid):
     global _IN_WORKER
     _IN_WORKER = True
-    # Parent death must also reclaim unlimited HTTP and regex calls that hold
-    # the GIL. Linux/ARM use a kernel death signal, independent of Python threads.
+    # 父进程退出时，也必须回收持有 GIL 的无限等待 HTTP 和正则调用。
+    # Linux/ARM 使用独立于 Python 线程的内核死亡信号。
     if sys.platform.startswith("linux"):
         import ctypes
         import signal
@@ -146,14 +146,14 @@ def _worker(connection, cancelled, parent_pid):
             raise OSError(ctypes.get_errno(), "cannot supervise worker parent")
         if os.getppid() != parent_pid:
             os._exit(1)
-    else:  # pragma: no cover - non-Linux packaging
+    else:  # pragma: no cover - 非 Linux 打包环境
         def watch_parent():
             while os.getppid() == parent_pid:
                 time.sleep(.1)
             os._exit(1)
         Thread(target=watch_parent, daemon=True).start()
-    # Workers must not log request bodies, titles or credentials. Diagnostics
-    # return stable codes to the coordinator, which owns retention decisions.
+    # 工作进程不得记录请求正文、标题或凭据。诊断信息
+    # 只向协调器返回稳定代码，由协调器决定保留策略。
     import logging
     logging.disable(logging.CRITICAL)
     import requests
@@ -189,7 +189,7 @@ def _worker(connection, cancelled, parent_pid):
 
 
 class WorkFuture(Future):
-    """cancel() requests termination; completion waits for actual resource exit."""
+    """cancel() 会请求终止；任务完成需等待资源实际退出。"""
 
     def __init__(self, token):
         super().__init__()
@@ -299,8 +299,8 @@ class WorkerPool:
             running = sum(slot.task is not None for slot in self._slots)
             if len(self._pending) + running >= self.workers + self.max_queue:
                 raise ResourceBusy("recognition resource queue is full")
-            # Child ownership means cancelling a singleflight waiter cannot
-            # cancel the owner token of another request.
+            # 子进程各自拥有任务，因此取消 singleflight 等待者不会
+            # 取消另一请求的所有者令牌。
             self._pending.append(pending)
             self._condition.notify_all()
             return future
@@ -385,18 +385,18 @@ class WorkerPool:
                                     self._pending.clear()
                         continue
                     try:
-                        # POSIX Connection.poll(0) internally loops on the
-                        # process-global monotonic clock. A fake-clock test can
-                        # restore that clock backwards between iterations and
-                        # turn this nonblocking poll into an unbounded wait
-                        # while holding the pool lock, preventing cancellation.
+                        # POSIX 的 Connection.poll(0) 内部会循环读取
+                        # 进程全局单调时钟。模拟时钟测试可能在
+                        # 两次迭代之间将时钟调回，使这个非阻塞轮询
+                        # 变成无界等待，
+                        # 并在持有池锁时阻止取消操作。
                         if _connection_ready(slot.connection):
                             message = slot.connection.recv()
                             if message[0] == "ready":
                                 slot.ready = True
                                 self._warm_failures = 0
                             elif task is not None and message[0] == "result" and message[1] == task.task_id:
-                                # Suppress any result arriving after cancellation.
+                                # 忽略取消后才返回的任何结果。
                                 reason = slot.abort_reason or self._abort(task) or message[3]
                                 self._complete(task, value=message[2], reason=reason, pid=slot.process.pid)
                                 slot.task = None
@@ -599,7 +599,7 @@ def supervised_enabled():
 
 
 def execute_http(payload, *, resource="tmdb"):
-    """Reconstruct a requests.Response; never transfer a live HTTP session."""
+    """重建 requests.Response；绝不传递正在使用的 HTTP 会话。"""
     from app.media.recognition.records import current_recorder, recognition_remaining_seconds, recognition_timeout_reason
     from requests import Response
     from requests.exceptions import Timeout, RequestException

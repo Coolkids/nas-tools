@@ -1,4 +1,4 @@
-"""Submit independent parsers together; completion order never selects a winner."""
+"""同时提交相互独立的解析器；完成顺序不会决定胜出结果。"""
 
 from dataclasses import dataclass
 from dataclasses import replace
@@ -120,7 +120,7 @@ class ParserManager:
                 pending[provider_id] = future
             except ResourceBusy:
                 results[provider_id] = NormalizedParse(provider_id, descriptor.version, descriptor.evidence_family, "error", error="parser_busy")
-        # All submissions precede any wait. Workers own network calls and can be killed.
+        # 所有任务都先提交，再开始等待。网络调用由工作进程执行，且可被终止。
         for provider_id, future in pending.items():
             work = future.result()
             descriptor = providers[provider_id].descriptor

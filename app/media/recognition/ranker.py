@@ -1,4 +1,4 @@
-"""Explainable scores, mandatory hard/name/coverage gates and stable ordering."""
+"""提供可解释的评分、强制硬性条件/名称/覆盖门槛和稳定排序。"""
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass
@@ -116,7 +116,7 @@ class CandidateRanker:
                 c.hard_reject.append("type_conflict")
             if info.get("manual_rejected") is True:
                 c.hard_reject.append("manual_rejected")
-            # Missing sequel markers are a conflict too; numbers are never stripped.
+            # 缺少续作标记同样属于冲突；绝不移除数字。
             primary_sequels = {sequel_number(x) for x in primary if sequel_number(x) is not None}
             official_sequels = {sequel_number(x) for x in titles}
             if primary_sequels and not primary_sequels.intersection(official_sequels):
@@ -157,7 +157,7 @@ class CandidateRanker:
             component("type_episode", type_score)
             date = info.get("release_date") if c.media_type == "movie" else info.get("first_air_date")
             if c.media_type == "tv" and season is not None and season > 1:
-                # No season data means unknown, never compare with premiere year.
+                # 没有季信息就视为未知，绝不与首播年份比较。
                 date = season_row.get("air_date") if season_row else None
             date_year = int(date[:4]) if isinstance(date, str) and date[:4].isdecimal() else None
             if len(years) > 1:
@@ -179,7 +179,7 @@ class CandidateRanker:
             c.scores["evidence_sufficient"] = float(bool(primary) and bool(c.detail_fields.get("_verified")) and episode_sufficient and
                 (any(check["match_kind"] in {"exact", "official_keyword"} for check in checks) or year_score == 1 or type_score == 1))
             c.scores["title_conflict"] = float(c.scores["parser_group_min_similarity"] < settings["min_name_similarity"])
-        # Preferences only break equal scores in an already acceptable group.
+        # 偏好只在已满足条件且得分相同的候选组内用于排序。
         def qualifies(c):
             return (not c.hard_reject and c.score >= settings["match_threshold"] and
                 c.scores["name_similarity"] >= settings["min_name_similarity"] and not c.scores["title_conflict"] and

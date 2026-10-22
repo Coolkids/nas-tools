@@ -1,4 +1,4 @@
-"""Expired and explicitly confirmed all-completed cleanup share one mutex."""
+"""清理过期记录和清理经明确确认的全部已完成记录共用一把互斥锁。"""
 
 import base64
 from concurrent.futures import ThreadPoolExecutor
@@ -174,9 +174,9 @@ class CleanupService:
             self._claim(state, job_id)
             if scope == "all_completed":
                 state.CLEAR_FINISHED_BEFORE = max(state.CLEAR_FINISHED_BEFORE or "", payload["cutoff"])
-                # Body-free evidence that this owner was still running at the
-                # clear watermark. A later crash is a new interruption, not an
-                # old completed spool that should be suppressed.
+                # 不含请求正文的证据，用于证明此所有者在清理水位时
+                # 仍在运行。之后发生的崩溃属于新的中断，不是
+                # 应被抑制的旧已完成暂存记录。
                 from app.media.recognition.admission import process_alive
                 active = session.execute(select(TaskRow).where(TaskRow.KIND == "recognition_async",
                     TaskRow.STATE.in_(ACTIVE_TASKS), TaskRow.LEASE_UNTIL > time.time())).scalars()

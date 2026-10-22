@@ -1,4 +1,4 @@
-"""Private, bounded local IPC for volatile traces. Disk holds control only."""
+"""用于临时轨迹的私有有界本地 IPC。磁盘上只保存控制信息。"""
 
 import atexit
 from collections import OrderedDict
@@ -26,9 +26,9 @@ class TraceHub:
         self.path = directory / f"{os.getpid()}-{secrets.token_hex(4)}.sock"
         self.manifest = self.path.with_suffix(".json")
         self._traces, self._lock, self._closed = OrderedDict(), RLock(), False
-        # Project-owned test paths can exceed Unix sockaddr's ~108-byte limit.
-        # A loopback socket plus a 256-bit key in a 0600 control file has no
-        # dependency on path length and never persists trace bodies.
+        # 项目内的测试路径可能超过 Unix sockaddr 约 108 字节的限制。
+        # 使用回环 socket 和权限为 0600 的控制文件保存 256 位密钥，不受
+        # 路径长度影响，也不会持久化轨迹正文。
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.bind(("127.0.0.1", 0))
         self.socket.listen(8)
@@ -147,7 +147,7 @@ def get_active_trace(request_id, root=None):
 
 
 def owner_command(action, request_id, root=None):
-    """Internal only; an HTTP caller must check request ownership first."""
+    """仅供内部使用；HTTP 调用方必须先检查请求归属。"""
     if root is None:
         from config import Config
         root = Config().get_config_path()

@@ -1,4 +1,4 @@
-"""Resolve this file's episode context without borrowing cached episode numbers."""
+"""解析当前文件的集数上下文，不借用缓存中的集数。"""
 
 from dataclasses import dataclass, replace
 import re
@@ -34,7 +34,7 @@ class EpisodeContext:
 
 
 def default_episode_season(episode):
-    """An episode without a known season belongs to season one by default."""
+    """未指定季数的单集默认归入第一季。"""
     if (episode is None or episode.season is not None or not episode.episodes or
             episode.review_reason not in (None, "absolute_mapping_required")):
         return episode
@@ -43,7 +43,7 @@ def default_episode_season(episode):
 
 
 def merge_episode_context(fallback, parses):
-    """Select each coordinate by provider priority, preserving explicit overrides."""
+    """按 provider 优先级选择各项坐标，并保留显式覆盖值。"""
     if (fallback.review_reason not in (None, "absolute_mapping_required") or
             fallback.review_reason is not None and fallback.source == "absolute_mapping"):
         return fallback
@@ -66,7 +66,7 @@ def merge_episode_context(fallback, parses):
 
 
 def find_bracket_episode(text):
-    """Recognize release suffixes such as [02], excluding years/resolutions."""
+    """识别 [02] 等发布后缀，同时排除年份和分辨率。"""
     for match in re.finditer(r"\[(\d{1,5})(?:\s*[-~]\s*(\d{1,5}))?\]", text or ""):
         number = int(match[1])
         if not text[:match.start()].strip():

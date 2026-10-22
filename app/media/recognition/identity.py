@@ -1,4 +1,4 @@
-"""Verified identity reuse and persistent, versioned human choices."""
+"""复用已验证的身份信息，并持久保存带版本的人工作用选择。"""
 
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -24,7 +24,7 @@ def digest(value):
 
 
 def detail_signature(detail):
-    """Only identity/validation-relevant data; changing popularity is harmless."""
+    """仅包含身份和校验相关数据；人气变化不会造成影响。"""
     return digest({key: detail.get(key) for key in ("id", "media_type", "title", "name", "original_title", "original_name",
         "release_date", "first_air_date", "adult", "seasons", "genres")})
 
@@ -59,8 +59,8 @@ def scope_for(prepared, *, name=None, mtype=None, year=None):
     text = text.replace("_", " ")
     text = re.sub(r"(?i)\.(?:mkv|mp4|avi|ts|m2ts|iso|mov|wmv|flv|strm)$", "", text)
     if name is None:
-        # Release groups are not part of the work name. Keep a bracketed title
-        # when everything after it is just an episode/technical suffix.
+        # 发布组不属于作品名。如果方括号标题后只有集数或技术后缀，
+        # 则保留方括号中的标题。
         if group := re.match(r"^\s*(?:(?:\[[^\]]+\]|【[^】]+】)\s*)+", text):
             tail = text[group.end():]
             if tail and not re.match(r"(?i)^(?:-\s*\d|S\d|E[P]?\d|第|\d{3,4}[pi]\b)", tail):
@@ -76,12 +76,12 @@ def scope_for(prepared, *, name=None, mtype=None, year=None):
         technical = re.search(r"(?i)\b(?:\d{3,4}[pi]|[248]k|h[ .]?26[45]|x26[45]|hevc|av1|web[ .-]?dl|webrip|bluray|bdrip|hdtv)\b", text)
         boundaries = [match.start() for match in (episodic, technical) if match is not None]
         if boundaries:
-            # Treat the coordinate/technical suffix as file metadata. Do not
-            # delete words such as HDR/Atmos from the actual title prefix.
+            # 将集数坐标和技术后缀视为文件元数据。不要
+            # 从真实标题前缀中删除 HDR、Atmos 等词。
             text = text[:min(boundaries)]
         text = text.rstrip(" .-_[【(")
         text = re.sub(r"(?i)(?:\s*(?:\[[^\]]*(?:字幕|简[繁体中]|繁[体中]|chs|cht|aac|flac|hdr)[^\]]*\]|【[^】]*字幕[^】]*】))+$", "", text)
-    # Type/year remain collision checks and manual-choice context, not key fields.
+    # 类型和年份仍用于冲突校验及人工选择提示，不作为键字段。
     if year is None:
         year = prepared.year_hint
     elif isinstance(year, str) and year.isdecimal():
@@ -92,8 +92,8 @@ def scope_for(prepared, *, name=None, mtype=None, year=None):
     if kind == "unknown" and episodic:
         kind = "tv"
     name = canonical_title(text)
-    # Episode-only names cannot establish a work identity; the coordinator uses
-    # a separately prepared parent directory and keeps this file's episodes.
+    # 仅含集数的名称无法确定作品身份；协调器会使用
+    # 单独准备的父目录，并保留当前文件的集数信息。
     return IdentityScope(name, kind, year) if name and not name.isdecimal() else None
 
 
@@ -227,7 +227,7 @@ class IdentityService:
                 not all(valid_score(field) for field in ("name_similarity", "score", "gap")) or
                 evidence.get("score") != value.score):
             return None
-        # Only accepted reads count as identity hits.
+        # 只有成功接受的读取才计为身份缓存命中。
         current = self.cache.get("identity", key, hit=hit)
         return value if current is not None and not current.needs_revalidation and current.cycle_id == envelope.cycle_id and current.payload_version == envelope.payload_version else None
 
@@ -261,11 +261,11 @@ class IdentityService:
             try:
                 self.cache.store.lease_release(namespace, key, owner, fence)
             except Exception:
-                pass  # expiring fenced lease remains safe during a backend outage
+                pass  # 后端不可用期间，带栅栏的过期租约仍是安全的
 
     def put(self, key, value, scope, versions, *, origin, language, lease=None, verification=None):
-        # SQL and an external cache cannot form one transaction. The stored
-        # version makes a racing old write unusable by all subsequent readers.
+        # SQL 与外部缓存无法组成同一个事务。保存的
+        # 版本号可确保并发中的旧写入不会被后续读取者使用。
         if not isinstance(verification, dict) or self.overrides.get(scope)["version"] != value.override_version:
             return False
         owner, fence = lease or (None, None)

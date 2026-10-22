@@ -131,7 +131,7 @@ class PreprocessResult:
     rule_matches: tuple[RuleMatch, ...] = ()
 
     def __post_init__(self):
-        # Immutable, pickleable snapshots can be passed to reusable spawn workers.
+        # 不可变且可序列化的快照可传给可复用的 spawn 工作进程。
         if not isinstance(self.raw_title, str) or not isinstance(self.clean_title, str):
             raise ValueError("主标题必须是字符串")
         if any(value is not None and not isinstance(value, str)

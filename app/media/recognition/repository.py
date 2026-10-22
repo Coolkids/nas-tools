@@ -1,4 +1,4 @@
-"""Short, portable transactions for V3 history and operational control."""
+"""为 V3 历史记录和运维控制提供简短、可移植的事务。"""
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -51,8 +51,8 @@ class RecognitionRepository:
                     self.manager.backend.upsert_many(session, StateRow, [{"STATE_ID": "history", "VERSION": 0,
                         "CLEANUP_UNTIL": 0}], ["STATE_ID"])
                     state = session.execute(select(StateRow).where(StateRow.STATE_ID == "history").with_for_update()).scalar_one()
-                    # SQLite has no SELECT FOR UPDATE. This also serializes
-                    # watermark publication, final writes and export leases.
+                    # SQLite 不支持 SELECT FOR UPDATE。此锁还会串行处理
+                    # 水位发布、最终写入和导出租约。
                     session.execute(update(StateRow).where(StateRow.STATE_ID == "history").values(VERSION=StateRow.VERSION))
                 yield session, state
 

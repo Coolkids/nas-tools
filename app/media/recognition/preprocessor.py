@@ -1,4 +1,4 @@
-"""One immutable rule snapshot and conservative Unicode source mappings."""
+"""使用一份不可变规则快照，并保守地映射 Unicode 源文本。"""
 
 from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
@@ -44,8 +44,8 @@ def snapshot_rules(helper):
 
 
 def _mapped_text(raw, rules, source, normalize=True):
-    # Each output codepoint has a source interval; changed ranges never claim
-    # exact character correspondence (including compatibility normalization).
+    # 每个输出码位都对应一个源文本区间；发生变化的范围不会声称
+    # 字符完全对应（包括兼容性规范化）。
     text = raw
     mapping = [(i, i + 1, False, None, "exact") for i in range(len(raw))]
     applied, errors, matches = [], [], []
@@ -90,7 +90,7 @@ def _mapped_text(raw, rules, source, normalize=True):
 
 
 def preprocess_with_details(title, secondary_title=None, *, rules=None, normalize=True):
-    """No database/config/HTTP calls; the same snapshot is given to all parsers."""
+    """不访问数据库、配置或 HTTP；所有解析器使用同一快照。"""
     rules = RuleSnapshot() if rules is None else rules
     if not isinstance(title, str) or secondary_title is not None and not isinstance(secondary_title, str):
         raise ValueError("title must be text")
@@ -109,7 +109,7 @@ def preprocess_with_details(title, secondary_title=None, *, rules=None, normaliz
     episodes = regex.findall(r"(?i)(?:E|EP)\d{1,5}(?:(?:-E?|E)\d{1,5})*", main)
     codecs = regex.findall(r"(?i)\b(?:H[ .]?26[45]|HEVC|AV1|X26[45])\b", technical_text)
     resolutions = regex.findall(r"(?i)\b(?:\d{3,4}[pi]|[248]K)\b", technical_text)
-    # Dimensions such as 1920x1080 are technical evidence, never release years.
+    # 1920x1080 这类尺寸属于技术信息，不能作为发行年份。
     year_text = regex.sub(r"(?i)(?<!\d)\d{3,4}\s*[x×]\s*\d{3,4}(?!\d)", "", main)
     years = regex.findall(r"(?<!\d)((?:19|20)\d{2})(?!\d)", year_text)
     result = PreprocessResult(title, main, rules.version, PREPROCESSOR_VERSION, secondary_title, secondary,

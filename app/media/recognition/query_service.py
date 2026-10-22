@@ -1,4 +1,4 @@
-"""Paged V3 history projections. No event/candidate bodies in list or stats."""
+"""分页读取 V3 历史投影。列表和统计中不包含事件或候选项正文。"""
 
 from datetime import datetime, timedelta, timezone
 import json
@@ -169,8 +169,8 @@ class HistoryQuery:
             durations = session.execute(select(func.count()).select_from(TraceRow).where(*conditions, duration.is_not(None))).scalar_one()
             p95 = session.execute(select(duration).where(*conditions, duration.is_not(None)).order_by(duration, TraceRow.REQUEST_ID)
                 .offset(max(0, math.ceil(durations*.95)-1)).limit(1)).scalar_one_or_none() if mode == "all" and durations else None
-            # Token coverage includes saved parse-only results, with exactly the
-            # same ownership/filters. Never read event bodies for list/statistics.
+            # 令牌覆盖率会纳入已保存的纯解析结果，并使用与
+            # 列表和统计完全相同的归属判断与筛选条件。列表或统计时绝不读取事件正文。
             usage_conditions = [*self.conditions(actor, filters), TraceRow.STATUS.in_(TERMINAL),
                 TraceRow.SOURCE.not_in({"cache_refresh", "recognition_refresh", "cache_invalidate"})]
             usage_columns = [func.sum(cast(JSONField(TraceRow.OUTCOME, "llm_usage", name), BigInteger)).label(name)

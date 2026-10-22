@@ -1,4 +1,4 @@
-"""Read-only cache management views over backend-owned metadata."""
+"""基于后端自有元数据提供只读缓存管理视图。"""
 
 import time
 

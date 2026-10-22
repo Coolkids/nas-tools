@@ -1,7 +1,6 @@
-"""Monotonic request/stage budgets. A null limit really is unlimited.
+"""使用单调时钟管理请求和阶段预算。限制为 null 时表示确实不设上限。
 
-Tokens are cooperative: they stop admission and commits. Terminating blocking
-workers belongs to the supervised execution layer, not this clock abstraction.
+令牌采用协作式取消，用于停止准入和提交。阻塞工作进程的终止由受监管的执行层负责，不属于此时钟抽象的职责。
 """
 
 from decimal import Decimal, InvalidOperation
@@ -32,7 +31,7 @@ class BudgetExceeded(TimeoutError):
 
 
 class CancellationToken:
-    """First cancellation wins; children observe parents without owning them."""
+    """首次取消原因优先；子令牌可以观察父令牌，但不拥有父令牌。"""
 
     def __init__(self, parent=None):
         self._parent = parent
@@ -67,7 +66,7 @@ def _timeout(value):
 
 
 def total_timeout_ms(settings):
-    """Read V3 first, retaining exact legacy seconds and explicit null."""
+    """优先读取 V3，同时保留旧版秒数的精确值以及显式 null。"""
     timeouts = settings.get("timeouts") or {}
     if "total_ms" in timeouts:
         return _timeout(timeouts["total_ms"])

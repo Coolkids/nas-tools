@@ -1,4 +1,4 @@
-"""Bounded owner-driven tasks. SQL stores controls; owners keep request bodies."""
+"""由所有者驱动的有界任务。SQL 保存控制信息；所有者保留请求正文。"""
 
 import atexit
 from collections import deque
@@ -81,8 +81,8 @@ class TaskControls:
         if retry_of is not None:
             control["retry_of"] = retry_of
         with self.repository.transaction() as (session, _state):
-            # Opening the transaction may reconnect after a configuration change.
-            # Recheck the actual database here, before publishing the new owner.
+            # 配置变更后，开启事务可能会重新连接数据库。
+            # 发布新的所有者前，在此重新检查实际连接的数据库。
             if _generation() != generation:
                 raise TaskUnavailable("database_generation_changed")
             if idempotency is not None:
@@ -126,7 +126,7 @@ class TaskControls:
             return True, row.CANCEL_REASON
 
     def poll(self, owner, generation, lease, renew=False):
-        """One bounded control query per owner, instead of one query per task."""
+        """每个所有者执行一次有界控制查询，而不是每个任务都查询一次。"""
         result = {}
         with self.repository.transaction(lock=renew) as (session, _state):
             rows = session.execute(select(TaskRow).where(TaskRow.KIND == KIND, TaskRow.OWNER_ID == owner,
@@ -453,7 +453,7 @@ class TaskService:
                     if paused or self._closing:
                         self._cancel(task, "service_shutdown")
                 except Exception:
-                    # A missing database must never grant an infinite owner lease.
+                    # 数据库缺失时绝不能授予无限期所有者租约。
                     if time.monotonic()-task["heartbeat_at"] >= self.lease:
                         self._cancel(task, "service_shutdown")
             time.sleep(self.poll)
@@ -461,7 +461,7 @@ class TaskService:
                 try:
                     recover_tasks(self.repository, self.root)
                 except Exception:
-                    pass  # Retry bounded recovery without changing record policy.
+                    pass  # 在不改变记录策略的前提下，有限次重试恢复。
                 recovered_at = time.monotonic()
 
     def _work(self):
@@ -509,12 +509,12 @@ class TaskService:
                 if trace.finished_at is None:
                     trace.finish(outcome)
             except Exception:
-                trace.detach()  # The last valid spool can now be recovered.
+                trace.detach()  # 现在可以恢复最后一份有效暂存记录。
             finally:
                 try:
                     self.controls.release(task_id, self.owner, self.generation)
                 except Exception:
-                    pass  # No lease renewal: recovery fences this owner on expiry.
+                    pass  # 不续租：租约到期后，恢复流程会通过栅栏使此所有者失效。
                 finally:
                     self.hub.release(trace)
                     from app.db import close_db

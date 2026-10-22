@@ -1,4 +1,4 @@
-"""Renewable fenced cache leases with cooperative cancellation of actual I/O."""
+"""可续期且带栅栏的缓存租约，并可协作取消实际 I/O。"""
 
 from threading import Event, Thread, RLock
 import sys
@@ -78,4 +78,4 @@ class CacheLease:
             try:
                 self.store.lease_release(self.namespace, self.key, self.owner, self.fence)
             except Exception:
-                pass  # Expires; a stale owner can never publish through fencing.
+                pass  # 租约过期后，过期所有者无法通过栅栏发布结果。

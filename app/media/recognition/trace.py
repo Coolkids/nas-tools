@@ -1,4 +1,4 @@
-"""V3 retention policy, bounded events and crash recovery independent of caches."""
+"""V3 保留策略、有界事件和独立于缓存的崩溃恢复。"""
 
 from dataclasses import asdict
 from copy import deepcopy
@@ -49,7 +49,7 @@ def _heartbeat_loop():
             try:
                 RecognitionRepository().prune_tasks()
             except Exception:
-                pass  # operational GC retries; it never changes history policy
+                pass  # 仅用于重试运维垃圾回收，不会改变历史记录策略
             last_gc = time.monotonic()
 
 
@@ -114,8 +114,8 @@ def write_spool(bundle, root=None, max_bytes=2 * 1024 * 1024):
     if not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", request_id):
         raise ValueError("invalid spool request id")
     directory = _directory(root)
-    # Bounded disk usage, including crashed processes. Recover before admitting
-    # additional retained requests when the directory reaches its quota.
+    # 磁盘占用有上限，也包括崩溃进程留下的数据。目录达到配额后，
+    # 在接纳更多需保留的请求前先进行恢复。
     files = list(directory.glob("*.json"))
     target = directory / f"{request_id}.json"
     total = sum(p.stat().st_size for p in files if not p.is_symlink())
@@ -242,8 +242,8 @@ class Trace:
 
     def emit(self, node_id, event_type, status, payload=None, *, _final=False):
         with self._mutex:
-            # Account before the bounded event buffer can drop diagnostics.
-            # parser_finished and parser_result share a call_id; count it once.
+            # 在有界事件缓冲区丢弃诊断信息前先计数。
+            # parser_finished 和 parser_result 共用一个 call_id，只计一次。
             llm = (payload or {}).get("llm")
             if node_id == "openai" and isinstance(llm, dict) and isinstance(llm.get("call_id"), str) and isinstance(llm.get("usage"), dict):
                 self._llm_calls[llm["call_id"]] = deepcopy(llm["usage"])
@@ -341,7 +341,7 @@ class Trace:
         return self.request_id if self.persisted else None
 
     def detach(self):
-        """Release an owner whose final control write failed; keep its spool."""
+        """释放最终控制信息写入失败的所有者；保留其暂存记录。"""
         with self._mutex:
             if self.finished_at is None:
                 self.finished_at, self.status = utc_now(), "FAILED"
@@ -436,7 +436,7 @@ def recover_spool(repository=None, root=None, limit=500):
             if repository.save(trace, bundle["events"], bundle.get("candidates", ())):
                 counts["recovered"] += 1
             else:
-                counts["retired"] += 1  # watermark or retention policy rejected it
+                counts["retired"] += 1  # 水位或保留策略拒绝了该记录
             file.unlink()
         except (KeyError, ValueError, TypeError):
             counts["invalid"] += 1

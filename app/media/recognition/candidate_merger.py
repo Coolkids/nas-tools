@@ -1,4 +1,4 @@
-"""Deterministic entity merge retaining every query and independent source."""
+"""确定性地合并实体，并保留每次查询和各个独立来源。"""
 
 from copy import deepcopy
 import json

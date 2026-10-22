@@ -1,4 +1,4 @@
-"""Chat Completions extraction with explicit, bounded compatibility negotiation."""
+"""使用 Chat Completions 提取信息，并进行明确且有界的兼容性协商。"""
 
 from collections import OrderedDict
 import hashlib
@@ -16,7 +16,7 @@ from app.media.recognition.llm_usage import attempt_usage, extract_usage
 
 _capabilities, _capability_lock = OrderedDict(), RLock()
 
-# Defaults apply only to automatic negotiation; explicit settings win.
+# 默认值只用于自动协商；显式设置优先。
 SERVICE_DEFAULTS = {
     "compatible": ("json_schema", "max_completion_tokens"),
     "ollama": ("json_schema", "max_tokens"),
@@ -104,7 +104,7 @@ class OpenAIRecognizer(MediaNameRecognizer):
             if key is None:
                 from app.media.recognition.secrets import SecretManager
                 key = SecretManager().get()
-            # Local compatible endpoints may deliberately use no credential.
+            # 本地兼容端点可以有意不配置凭据。
             headers = {"Content-Type": "application/json"}
             if key:
                 headers["Authorization"] = "Bearer " + key
@@ -121,7 +121,7 @@ class OpenAIRecognizer(MediaNameRecognizer):
             limits = [x for x in (self.timeout, remaining) if x is not None]
             deadline = started + min(limits) if limits else None
             with requests.Session() as session:
-                # Two format downgrades and one token switch, then success.
+                # 两次格式降级和一次令牌切换后成功。
                 for _ in range(4):
                     if (fmt, token) in attempted:
                         return failure("openai_compatibility_exhausted")
@@ -139,8 +139,8 @@ class OpenAIRecognizer(MediaNameRecognizer):
                             else:
                                 payload["response_format"]["json_schema"] = {"name": "media_extraction", "strict": True, "schema": schema}
                     if self.service_type == "deepseek":
-                        # Filename extraction needs the final JSON within its small
-                        # output budget, rather than spending it on thinking tokens.
+                        # 文件名提取要求最终 JSON 控制在较小的
+                        # 输出预算内，而不是把预算消耗在思考令牌上。
                         payload["thinking"] = {"type": "disabled"}
                     attempt_started = time.monotonic()
                     attempt = {"attempt_index": len(attempts)+1, "http_status": None, "finish_reason": None,
@@ -214,7 +214,7 @@ class OpenAIRecognizer(MediaNameRecognizer):
                 _capabilities.move_to_end(capability_key)
                 while len(_capabilities) > 128:
                     _capabilities.popitem(last=False)
-            # Do not return remote text, headers or the raw chat envelope.
+            # 不要返回远端文本、请求头或原始聊天封装。
             return ParseResult("openai", "success", parsed=extracted,
                 raw_result={**diagnostics(), "release_metadata": release, "metadata_warnings": warnings},
                 elapsed_ms=int((time.monotonic()-started)*1000))

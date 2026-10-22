@@ -1,4 +1,4 @@
-"""Validated task operations; callers cannot supply a URL or executable work."""
+"""经过校验的任务操作；调用方不能提供 URL 或可执行任务。"""
 
 from app.media.recognition.contracts import RecognitionOutcome, IdentityEntry
 

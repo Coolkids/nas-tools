@@ -36,8 +36,8 @@ def quiesce_recognition(timeout=120):
         if _recognition_paused:
             raise RuntimeError("识别请求已处于维护暂停状态")
         _recognition_paused = True
-    # Do not hold the condition while joining workers: finishing recognition
-    # needs the same condition to release its maintenance lease.
+    # 等待工作进程结束时不要持有条件锁：识别完成
+    # 需要同一把条件锁来释放维护租约。
     from app.media.recognition.runtime import shutdown_runtime
     tasks_quiesced = False
     try:
@@ -77,7 +77,7 @@ def resume_recognition():
 
 @contextmanager
 def v3_recognition_lease(budget):
-    """Maintenance admission with the request budget, including unlimited waits."""
+    """维护准入使用请求预算，也支持无限期等待。"""
     from app.utils.storage_jobs import STORAGE_JOBS
     from app.media.recognition.admission import gate
     global _active_recognitions
@@ -144,7 +144,7 @@ def _retire_mismatched_spool(path, generation):
 
 
 def _acquire_recognition_lease(timeout=120):
-    """Hold a shared cross-process maintenance lease for the full request."""
+    """整个请求期间持有共享的跨进程维护租约。"""
     from app.utils.storage_jobs import STORAGE_JOBS
     from app.media.recognition.admission import gate
 
@@ -187,7 +187,7 @@ def _write_spool(payload):
 
 
 def replay_recognition_spool():
-    """Recover current-schema history; never import retired legacy spool bodies."""
+    """恢复当前格式的历史记录；绝不导入已废弃的旧版暂存正文。"""
     from app.media.recognition.trace import recover_spool
     result = recover_spool()
     return {"replayed": result["recovered"], "pending": result["pending"],
@@ -513,7 +513,7 @@ class RecognitionRecorder:
                 from app.media.recognition.compatibility import LegacyHistory
                 LegacyHistory().insert(self.as_dict())
             except Exception:
-                pass  # The bounded current-schema spool remains recoverable.
+                pass  # 有界的当前格式暂存记录仍可恢复。
         # 每完成一个阶段就写入暂存，确保进程意外退出后能保留有效的部分轨迹，
         # 而不只是 request_start 标记。
         if self._spool_path:
@@ -653,8 +653,8 @@ def annotate_business_short_circuit(meta_info, action_type, reason, details=None
             log.warn(f"【Recognition】补记业务短路原因失败 {request_id}：{error}")
         except Exception:
             pass
-    # A retained Trace can be annotated transactionally; missing/none/cleared
-    # history is not recreated from an old spool or a copied input.
+    # 保留的 Trace 可以通过事务追加标注；缺失、空值或已清除的
+    # 历史记录不会从旧暂存记录或复制的输入中重建。
     return False
 
 
@@ -744,7 +744,7 @@ def record_deferred_parse_result(meta_info, original_name, source, action_type, 
 
 
 def initialize_recognition_budget(recorder, settings=None):
-    """Pin once, including maintenance/queue time; None is an initialized limit."""
+    """只固定一次预算，并计入维护和排队时间；None 表示已初始化的限制。"""
     if recorder is None:
         return None
     if not recorder._budget_initialized:
@@ -769,7 +769,7 @@ def recognition_budget_active():
 
 @contextmanager
 def recognition_stage(name):
-    """A local stage timeout never cancels other evidence in the request."""
+    """本地阶段超时不会取消请求中的其他证据收集。"""
     recorder = current_recorder()
     if recorder is None:
         yield None
@@ -814,7 +814,7 @@ def recognition_remaining_seconds():
 
 
 def recognition_timeout_reason():
-    """Keep stage expiration distinct from cancellation of the whole request."""
+    """区分阶段到期和整个请求被取消。"""
     abort = recognition_abort_reason()
     if abort:
         return abort
@@ -825,7 +825,7 @@ def recognition_timeout_reason():
 
 
 def recognition_delay(seconds, *, sleeper=None):
-    """Wait cooperatively; retries cannot outlive their request or stage."""
+    """采用协作式等待；重试不能超出请求或阶段的有效时间。"""
     sleeper = time.sleep if sleeper is None else sleeper
     deadline = time.monotonic() + seconds
     while True:

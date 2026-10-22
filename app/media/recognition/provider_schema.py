@@ -1,4 +1,4 @@
-"""Bounded extraction contracts; parser output never establishes a media ID."""
+"""有界的信息提取约定；解析器输出不能确立媒体 ID。"""
 
 import hashlib
 import json
@@ -62,7 +62,7 @@ def normalized(value, provider, version, family, *, duration_ms=0):
 
 
 def signature(provider, version, prepared, options):
-    # Credential changes are represented by a revision, never their plaintext.
+    # 凭据变更通过版本号表示，不记录明文凭据。
     safe = {k: v for k, v in options.items() if k not in {"api_key", "timeout"}}
     value = {"provider": provider, "version": version, "options": safe,
              "rule_version": prepared.rule_version, "preprocessor_version": prepared.preprocessor_version}
@@ -70,7 +70,7 @@ def signature(provider, version, prepared, options):
 
 
 def ml_extraction(result):
-    """Normalize known ML field aliases, rejecting malformed ranges and identities."""
+    """规范化已知的 ML 字段别名，并拒绝格式错误的范围和身份信息。"""
     if not isinstance(result, dict):
         raise ValueError("invalid_ml_schema")
     data = result.get("extracted", result)

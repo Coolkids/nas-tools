@@ -1,7 +1,6 @@
-"""Expose the recognition engine's live envelopes to TMDB cache management.
+"""向 TMDB 缓存管理界面展示识别引擎正在使用的缓存封装。
 
-No mirrored entries: the page reads and edits the same records as the engine.
-Administrative reads neither count as hits nor depend on the cache switch.
+页面读取和编辑的就是引擎使用的同一批记录。管理读取既不计为缓存命中，也不受缓存开关影响。
 """
 
 from copy import deepcopy
@@ -74,7 +73,7 @@ class RecognitionTmdbCache:
 
     def delete(self, key):
         layer, digest = self.parse_key(key)
-        # Deletion also fences any refresh currently publishing this record.
+        # 删除操作也会通过栅栏阻止当前正在发布此记录的刷新任务。
         return self.store.envelope_delete("recognition_" + layer, digest)
 
     def modify(self, key, title):
@@ -83,8 +82,8 @@ class RecognitionTmdbCache:
         if target is None:
             return False
         entity = self.detail_scope(layer, target)
-        # Identity hits load the title from detail. Keep both views consistent
-        # when a title is edited, without extending expiry or changing the ID.
+        # 身份缓存命中时会从详情记录读取标题。编辑标题时应保持两个视图
+        # 一致，同时不延长有效期或更改 ID。
         changed = False
         for selected, cache_key, envelope in self.records():
             if self.detail_scope(selected, envelope) != entity:

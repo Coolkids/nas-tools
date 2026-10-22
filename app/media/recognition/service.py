@@ -1,10 +1,10 @@
-"""Shared multi-engine parsing, query planning and candidate ranking."""
+"""共享多引擎解析、查询规划和候选项排序。"""
 
 from dataclasses import replace
 
 
 def _merge_query_rounds(plan, searches, later_plan, later):
-    """Retain all observed candidates and incomplete work across fallback rounds."""
+    """在回退轮次之间保留所有已发现的候选项和未完成工作。"""
     from app.media.recognition.candidate_merger import merge_candidates
     from app.media.recognition.tmdb_searcher import SearchBatch
     def unique(items):
@@ -39,7 +39,7 @@ class RecognitionService:
     def analyze_v3(self, prepared, settings, *, runtime=None, budget=None,
                    api_key=None, tmdb_base_url=None, network_allowed=True, cache=True, episode=None,
                    lookup_overrides=None, client=None, emit=None, relax_year=False):
-        """S12–S15 analysis API; business identity commits belong to S16."""
+        """S12–S15 分析 API；业务身份提交属于 S16。"""
         from app.media.recognition.budget import RecognitionBudget
         from app.media.recognition.parser_manager import ParserManager
         from app.media.recognition.query_planner import QueryPlanner, is_english_title
@@ -98,9 +98,9 @@ class RecognitionService:
             later = TMDBSearcher(client).run(next_plan, lookup, cache=cache, budget=stage)
             stage.check()
             plan, searches = _merge_query_rounds(plan, searches, next_plan, later)
-        # A normal-mode empty movie query may drop the server-side year filter.
-        # Ranking still validates the original year; failures/partial coverage
-        # must never trigger another query or reset the stage/count budget.
+        # 普通模式下，电影查询无结果时可能会移除服务端年份筛选。
+        # 排序仍会校验原始年份；失败或覆盖不完整
+        # 绝不能触发额外查询，也不能重置阶段或次数预算。
         if (relax_year and not searches.candidates and not searches.errors and searches.coverage == "complete"
                 and any(item.year_filter is not None for item in plan.items)):
             fallback_stage()

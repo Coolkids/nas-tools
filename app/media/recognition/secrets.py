@@ -1,4 +1,4 @@
-"""AES-GCM credentials in the business DB; independent, recoverable master key."""
+"""在业务数据库中使用 AES-GCM 凭据；主密钥独立保存且可恢复。"""
 
 import base64
 import hashlib
@@ -78,7 +78,7 @@ class SecretManager:
             raise ValueError("invalid_api_key")
         with self.repository.transaction(lock=False) as (session, _state):
             has_credentials = session.execute(select(SecretRow.NAME).limit(1)).first() is not None
-        # A lost key must never be silently replaced while ciphertext exists.
+        # 只要密文仍存在，就绝不能悄悄替换丢失的密钥。
         key = self._key(create=not has_credentials)
         cipher = AES.new(key, AES.MODE_GCM, nonce=os.urandom(12))
         cipher.update(name.encode())

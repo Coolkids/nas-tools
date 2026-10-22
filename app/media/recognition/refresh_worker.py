@@ -1,4 +1,4 @@
-"""Strict per-layer hot refresh, using backend metadata and fenced publication."""
+"""严格按层热刷新，使用后端元数据并通过栅栏发布。"""
 
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -110,7 +110,7 @@ class RefreshWorker:
                 and recognition_settings_version(current) == recognition_settings_version(config))
 
     def scan(self, *, limit=None):
-        # A second local scheduler/manual call must not build an unbounded queue.
+        # 第二个本地调度器或手动调用不得创建无界队列。
         if not self._scan_lock.acquire(blocking=False):
             return {"state": "busy", "jobs": []}
         try:
@@ -233,7 +233,7 @@ class RefreshWorker:
                             self.store.envelope_refresh_failure("recognition_"+layer, key, asdict(entry),
                                 owner=lease.owner, fence=lease.fence, delay=delay, code=code)
                         except Exception:
-                            pass  # Backend loss must not discard the original stable failure code.
+                            pass  # 后端故障不能丢弃原有的稳定失败代码。
                     result.update(state="cancelled" if cancelled else "timeout" if timeout else "failed", error=code)
                     if trace.finished_at is None and task_trace is None:
                         trace.finish(RecognitionOutcome(trace.request_id, RecognitionStatus.CANCELLED if cancelled else RecognitionStatus.TIMEOUT if timeout else RecognitionStatus.FAILED, failure_code=code))
@@ -257,8 +257,8 @@ class RefreshWorker:
             identities = IdentityService(cache, config, overrides=overrides)
             current = overrides.get(scope)
             identity = identities.get(key, scope, current["version"], hit=False)
-            # Refresh the verified title -> TMDB ID mapping independently of
-            # mutable TMDB details. The detail layer owns its own refresh/I/O.
+            # 独立刷新已验证的“标题 -> TMDB ID”映射，
+            # 不受可变 TMDB 详情影响。详情层自行负责刷新和 I/O。
             needs = identity is None or current["choice"] is not None
             return entry.payload, needs, lambda: overrides.get(scope)["version"] == entry.override_version
         client_config = deepcopy(config)

@@ -1,4 +1,4 @@
-"""Reported token usage only; unknown, partial and no-call cases stay distinct."""
+"""只记录报告的令牌用量；未知、部分用量和未调用情况分别处理。"""
 
 from copy import deepcopy
 import uuid
@@ -57,7 +57,7 @@ def combine_usage(items):
 
 
 def parser_metadata(options, raw=None, *, cached=False, skipped=False):
-    """Only this adapter's bounded diagnostic allowlist can enter a trace."""
+    """只有此适配器允许列表中的有限诊断信息可以写入轨迹。"""
     from app.media.recognition.llm_protocol import prompt_version
     raw = raw if isinstance(raw, dict) else {}
     mode = options.get("extraction_mode", "core")

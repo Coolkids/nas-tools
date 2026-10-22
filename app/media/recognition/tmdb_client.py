@@ -1,4 +1,4 @@
-"""Explicit TMDB parameters, supervised I/O, validated caches and bounded retry."""
+"""显式指定 TMDB 参数，监管 I/O，校验缓存并限制重试次数。"""
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone

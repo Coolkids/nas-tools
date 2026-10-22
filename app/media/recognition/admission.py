@@ -1,4 +1,4 @@
-"""Body-free, local cross-process recognition admission during maintenance."""
+"""维护期间用于本地跨进程识别准入，不包含请求正文。"""
 
 from contextlib import contextmanager
 import json
@@ -39,7 +39,7 @@ def _lock(root):
     directory = root_path(root)/".maintenance"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     with open(directory/"recognition-admission.lock", "a+b") as stream:
-        if os.name == "nt":  # pragma: no cover - Windows
+        if os.name == "nt":  # pragma: no cover - Windows 平台
             import msvcrt
             stream.write(b"0")
             stream.flush()
@@ -83,7 +83,7 @@ def gate(root=None):
     except FileNotFoundError:
         return None
     except (OSError, ValueError):
-        return {"reason": "invalid_maintenance_gate"}  # fail closed
+        return {"reason": "invalid_maintenance_gate"}  # 失败时拒绝放行
 
 
 def pause(root=None):

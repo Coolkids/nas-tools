@@ -1,4 +1,4 @@
-"""Legacy API shapes backed exclusively by V3 history, never legacy tables."""
+"""旧版 API 结构只读取 V3 历史记录，绝不访问旧表。"""
 
 from datetime import datetime, timezone
 import json
@@ -20,14 +20,14 @@ def timestamp(value):
     if not value:
         return utc_now()
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    # Historical UI dates are local wall time; new recorder dates include UTC.
+    # 历史界面日期使用本地时间；新记录器生成的日期包含 UTC。
     if parsed.tzinfo is None:
         parsed = parsed.astimezone()
     return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def summary(payload):
-    """Build the small list-view projection without raw inputs or responses."""
+    """构建精简的列表视图投影，不包含原始输入或响应。"""
     overall = payload.get("overall_result") or {}
 
     def tmdb_identity(value):
@@ -72,7 +72,7 @@ def summary(payload):
 
 
 def bundle(payload):
-    """Translate a live legacy algorithm report into the current spool schema."""
+    """将实时旧版算法报告转换为当前暂存格式。"""
     from app.media.recognition.records import _recognition_generation, recognition_config, json_safe
     payload = redact(json_safe(payload))
     overall = payload.get("overall_result") or {}
@@ -140,7 +140,7 @@ def retained(value):
 
 
 def legacy_payload(trace):
-    """One detail projection for either legacy algorithm or native V3 traces."""
+    """为旧版算法轨迹和原生 V3 轨迹提供统一的详情投影。"""
     outcome = trace.get("outcome") or {}
     compatibility = outcome.get("compatibility") or {}
     actions = []
@@ -184,8 +184,8 @@ class LegacyHistory:
 
     def conditions(self, actor="0", **filters):
         conditions = HistoryQuery.permission(actor)
-        # Native UI and legacy exports use the same predicates for these new
-        # filters, so exporting a filtered list cannot silently widen scope.
+        # 原生界面和旧版导出对这些新筛选条件使用相同判断，
+        # 因此导出筛选列表时不会悄悄扩大范围。
         extra = {key: filters[key] for key in ("type", "cache_hit", "duration_min_ms", "duration_max_ms") if key in filters}
         if extra:
             conditions += HistoryQuery(self.repository).conditions(actor, extra)
@@ -244,7 +244,7 @@ class LegacyHistory:
         return total, items
 
     def detail(self, request_id, actor="0"):
-        # Authorization precedes reading complete events and candidate bodies.
+        # 必须先完成授权，再读取完整事件和候选项正文。
         if HistoryQuery(self.repository).detail(request_id, actor) is None:
             return None, []
         trace = self.repository.get(request_id)
@@ -296,7 +296,7 @@ class LegacyHistory:
             return True
 
     def export(self, *, actor="0", page_size=100, **filters):
-        """Materialize a consistent read snapshot before any HTTP streaming."""
+        """开始 HTTP 流式传输前先生成一致的读取快照。"""
         from app.utils.storage_jobs import STORAGE_JOBS
         with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as output:
             with STORAGE_JOBS.maintenance_lock(exclusive=False):

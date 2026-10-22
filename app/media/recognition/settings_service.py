@@ -1,4 +1,4 @@
-"""Versioned settings updates with a cross-process configuration-file lock."""
+"""通过跨进程配置文件锁更新带版本的设置。"""
 
 from contextlib import contextmanager
 from copy import deepcopy
@@ -19,7 +19,7 @@ from app.utils.cache_backend import STORE
 def _configuration_lock(config):
     try:
         import fcntl
-    except ImportError:  # Windows uses a one-byte exclusive file lock.
+    except ImportError:  # Windows 使用单字节排他文件锁。
         fcntl = None
         import msvcrt
     with CONFIG_LOCK:
@@ -61,7 +61,7 @@ def _public(value):
             options["api_key_set"] = bool(raw.get("api_key_set"))
             for field in ("api_key", "password", "authorization", "token", "secret"):
                 options.pop(field, None)
-    # No plaintext credential, connection or migration settings are returned.
+    # 不返回凭据明文、连接信息或迁移设置。
     return {"recognition": recognition, "cache": {"ttl_seconds": deepcopy(value["cache"]["ttl_seconds"])},
             "defaults": recognition_v3_defaults(),
             "version": recognition_settings_version(value),
@@ -139,8 +139,8 @@ def test_openai_connection(options=None, api_key=None, expected_version=None):
         configured = tested["recognition"]["providers"]["openai"]
         provider_options = {key: configured[key] for key in allowed}
         provider_options.update(timeout=15, api_key=(api_key.strip() if api_key and api_key.strip() else SecretManager().get()))
-    # No parser cache, trace, history or persisted credential; the work boundary
-    # can terminate an unresponsive probe even when recognition is unlimited.
+    # 不会暴露解析缓存、轨迹、历史记录或已保存凭据；工作边界
+    # 可在识别没有时限时终止无响应的探测。
     work = get_runtime().submit("parser", WorkItem("parse", {"provider_id": "openai", "title": "Example (2020).mkv",
         "options": provider_options, "context": {"remaining_timeout_seconds": 15}}), deadline=time.monotonic()+15).result()
     parsed = work.value if work.status == "success" else None

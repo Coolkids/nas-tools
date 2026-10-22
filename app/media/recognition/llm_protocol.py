@@ -1,4 +1,4 @@
-"""Versioned V4 prompts and wire DTOs, adapted to the existing parser contract."""
+"""带版本的 V4 提示词和传输 DTO，适配现有解析器约定。"""
 
 from copy import deepcopy
 import hashlib
