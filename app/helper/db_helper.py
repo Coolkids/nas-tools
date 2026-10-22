@@ -866,7 +866,7 @@ class DbHelper:
         else:
             return ""
 
-    @DbPersist(_db)
+    @DbPersist(_db, retry_safe=True)
     def update_rss_movie_tmdb(self, rid, tmdbid, title, year, image, desc, note):
         """
         更新订阅电影的部分信息
@@ -882,7 +882,7 @@ class DbHelper:
             "DESC": desc
         })
 
-    @DbPersist(_db)
+    @DbPersist(_db, retry_safe=True)
     def update_rss_movie_desc(self, rid, desc):
         """
         更新订阅电影的DESC
@@ -931,7 +931,7 @@ class DbHelper:
         else:
             return False
 
-    @DbPersist(_db)
+    @DbPersist(_db, retry_safe=True)
     def insert_rss_movie(self, media_info,
                          state='D',
                          search_sites=None,
@@ -1063,7 +1063,7 @@ class DbHelper:
         else:
             return ""
 
-    @DbPersist(_db)
+    @DbPersist(_db, retry_safe=True)
     def update_rss_tv_tmdb(self, rid, tmdbid, title, year, total, lack, image, desc, note):
         """
         更新订阅电影的TMDBID
@@ -1083,7 +1083,7 @@ class DbHelper:
             }
         )
 
-    @DbPersist(_db)
+    @DbPersist(_db, retry_safe=True)
     def update_rss_tv_desc(self, rid, desc):
         """
         更新订阅电视剧的DESC
@@ -1107,7 +1107,7 @@ class DbHelper:
             filters.append(RSSTVS.ID != int(rssid))
         return self._db.query(RSSTVS).filter(*filters).count() > 0
 
-    @DbPersist(_db)
+    @DbPersist(_db, retry_safe=True)
     def insert_rss_tv(self,
                       media_info,
                       total,
@@ -1261,7 +1261,7 @@ class DbHelper:
         else:
             return None
 
-    @DbPersist(_db)
+    @DbPersist(_db, retry_safe=True)
     def delete_rss_tv_episodes(self, rid):
         """
         删除电视剧订阅缺失剧集
@@ -1835,7 +1835,7 @@ class DbHelper:
                                           time.localtime(time.time()))
             ))
 
-    @DbPersist(_db)
+    @DbPersist(_db, retry_safe=True)
     def delete_rss_history(self, rssid):
         """
         删除RSS历史
