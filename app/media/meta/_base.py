@@ -484,6 +484,12 @@ class MetaBase(object):
 
     # 是否包含集
     def is_in_episode(self, episode):
+        explicit = getattr(self, "explicit_episode_numbers", None)
+        if explicit is not None:
+            meta_episode = set(explicit)
+            if isinstance(episode, list):
+                return meta_episode.issuperset(set(episode))
+            return int(episode) in meta_episode
         if isinstance(episode, list):
             if self.end_episode is not None:
                 meta_episode = list(range(self.begin_episode, self.end_episode + 1))

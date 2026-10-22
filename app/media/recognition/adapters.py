@@ -60,6 +60,7 @@ def _apply_episode_context(meta, season, episodes):
     meta.explicit_episode_numbers = tuple(episodes)
     meta.begin_episode = episodes[0] if episodes else None
     meta.end_episode = episodes[-1] if len(episodes) > 1 else None
+    meta.total_episodes = len(episodes)
 
 
 def meta_from_outcome(outcome, parsed_meta, detail=None):
