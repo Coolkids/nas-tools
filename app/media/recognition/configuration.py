@@ -63,6 +63,7 @@ def recognition_v3_defaults():
             },
             "query": {
                 "max_queries": 8, "max_pages_per_query": 2, "candidates_per_query": 40,
+                "max_results_per_query": 100, "excess_results_policy": "discard",
                 "detail_top_k": 5, "tmdb_concurrency": 4, "tmdb_qps": 4, "tmdb_retry_max": 2,
                 "episode_details_enabled": False, "prefer_english": True,
             },
@@ -199,6 +200,8 @@ def validate_recognition_v3(config):
     query = rec["query"]
     for key in ("max_queries", "max_pages_per_query", "candidates_per_query", "detail_top_k", "tmdb_concurrency"):
         _integer(query.get(key), f"recognition.query.{key}", nullable=key == "max_queries")
+    _integer(query.get("max_results_per_query"), "recognition.query.max_results_per_query", nullable=True)
+    _choice(query.get("excess_results_policy"), "recognition.query.excess_results_policy", ("discard", "error"))
     _integer(query.get("tmdb_retry_max"), "recognition.query.tmdb_retry_max", minimum=0)
     _number(query.get("tmdb_qps"), "recognition.query.tmdb_qps", 0, exclusive_min=True)
     _boolean(query.get("episode_details_enabled"), "recognition.query.episode_details_enabled")

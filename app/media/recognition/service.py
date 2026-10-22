@@ -32,7 +32,7 @@ def _merge_query_rounds(plan, searches, later_plan, later):
         "complete" if searches.coverage == later.coverage == "complete" else "partial",
         searches.errors+later.errors, searches.logical_query_count+later.logical_query_count,
         searches.http_attempt_count+later.http_attempt_count, searches.detail_complete and later.detail_complete,
-        searches.coverage_issues+later.coverage_issues)
+        searches.coverage_issues+later.coverage_issues, searches.discarded_queries+later.discarded_queries)
 
 
 class RecognitionService:

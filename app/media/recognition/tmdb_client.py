@@ -17,6 +17,7 @@ from app.media.recognition.cache_repository import CacheRepository
 from app.media.recognition.contracts import SearchResponse
 from app.media.recognition.runtime import WorkItem, get_runtime, ResourceBusy
 from app.media.recognition.provider_schema import strict_json_loads
+from app.media.recognition.title_names import localize_tmdb_detail
 
 
 class TMDBRequestError(RuntimeError):
@@ -226,11 +227,12 @@ class TMDBClient:
     def detail(self, kind, tmdb_id, language=None, *, cache=True, budget=None):
         if kind not in {"tv", "movie"} or type(tmdb_id) is not int or tmdb_id <= 0:
             raise ValueError("invalid_tmdb_identity")
-        result = self.request(f"/{kind}/{tmdb_id}", {"language": language or self.language,
+        language = language or self.language
+        result = self.request(f"/{kind}/{tmdb_id}", {"language": language,
             "append_to_response": self.append_to_response}, layer="detail", cache=cache, expected_id=tmdb_id, budget=budget)
         if not isinstance(result.payload.get("title" if kind == "movie" else "name"), str):
             raise TMDBRequestError("tmdb_invalid_detail_title")
-        return {**result.payload, "media_type": kind}
+        return localize_tmdb_detail({**result.payload, "media_type": kind}, kind, language)
 
     def episode(self, tv_id, season, episode, language="zh-CN", *, cache=True, budget=None):
         if any(type(value) is not int or value < minimum for value, minimum in ((tv_id, 1), (season, 0), (episode, 1))):

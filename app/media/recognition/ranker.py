@@ -11,7 +11,7 @@ from app.media.recognition.title_names import official_keyword_in_title, title_v
 from app.media.recognition.episode_resolver import EpisodeContext, default_episode_season, merge_episode_context
 
 
-MATCHING_VERSION = "rank-v3.3"
+MATCHING_VERSION = "rank-v3.4"
 DEFAULT_WEIGHTS = {"title": .55, "type_episode": .20, "year": .15, "consensus": .07, "popularity": .03}
 
 
@@ -45,7 +45,7 @@ def parser_title_check(parsed, titles, threshold):
 
 def official_titles(candidate):
     info = {**candidate.search_fields, **candidate.detail_fields}
-    names = {value.strip() for key in ("title", "name", "original_title", "original_name")
+    names = {value.strip() for key in ("title", "name", "original_title", "original_name", "_tmdb_title")
              if isinstance((value := info.get(key)), str) and value.strip()}
     alternatives = candidate.detail_fields.get("alternative_titles", {})
     if isinstance(alternatives, dict):

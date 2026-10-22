@@ -19,6 +19,7 @@ class SearchBatch:
     http_attempt_count: int
     detail_complete: bool
     coverage_issues: tuple[dict, ...] = ()
+    discarded_queries: tuple[dict, ...] = ()
 
 
 class TMDBSearcher:
@@ -29,11 +30,13 @@ class TMDBSearcher:
         query = self.settings["query"]
         stage = budget or self.client.budget.stage("tmdb_stage", self.settings["timeouts"].get("tmdb_stage_ms"))
         responses, errors, partial = [], [], bool(plan.skipped)
+        discarded_queries = []
         coverage_issues = [{"query_id": item.query_id, "query": item.query, "reason": item.budget_reason}
                            for item in plan.skipped]
         initial_attempts = self.client.http_attempt_count
         def consume(item):
             rows, consumed, complete, failures = [], 0, True, []
+            result_limit = query.get("max_results_per_query", 100)
             for page in range(1, query["max_pages_per_query"]+1):
                 try:
                     stage.check()
@@ -42,6 +45,20 @@ class TMDBSearcher:
                     failures.append({"query_id": item.query_id, "page": page, "error": str(error)})
                     complete = False
                     break
+                if result_limit is not None and response.total_results > result_limit:
+                    # 超量关键词整批排除，保留原始响应用于追溯，不再翻页或读取详情。
+                    rows.append(response)
+                    for row in rows:
+                        row.consumed_results = []
+                    discard = query.get("excess_results_policy", "discard") == "discard"
+                    reason = "QUERY_RESULT_LIMIT_DISCARDED" if discard else "QUERY_RESULT_LIMIT_EXCEEDED"
+                    issue = {"query_id": item.query_id, "query": item.query, "reason": reason,
+                        "pages_fetched": len(rows), "last_page": response.page,
+                        "total_pages": response.total_pages, "total_results": response.total_results,
+                        "consumed_count": 0, "result_limit": result_limit}
+                    if not discard:
+                        failures.append({"query_id": item.query_id, "page": page, "error": reason})
+                    return rows, discard, failures, issue
                 take = min(query["candidates_per_query"]-consumed, len(response.raw_json["results"]))
                 response.consumed_results = response.raw_json["results"][:take]
                 consumed += take
@@ -76,7 +93,10 @@ class TMDBSearcher:
                     errors.extend(failures)
                     partial = partial or not complete
                     if issue is not None:
-                        coverage_issues.append(issue)
+                        if issue["reason"] == "QUERY_RESULT_LIMIT_DISCARDED":
+                            discarded_queries.append(issue)
+                        else:
+                            coverage_issues.append(issue)
                 except (TMDBRequestError, BudgetExceeded, RecognitionCancelled) as error:
                     errors.append({"query_id": item.query_id, "error": str(error)})
                     coverage_issues.append({"query_id": item.query_id, "query": item.query,
@@ -106,4 +126,5 @@ class TMDBSearcher:
         return SearchBatch(tuple(responses), tuple(candidates), "partial" if partial or not detail_complete else "complete",
             tuple(sorted(errors, key=lambda value: str(sorted(value.items())))), len(plan.items),
             self.client.http_attempt_count-initial_attempts, detail_complete,
-            tuple(sorted(coverage_issues, key=lambda value: str(sorted(value.items())))))
+            tuple(sorted(coverage_issues, key=lambda value: str(sorted(value.items())))),
+            tuple(sorted(discarded_queries, key=lambda value: value["query_id"])))

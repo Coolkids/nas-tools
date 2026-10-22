@@ -418,6 +418,7 @@ class RecognitionCoordinator:
                     trace.emit("rank", "rank_completed", ranked.status.value, {"reason": ranked.reason,
                         "coverage": ranked.coverage, "queries": analysis["search"].logical_query_count,
                         "coverage_issues": analysis["search"].coverage_issues,
+                        "discarded_queries": analysis["search"].discarded_queries,
                         "detail_complete": analysis["search"].detail_complete,
                         "http_attempts": analysis["search"].http_attempt_count, "episode": asdict(episode),
                         "conflicts": conflict_details, "candidate_count": len(trace.candidates),

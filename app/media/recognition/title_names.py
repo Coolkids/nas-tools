@@ -8,6 +8,47 @@ def has_cjk(value):
     return bool(re.search(r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]", value))
 
 
+def localize_tmdb_detail(detail, kind, language):
+    """中文请求优先使用 TMDB 中文译名，并保留响应原名作为匹配证据。"""
+    info = dict(detail)
+    if not str(language).lower().startswith("zh"):
+        return info
+    field = "title" if kind == "movie" else "name"
+    original = info.get(field)
+    names = []
+    def add(value, priority):
+        # 排除含假名或韩文的名称，避免把日文原名当作中文译名。
+        if (isinstance(value, str) and re.search(r"[\u3400-\u9fff]", value)
+                and not re.search(r"[\u3040-\u30ff\uac00-\ud7af]", value)):
+            names.append((priority, len(names), value.strip()))
+    regions = {"CN": 0, "SG": 1, "MY": 2, "": 3, "TW": 4, "HK": 5, "MO": 6}
+    translations = info.get("translations")
+    translations = translations.get("translations", []) if isinstance(translations, dict) else []
+    for row in translations if isinstance(translations, list) else []:
+        if not isinstance(row, dict) or row.get("iso_639_1") != "zh":
+            continue
+        data = row.get("data")
+        if isinstance(data, dict):
+            region = str(row.get("iso_3166_1") or "").upper()
+            add(data.get(field), regions.get(region, 7) * 10)
+    # 中文详情的主名称优先于别名，简体翻译优先于其他地区译名。
+    add(original, 5)
+    alternatives = info.get("alternative_titles")
+    alternatives = alternatives.get("titles", alternatives.get("results", [])) if isinstance(alternatives, dict) else []
+    for row in alternatives if isinstance(alternatives, list) else []:
+        if not isinstance(row, dict):
+            continue
+        region = str(row.get("iso_3166_1") or "").upper()
+        if region in {"CN", "SG", "MY", "TW", "HK", "MO"}:
+            add(row.get("title"), regions[region] * 10 + 6)
+    if names:
+        title = min(names)[2]
+        if title != original:
+            info["_tmdb_title"] = original
+            info[field] = title
+    return info
+
+
 def title_variants(value):
     """按明确的别名分隔符拆分，同时保留 AC/DC 和 Fate/stay night 等名称。"""
     if not isinstance(value, str) or not value.strip():
