@@ -33,7 +33,14 @@ def meta_from_normalized(prepared: PreprocessResult, parsed: NormalizedParse, *,
     meta._recognition_preprocess = prepared
     meta._recognition_original_title, meta._recognition_original_subtitle = prepared.raw_title, prepared.raw_secondary_title
     meta._recognition_processed_title, meta._recognition_processed_subtitle = prepared.clean_title, prepared.clean_secondary_title
-    meta._recognition_used_info = {"ignored": [], "replaced": [], "offset": []}
+    matches = prepared.rule_matches
+    meta._recognition_used_info = {
+        "ignored": [match.pattern for match in matches if match.operation == "ignore"],
+        "replaced": [f"{match.pattern}@{match.replacement}" for match in matches
+                     if match.operation in {"replace", "replace_offset"}],
+        "offset": [f"{match.front}@{match.back}@{match.offset}" for match in matches
+                   if match.operation in {"offset", "replace_offset"}],
+    }
     season, episodes = parsed.season, parsed.episodes
     if episode_context is not None:
         season, episodes = episode_context.season, episode_context.episodes

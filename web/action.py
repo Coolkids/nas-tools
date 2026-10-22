@@ -2483,7 +2483,8 @@ class WebAction:
         """
         if MetaHelper().modify_meta_data(data.get("key"), data.get("title")):
             MetaHelper().save_meta_data(force=True)
-        return {"code": 0}
+            return {"code": 0}
+        return {"code": 1, "msg": "缓存已过期或发生变化，请刷新后重试"}
 
     def truncate_blacklist(self, data):
         """
@@ -2529,6 +2530,9 @@ class WebAction:
     def mediainfo_dict(media_info):
         if not media_info:
             return {}
+        used_info = getattr(media_info, "_recognition_used_info", {}) or {}
+        original_title = getattr(media_info, "_recognition_original_title", None) or getattr(media_info, "org_string", None)
+        processed_title = getattr(media_info, "_recognition_processed_title", None) or getattr(media_info, "org_string", None)
         tmdb_id = media_info.tmdb_id
         tmdb_link = media_info.get_detail_url()
         tmdb_S_E_link = ""
@@ -2558,9 +2562,11 @@ class WebAction:
             "video_codec": media_info.video_encode,
             "audio_codec": media_info.audio_encode,
             "org_string": media_info.org_string,
-            "ignored_words": media_info.ignored_words,
-            "replaced_words": media_info.replaced_words,
-            "offset_words": media_info.offset_words
+            "recognition_original_title": original_title,
+            "recognition_processed_title": processed_title,
+            "ignored_words": getattr(media_info, "ignored_words", None) or used_info.get("ignored", []),
+            "replaced_words": getattr(media_info, "replaced_words", None) or used_info.get("replaced", []),
+            "offset_words": getattr(media_info, "offset_words", None) or used_info.get("offset", [])
         }
 
     @staticmethod
@@ -2946,7 +2952,7 @@ class WebAction:
             MetaHelper().clear_meta_data()
         except Exception as e:
             ExceptionUtils.exception_traceback(e)
-            return {"code": 0, "msg": str(e)}
+            return {"code": 1, "msg": str(e)}
         return {"code": 0}
 
     @staticmethod
@@ -4385,11 +4391,12 @@ class WebAction:
         """
         分页查询TMDB缓存列表
         """
-        page_num = int(data.get("pagenum") or 30)
+        data = data or {}
+        page_num = max(1, min(200, int(data.get("pagenum") or 30)))
         search = data.get("keyword") or ""
-        current_page = int(data.get("page") or 1)
+        current_page = max(1, int(data.get("page") or 1))
         total_count, tmdb_caches = MetaHelper().dump_meta_data(search, current_page, page_num)
-        total_page = floor(total_count / page_num) + 1
+        total_page = (total_count + page_num - 1) // page_num
         return {
             "code": 0,
             "total": total_count,

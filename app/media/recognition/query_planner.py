@@ -4,7 +4,6 @@ from dataclasses import dataclass, replace
 import hashlib
 import unicodedata
 from app.media.recognition.contracts import QueryPlanItem
-from app.media.recognition.settings import _as_bool
 from app.media.recognition.title_names import canonical_name, title_variants, has_cjk
 
 
@@ -14,8 +13,9 @@ def canonical_title(value):
 
 def query_planning_policy(settings):
     """Share query-order semantics with verified identity cache versioning."""
-    laboratory = settings.get("laboratory") or {}
-    return {"version": 4, "prefer_english": _as_bool(laboratory.get("search_en_title", False))}
+    recognition = settings.get("recognition") or settings
+    query = recognition.get("query") or {}
+    return {"version": 5, "prefer_english": bool(query.get("prefer_english", True))}
 
 
 def is_english_title(value):

@@ -33,9 +33,16 @@ class MetaHelper:
         value[CACHE_EXPIRE_TIMESTAMP_STR] = int(time.time()) + ttl if ttl else None
         self._cache.set(key, value, ttl=ttl)
 
-    def clear_meta_data(self):
+    @staticmethod
+    def _recognition_cache():
+        from app.media.recognition.tmdb_cache_view import RecognitionTmdbCache
+        return RecognitionTmdbCache()
+
+    def clear_meta_data(self, include_recognition=True):
         with lock:
             self._cache.clear()
+            if include_recognition:
+                self._recognition_cache().clear()
 
     def cache_info(self, include_memory=False):
         with lock:
@@ -63,12 +70,18 @@ class MetaHelper:
                        str(key).replace("[电影]", "").replace("[电视剧]", "")
                        .replace("[未知]", "").replace("-None", ""))
                       for key, value in self._cache.copy().items()
-                      if search.lower() in key.lower() and str(value.get("id")) != "0"]
+                      if search.casefold() in f"{key} {value.get('title', '')} {value.get('id', '')}".casefold()
+                      and str(value.get("id")) != "0"]
+            values.extend(self._recognition_cache().entries(search))
+            values.sort(key=lambda item: (item[2].casefold(), item[0]))
             start = max(0, page - 1) * num
             return len(values), values[start:start + num]
 
     def delete_meta_data(self, key):
         with lock:
+            recognition = self._recognition_cache()
+            if recognition.parse_key(key):
+                return recognition.delete(key)
             return self._cache.pop(key)
 
     def delete_meta_data_by_tmdbid(self, tmdbid):
@@ -76,6 +89,7 @@ class MetaHelper:
             for key, value in self._cache.copy().items():
                 if str(value.get("id")) == str(tmdbid):
                     self._cache.delete(key)
+            self._recognition_cache().delete_by_tmdb_id(tmdbid)
 
     def delete_unknown_meta(self):
         with lock:
@@ -85,6 +99,11 @@ class MetaHelper:
 
     def modify_meta_data(self, key, title):
         with lock:
+            if not isinstance(title, str) or not title.strip():
+                return False
+            recognition = self._recognition_cache()
+            if recognition.parse_key(key):
+                return recognition.modify(key, title.strip())
             value = self._cache.get(key)
             if value:
                 value["title"] = title

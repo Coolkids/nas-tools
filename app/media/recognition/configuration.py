@@ -65,7 +65,7 @@ def recognition_v3_defaults():
             "query": {
                 "max_queries": 8, "max_pages_per_query": 2, "candidates_per_query": 40,
                 "detail_top_k": 5, "tmdb_concurrency": 4, "tmdb_qps": 4, "tmdb_retry_max": 2,
-                "episode_details_enabled": False,
+                "episode_details_enabled": False, "prefer_english": True,
             },
             "matching": {
                 "min_name_similarity": 0.85, "match_threshold": 0.90, "min_score_gap": 0.08,
@@ -203,6 +203,7 @@ def validate_recognition_v3(config):
     _integer(query.get("tmdb_retry_max"), "recognition.query.tmdb_retry_max", minimum=0)
     _number(query.get("tmdb_qps"), "recognition.query.tmdb_qps", 0, exclusive_min=True)
     _boolean(query.get("episode_details_enabled"), "recognition.query.episode_details_enabled")
+    _boolean(query.get("prefer_english"), "recognition.query.prefer_english")
     matching = rec["matching"]
     for key in ("min_name_similarity", "match_threshold", "min_score_gap"):
         _number(matching.get(key), f"recognition.matching.{key}", 0, 1, exclusive_min=key != "min_score_gap")
@@ -277,6 +278,13 @@ def migrate_recognition_v3(config):
             cleanup["retention_value"] = cleanup["retention_days"]
             cleanup.setdefault("retention_unit", "day")
     rec["schema_version"] = 3
+    # Move the former laboratory switch into the canonical recognition settings.
+    # Keep explicit values in recognition.query authoritative; older installations
+    # inherit their existing laboratory value and fresh installs default to enabled.
+    query = _object(rec.setdefault("query", {}), "recognition.query")
+    if "prefer_english" not in query:
+        laboratory = current.get("laboratory") or {}
+        query["prefer_english"] = laboratory.get("search_en_title", True)
     execution = _object(rec.setdefault("execution", {}), "recognition.execution")
     for key in ("implementation", "max_concurrency", "total_timeout_seconds"):
         execution.pop(key, None)

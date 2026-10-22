@@ -32,3 +32,4 @@ config/tmdb.dat
 /config/.secret_key
 todo.md
 docs/
+/AGENTS.md

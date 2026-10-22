@@ -62,6 +62,25 @@ def cache_info():
                    **MetaHelper().cache_info(include_memory=True),
                    "max_entries": None, "max_bytes": None,
                    "stats_at": time.time(), "stats_estimated": True})
+    from app.media.recognition.refresh_worker import RefreshWorker
+    refresh_worker = RefreshWorker(store=STORE)
+    refresh_config = refresh_worker.config()
+    refresh_capabilities = refresh_worker.capabilities(refresh_config)
+    for layer, label, description in [
+            ("identity", "标题 → TMDB ID", "按作品标题复用已确认的 TMDB ID，同一作品各集共用；作品详情独立过期。"),
+            ("search", "TMDB 搜索结果", "TMDB 原始搜索结果，独立于作品身份和详情缓存。"),
+            ("detail", "TMDB 作品详情", "按 TMDB ID 缓存作品详情，缺失、过期或无效时重新获取。"),
+            ("episode", "TMDB 单集详情", "按作品、季、集缓存单集详情。")]:
+        name = "recognition_" + layer
+        ttl = refresh_config["cache"]["ttl_seconds"][name]
+        refresh_enabled = refresh_capabilities["effective_enabled"] and ttl > 0
+        refresh_reason = refresh_capabilities["reason"] or ("never_expires" if ttl == 0 else None)
+        result.append({"name": name, "label": label, "description": description, **STORE.memory_info(name),
+                       "ttl_seconds": ttl,
+                       "hot_refresh": {"supported": refresh_capabilities["hot_refresh_supported"],
+                                       "enabled": refresh_enabled, "reason": refresh_reason},
+                       "max_entries": None, "max_bytes": None,
+                       "stats_at": time.time(), "stats_estimated": True})
     for group, members in CACHE_GROUPS.items():
         items = [item for item in result if item["name"] in members]
         if not items:
@@ -94,7 +113,8 @@ def update_cache_ttl(name, value, unit, expected_version=None):
     """只更新有效期策略，不修改缓存连接和迁移配置。"""
     from config import CONFIG_LOCK, Config
 
-    valid = set(_caches()) | set(CACHE_GROUPS) | {
+    from app.media.recognition.cache_repository import LAYERS
+    valid = set(_caches()) | set(CACHE_GROUPS) | {"recognition_" + layer for layer in LAYERS} | {
         "recognition_parse", "recognition_tmdb", "recognition_decision", "tmdb_metadata"}
     if not isinstance(name, str) or name not in valid:
         raise ValueError("缓存类型无效")
@@ -167,7 +187,9 @@ def clear_cache(name):
         if STORE.status().get("maintenance"):
             raise ValueError("缓存迁移期间不能清理缓存")
         caches = _caches()
-        valid = set(caches) | {"recognition_parse", "recognition_tmdb",
+        from app.media.recognition.cache_repository import LAYERS
+        layers = {"recognition_" + layer for layer in LAYERS}
+        valid = set(caches) | layers | {"recognition_parse", "recognition_tmdb",
                                "recognition_decision", "tmdb_metadata"}
         if not isinstance(name, str) or name not in valid | set(CACHE_GROUPS) | {"all"}:
             raise ValueError("缓存类型无效")
@@ -176,14 +198,17 @@ def clear_cache(name):
             if name in CACHE_GROUPS else [name])
         cleared = 0
         for target in names:
-            if target.startswith("recognition_"):
+            if target in layers:
+                cleared += STORE.memory_info(target)["entries"]
+                STORE.envelope_clear(target)
+            elif target.startswith("recognition_"):
                 namespace = target.removeprefix("recognition_")
                 cleared += cache.info(namespace)["entries"]
                 cache.clear(namespace)
             elif target == "tmdb_metadata":
                 helper = MetaHelper()
                 cleared += helper.cache_info()["entries"]
-                helper.clear_meta_data()
+                helper.clear_meta_data(include_recognition=False)
             else:
                 instance = caches[target]
                 cleared += instance.memory_info()["entries"]
