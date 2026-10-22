@@ -102,8 +102,12 @@ class OpenAIRecognizer(MediaNameRecognizer):
                 return failure("openai_input_too_large")
             key = self._api_key
             if key is None:
-                from app.media.recognition.secrets import SecretManager
-                key = SecretManager().get()
+                from app.media.recognition.secrets import SecretManager, SecretUnavailable
+                try:
+                    key = SecretManager().get()
+                except SecretUnavailable as error:
+                    # 本地凭据故障发生在请求前，直接保留原因，避免误报接口故障。
+                    return failure(str(error), "error")
             # 本地兼容端点可以有意不配置凭据。
             headers = {"Content-Type": "application/json"}
             if key:

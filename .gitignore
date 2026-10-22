@@ -30,6 +30,7 @@ config/tmdb.dat
 *.db-shm
 *.db-wal
 /config/.secret_key
+/config/.recognition-master.key
 todo.md
 docs/
 /AGENTS.md
