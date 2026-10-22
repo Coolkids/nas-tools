@@ -1176,7 +1176,7 @@ requires-dist = [
     { name = "jinja2", specifier = "==3.1.6" },
     { name = "jsonpath", specifier = "==0.82.2" },
     { name = "lxml", specifier = "==6.1.3" },
-    { name = "parse", specifier = "==1.22.3" },
+    { name = "parse", specifier = "==1.22.4" },
     { name = "pikpakapi", specifier = "==0.1.11" },
     { name = "plexapi", specifier = "==4.18.3" },
     { name = "protobuf", specifier = "==7.36.2" },
@@ -1190,7 +1190,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = "==1.2.4" },
     { name = "pytz", specifier = "==2026.5" },
     { name = "pyvirtualdisplay", specifier = "==3.0" },
-    { name = "qbittorrent-api", specifier = "==2026.10.0" },
+    { name = "qbittorrent-api", specifier = "==2026.10.1" },
     { name = "redis", specifier = "==8.1.0" },
     { name = "regex", specifier = "==2026.9.29" },
     { name = "requests", specifier = "==2.34.2" },
@@ -1240,11 +1240,11 @@ wheels = [
 
 [[package]]
 name = "parse"
-version = "1.22.3"
+version = "1.22.4"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/64/47/3d816e5e8f65b17667a4fcc672806d9ecf3dd997691d56ae5345a445b653/parse-1.22.3.tar.gz", hash = "sha256:7e79bb39c72c3bf1613510fd5cdffe5baa9a7873892bef1d4566f1672c8a42f4", size = 37944, upload-time = "2026-10-10T17:29:41.029Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9e/0f/4bada23d2848aaa61f3577181dbd83895fa49fb9beb406835ed7eaca1b96/parse-1.22.4.tar.gz", hash = "sha256:706d458feed5a81b02768d3156e8070baf6cee7d150a3a3c0cd43101a875c3b5", size = 40279, upload-time = "2026-10-20T21:16:07.702Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/04/07/5c578992b965e9c5101c7ad377440ca250769b34542a1781ab06b25c56fc/parse-1.22.3-py2.py3-none-any.whl", hash = "sha256:2cd33a301b5a4b400ee79952f42364fe486e5f10701fbf819fbbab1eab478139", size = 21221, upload-time = "2026-10-10T17:29:39.676Z" },
+    { url = "https://files.pythonhosted.org/packages/8f/5f/fbe039e06108eefad9e6b1f7d915a9c73ca0451700c7d48ce05eaa3a2833/parse-1.22.4-py2.py3-none-any.whl", hash = "sha256:ae430a4477316eed4a9710f642b2db968ec89d5d82e6b0908b8169673b476847", size = 21919, upload-time = "2026-10-20T21:16:06.547Z" },
 ]
 
 [[package]]
@@ -1639,16 +1639,16 @@ wheels = [
 
 [[package]]
 name = "qbittorrent-api"
-version = "2026.10.0"
+version = "2026.10.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "packaging" },
     { name = "requests" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/bf/7f/b13f95d7409882e05912379f088b49c999914d5669ddaa956b102559403a/qbittorrent_api-2026.10.0.tar.gz", hash = "sha256:2b4c9a6be2f6476c35d10bdb149f357f03781a72506e9deca2bccef8c327e97b", size = 1457850, upload-time = "2026-10-03T16:20:49.073Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/48/5b/9d8b20d8a84ace25f235323756d3c8aa345576c428fdacabc50360dcd9ee/qbittorrent_api-2026.10.1.tar.gz", hash = "sha256:70a66abf381170256240e188c825634849fd02eb2ec40bf6e157a2df8f5d484b", size = 1458161, upload-time = "2026-10-21T05:50:00.639Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/82/63/a10d1c7ae6211845e2c099f778443d77c6460afb71860a841e90ae78369d/qbittorrent_api-2026.10.0-py3-none-any.whl", hash = "sha256:4db35298ffd469bc09f45e8ee3ae1385fabf833971150aacacd5bce43d4cb94f", size = 73898, upload-time = "2026-10-03T16:20:47.573Z" },
+    { url = "https://files.pythonhosted.org/packages/b1/7b/f1620a59a280dc7b73cc316bca287648ebd6ed6e3eda3938cfe5acc92a3a/qbittorrent_api-2026.10.1-py3-none-any.whl", hash = "sha256:e1caf4359eb8b6b129fa50bfe3ffae720d29eb806f51325565198c37a158469c", size = 74079, upload-time = "2026-10-21T05:49:59.167Z" },
 ]
 
 [[package]]

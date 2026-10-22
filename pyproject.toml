@@ -25,7 +25,7 @@ dependencies = [
     "Jinja2==3.1.6",
     "jsonpath==0.82.2",
     "lxml==6.1.3",
-    "parse==1.22.3",
+    "parse==1.22.4",
     "pikpakapi==0.1.11",
     "plexapi==4.18.3",
     "protobuf==7.36.2",
@@ -39,7 +39,7 @@ dependencies = [
     "python_dateutil==2.9.0.post0",
     "pytz==2026.5",
     "PyVirtualDisplay==3.0",
-    "qbittorrent_api==2026.10.0",
+    "qbittorrent_api==2026.10.1",
     "redis==8.1.0",
     "regex==2026.9.29",
     "Requests==2.34.2",
@@ -73,13 +73,3 @@ package = false
 [tool.uv.sources]
 anitopy = { path = "third_party/anitopy" }
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-markers = [
-    "recognition_v3: media recognition V3 acceptance contract",
-    "v3_integration: requires isolated real storage or HTTP services",
-    "v3_migration: destructive migration checks against owned test databases",
-    "v3_process: supervised worker and cancellation integration checks",
-    "v3_load: opt-in recognition accuracy and resource measurements",
-]
