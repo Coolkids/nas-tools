@@ -87,7 +87,7 @@ class ReleaseGroupsMatcher(object):
             if custom_release_groups.endswith(';'):
                 custom_release_groups = custom_release_groups[:-1]
             custom_release_groups = custom_release_groups.replace(";", "|")
-            self.__release_groups = f"{'|'.join(release_groups)}|{custom_release_groups}"
+            self.__release_groups = f"{custom_release_groups}|{'|'.join(release_groups)}"
         else:
             self.__release_groups = '|'.join(release_groups)
 
@@ -104,7 +104,8 @@ class ReleaseGroupsMatcher(object):
         title = f"{title} "
         try:
             groups_re = re.compile(r"(?<=[-@\[￡【])(?:%s)(?=[@.\s\]\[】])" % groups, re.I)
-            return '@'.join(groups_re.findall(title, timeout=self._MATCH_TIMEOUT_SECONDS))
+            # 自定义正则可以包含捕获组，始终取完整匹配，避免只返回子组或元组。
+            return '@'.join(match.group(0) for match in groups_re.finditer(title, timeout=self._MATCH_TIMEOUT_SECONDS))
         except TimeoutError:
             log.warn("【Meta】制作组正则匹配超时，已跳过本次识别")
         except re.error as err:

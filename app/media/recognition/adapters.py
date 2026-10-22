@@ -2,6 +2,7 @@
 
 from app.media.meta.metaanime import MetaAnime
 from app.media.meta.metavideo import MetaVideo
+from app.media.meta.release_groups import ReleaseGroupsMatcher
 from app.utils import StringUtils
 from app.utils.types import MediaType
 from copy import copy, deepcopy
@@ -30,6 +31,11 @@ def meta_from_normalized(prepared: PreprocessResult, parsed: NormalizedParse, *,
     meta.en_name = next((value for value in meta.alternative_names if not StringUtils.is_chinese(value)), None)
     meta.year = str(parsed.year) if parsed.year is not None else None
     meta.recognition_source = parsed.provider_id
+    # 制作组从当前原始文件名匹配，避免识别词清洗或作品缓存丢掉发布信息。
+    matcher = ReleaseGroupsMatcher()
+    release = parsed.release_metadata if isinstance(parsed.release_metadata, dict) else {}
+    meta.resource_team = (matcher.match(title=prepared.raw_title)
+        or matcher.match(title=prepared.clean_title) or release.get("release_group") or None)
     meta._recognition_preprocess = prepared
     meta._recognition_original_title, meta._recognition_original_subtitle = prepared.raw_title, prepared.raw_secondary_title
     meta._recognition_processed_title, meta._recognition_processed_subtitle = prepared.clean_title, prepared.clean_secondary_title

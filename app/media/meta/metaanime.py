@@ -157,8 +157,8 @@ class MetaAnime(MetaBase):
                         self.resource_pix = str(self.resource_pix) + "p"
                 # 制作组/字幕组
                 self.resource_team = \
-                    anitopy_info_origin.get("release_group") or \
-                    ReleaseGroupsMatcher().match(title=original_title) or None
+                    ReleaseGroupsMatcher().match(title=original_title) or \
+                    anitopy_info_origin.get("release_group") or None
                 # 视频编码
                 video_terms = anitopy_info.get("video_term") or []
                 if not isinstance(video_terms, list):

@@ -11,7 +11,7 @@ from app.media.recognition.release_year import explicit_release_year, plausible_
 
 
 class AnitopyRecognizer(MediaNameRecognizer):
-    descriptor = RecognizerDescriptor("anitopy", "Anitopy", "2.2-v3.6", "local_rules")
+    descriptor = RecognizerDescriptor("anitopy", "Anitopy", "2.2-v3.7", "local_rules")
 
     def __init__(self, timeout=None):
         self.timeout = timeout

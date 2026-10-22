@@ -120,8 +120,6 @@ class RecognitionCoordinator:
         meta.resource_effect = " ".join(dict.fromkeys(x.upper() for x in effects)) or None
         part = re.search(r"(?i)\b(?:PART|CD|DVD|DISK|DISC)[ .]?(?:\d{1,2}|III|II|IV|[ABCI])\b", technical_text)
         meta.part = re.sub(r"[ .]", "", part[0]) if part else None
-        from app.media.meta.release_groups import ReleaseGroupsMatcher
-        meta.resource_team = ReleaseGroupsMatcher().match(title=prepared.clean_title) or None
         return meta
 
     def resolve(self, title, *, subtitle=None, mtype=None, name=None, year=None, season=None,
@@ -224,6 +222,13 @@ class RecognitionCoordinator:
                 if state.get("meta") is not None:
                     _apply_episode_context(state["meta"], episode.season, episode.episodes)
                     state["meta"].recognition_review_reason = episode.review_reason
+        def adopt_release_group(parses):
+            # 自定义规则已在适配时优先匹配；没有命中时再使用当前文件的解析结果。
+            meta = state.get("meta")
+            if meta is not None and not meta.resource_team:
+                meta.resource_team = next((parsed.release_metadata["release_group"] for parsed in parses
+                    if parsed.status == "success" and isinstance(parsed.release_metadata, dict)
+                    and parsed.release_metadata.get("release_group")), None)
         if not title or not isinstance(title, str):
             return RecognitionOutcome(trace.request_id, RecognitionStatus.FAILED, failure_code="empty_title"), None, None, None, None
         if file_path is not None:
@@ -281,6 +286,8 @@ class RecognitionCoordinator:
             trace.input["scope"] = asdict(scope)
         if pre_parsed is not None:
             for field in ("resource_type", "resource_pix", "resource_effect", "resource_team", "video_encode", "audio_encode", "part"):
+                if field == "resource_team" and parsed_meta.resource_team:
+                    continue
                 if getattr(pre_parsed, field, None) is not None:
                     setattr(parsed_meta, field, deepcopy(getattr(pre_parsed, field)))
         if not profile_tmdb_allowed("resolve", self.rec):
@@ -384,6 +391,7 @@ class RecognitionCoordinator:
                     ranked = analysis["ranking"]
                     if lookup is prepared:
                         file_parses = analysis["parsers"].results
+                        adopt_release_group(file_parses)
                     episode_input = analysis["episode"]
                     adopt_episode(episode_input)
                     if ranked.status == RecognitionStatus.MATCHED:
@@ -486,6 +494,12 @@ class RecognitionCoordinator:
                     "output": asdict(episode)})
             else:
                 adopt_episode(default_episode_season(episode_input))
+        if not parsed_meta.resource_team and file_parses is None:
+            # 电影缓存命中或手动指定季集时也只从当前文件恢复制作组，不继承其他文件的组名。
+            from app.media.recognition.parser_manager import ParserManager
+            file_parses = ParserManager(self.settings, runtime=self._runtime(), budget=budget).run(
+                prepared, network_allowed=False, cache=cache, provider_ids=("anitopy",)).results
+        adopt_release_group(file_parses or ())
         try:
             self._check_episode(detail, episode, identity.media_type,
                 trust_tv_coordinates=provided is not None)

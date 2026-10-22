@@ -85,14 +85,15 @@ class ParserManager:
                 if value is not parse_cache.CACHE_MISS:
                     try:
                         release = None
-                        if provider_id == "openai":
+                        if provider_id in {"openai", "anitopy"}:
                             if not isinstance(value, dict) or set(value) != {"extraction", "release_metadata"}:
-                                raise ValueError("invalid_llm_parse_cache")
+                                raise ValueError("invalid_parser_parse_cache")
                             release = value["release_metadata"]
-                            expected = set(RELEASE_FIELDS) if configured.get("extraction_mode") == "full" else set()
+                            expected = ({"release_group"} if provider_id == "anitopy" else
+                                set(RELEASE_FIELDS) if configured.get("extraction_mode") == "full" else set())
                             if (not isinstance(release, dict) or set(release) != expected or
                                     any(item is not None and (not isinstance(item, str) or len(item) > 1024) for item in release.values())):
-                                raise ValueError("invalid_llm_release_cache")
+                                raise ValueError("invalid_parser_release_cache")
                             value = value["extraction"]
                         parsed = normalized(value, provider_id, descriptor.version, descriptor.evidence_family, prepared=prepared)
                     except (ValueError, TypeError):
@@ -139,12 +140,16 @@ class ParserManager:
                     results[provider_id] = normalized(value.parsed, provider_id, descriptor.version,
                         descriptor.evidence_family, duration_ms=value.elapsed_ms, prepared=prepared)
                     release = (value.raw_result or {}).get("release_metadata", {}) if provider_id == "openai" else None
+                    if provider_id == "anitopy":
+                        group = (value.raw_result or {}).get("release_group")
+                        release = {"release_group": group if isinstance(group, str) and 0 < len(group) <= 1024 else None}
                     results[provider_id] = replace(results[provider_id], release_metadata=release)
                     if cache and self.budget.failure_reason is None:
                         key, generation = cache_keys[provider_id]
                         if generation is not None:
                             try:
-                                cached = {"extraction": value.parsed, "release_metadata": release} if provider_id == "openai" else value.parsed
+                                cached = ({"extraction": value.parsed, "release_metadata": release}
+                                    if provider_id in {"openai", "anitopy"} else value.parsed)
                                 parse_cache.put("parse", key, cached, generation=generation, settings=cache_settings)
                             except Exception:
                                 diagnostics.append({"provider_id": provider_id, "error": "parse_cache_write_failed"})
