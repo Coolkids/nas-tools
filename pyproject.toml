@@ -4,7 +4,7 @@ version = "3.2.0"
 description = "NAS media library resource aggregation and automation tool"
 requires-python = ">=3.14"
 dependencies = [
-    "alembic==1.20.0",
+    "alembic==1.20.1",
     "anitopy==2.2.0rc2",
     "APScheduler==3.11.3",
     "boddle==0.2.9",
@@ -44,7 +44,7 @@ dependencies = [
     "regex==2026.9.29",
     "Requests==2.34.2",
     "ruamel.yaml==0.19.1",
-    "SQLAlchemy==2.1.5",
+    "SQLAlchemy==2.1.6",
     "selenium==4.51.0",
     "tenacity==9.2.1",
     "undetected_chromedriver==3.5.5",
