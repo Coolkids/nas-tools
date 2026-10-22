@@ -506,6 +506,10 @@ class MetaBase(object):
     def set_tmdb_info(self, info):
         if not info:
             return
+        # TMDB 详情返回 genres，搜索结果返回 genre_ids；统一后再判断动漫和二级分类。
+        if not info.get("genre_ids") and isinstance(info.get("genres"), list):
+            info = {**info, "genre_ids": [genre["id"] for genre in info["genres"]
+                if isinstance(genre, dict) and genre.get("id") is not None]}
         self.type = self.__get_tmdb_type(info)
         if not self.type:
             return
