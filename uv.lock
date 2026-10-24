@@ -2,6 +2,9 @@ version = 1
 revision = 5
 requires-python = ">=3.14"
 
+[manifest]
+overrides = [{ name = "python-dateutil", specifier = "==3.0.0" }]
+
 [[package]]
 name = "alembic"
 version = "1.20.1"
@@ -277,7 +280,7 @@ wheels = [
 
 [[package]]
 name = "chalice"
-version = "1.33.0"
+version = "1.34.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "botocore" },
@@ -290,9 +293,9 @@ dependencies = [
     { name = "six" },
     { name = "wheel" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/52/9a/f55061c92e33b4543af437a20fb555386f2b195f96a90e1daad977a04b5f/chalice-1.33.0.tar.gz", hash = "sha256:a2b483e0365d676e3b5a8e1315a8729406ec11f8360f73d106013200992d7b6e", size = 256899, upload-time = "2026-05-07T19:02:20.619Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9b/0f/fd694f73a6fae19d0b600b282d79596398c3fc43c0b81b6c074fe1722c3a/chalice-1.34.0.tar.gz", hash = "sha256:38a96338e6592c5605e3da2ebd29c8d402ad5cbcbac635d2ef3ad4024bbc8041", size = 258195, upload-time = "2026-10-23T20:45:10.841Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5b/ed/c721931d966d135387ab2d5404a026ca0ae205325fbac4b8f9ac91a45186/chalice-1.33.0-py3-none-any.whl", hash = "sha256:b7748cac1e23633c3e72e6de5a17a90627dd0335cc3166ef7fc7043b6d4792ca", size = 265872, upload-time = "2026-05-07T19:02:18.857Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/2c/66e68d62a98f6ab3f7b47f1fb36182d6b28676aa53452b6af2f322a1d195/chalice-1.34.0-py3-none-any.whl", hash = "sha256:e0b01050a9dc3f4818a8bb4e36b67decf9066639db4cb21b8eb18edb99e9d1c9", size = 266975, upload-time = "2026-10-23T20:45:09.487Z" },
 ]
 
 [[package]]
@@ -1161,7 +1164,7 @@ requires-dist = [
     { name = "boddle", specifier = "==0.2.9" },
     { name = "cachelib", specifier = "==0.17.0" },
     { name = "cacheout", specifier = "==0.17.0" },
-    { name = "chalice", specifier = "==1.33.0" },
+    { name = "chalice", specifier = "==1.34.0" },
     { name = "cn2an", specifier = "==0.5.24" },
     { name = "cython", specifier = "==3.3.0" },
     { name = "databases", specifier = "==0.9.0" },
@@ -1186,7 +1189,7 @@ requires-dist = [
     { name = "pymysql", specifier = "==1.2.3" },
     { name = "pypushdeer", specifier = "==0.0.3" },
     { name = "pyquery", specifier = "==2.1.0" },
-    { name = "python-dateutil", specifier = "==2.9.0.post0" },
+    { name = "python-dateutil", specifier = "==3.0.0" },
     { name = "python-dotenv", specifier = "==1.2.4" },
     { name = "pytz", specifier = "==2026.5" },
     { name = "pyvirtualdisplay", specifier = "==3.0" },
@@ -1565,14 +1568,15 @@ wheels = [
 
 [[package]]
 name = "python-dateutil"
-version = "2.9.0.post0"
+version = "3.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "six" },
+    { name = "tzdata" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/66/c0/0c8b6ad9f17a802ee498c46e004a0eb49bc148f2fd230864601a86dcf6db/python-dateutil-2.9.0.post0.tar.gz", hash = "sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3", size = 342432, upload-time = "2024-03-01T18:36:20.211Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0e/df/f15f80383f152452d8985b36d95cb8751f901a3e0ff4cd27f7e118f168e2/python_dateutil-3.0.0.tar.gz", hash = "sha256:7ebcb3c29a92f3ceafe79a7a48a5c45677e9e004bbeec5742ac0bbb00560b7a2", size = 271066, upload-time = "2026-10-21T23:41:45.075Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl", hash = "sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427", size = 229892, upload-time = "2024-03-01T18:36:18.57Z" },
+    { url = "https://files.pythonhosted.org/packages/5a/17/cebee01d1c0c1441174cf0456ddc91b280d79acb65340c05e41d77866ee8/python_dateutil-3.0.0-py2.py3-none-any.whl", hash = "sha256:3c79630202e4152c6add678446984236efe4f57e84d8e892aab0637bab82e9fd", size = 94659, upload-time = "2026-10-21T23:41:43.431Z" },
 ]
 
 [[package]]

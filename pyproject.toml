@@ -10,7 +10,7 @@ dependencies = [
     "boddle==0.2.9",
     "cachelib==0.17.0",
     "cacheout==0.17.0",
-    "chalice==1.33.0",
+    "chalice==1.34.0",
     "cn2an==0.5.24",
     "Cython==3.3.0",
     "databases==0.9.0",
@@ -36,7 +36,7 @@ dependencies = [
     "PyMySQL==1.2.3",
     "pyquery==2.1.0",
     "python-dotenv==1.2.4",
-    "python_dateutil==2.9.0.post0",
+    "python_dateutil==3.0.0",
     "pytz==2026.5",
     "PyVirtualDisplay==3.0",
     "qbittorrent_api==2026.10.1",
@@ -69,7 +69,9 @@ dev = [
 [tool.uv]
 # NAS-tools is a directly-run application, not a distributable package.
 package = false
+override-dependencies = [
+    "python-dateutil==3.0.0",
+]
 
 [tool.uv.sources]
 anitopy = { path = "third_party/anitopy" }
-
