@@ -185,6 +185,8 @@ class WebAction:
             "rss_articles_check": self.__rss_articles_check,
             "rss_articles_download": self.__rss_articles_download,
             "add_custom_word_group": self.__add_custom_word_group,
+            "update_custom_word_group": self.__update_custom_word_group,
+            "test_custom_words": self.__test_custom_words,
             "delete_custom_word_group": self.__delete_custom_word_group,
             "add_or_edit_custom_word": self.__add_or_edit_custom_word,
             "get_custom_word": self.__get_custom_word,
@@ -3316,6 +3318,59 @@ class WebAction:
             ExceptionUtils.exception_traceback(e)
             return {"code": 1, "msg": str(e)}
 
+    def __update_custom_word_group(self, data):
+        try:
+            gid = int(data.get("gid"))
+            tmdb_id = int(data.get("tmdb_id"))
+            if gid <= 0 or tmdb_id <= 0:
+                return {"code": 1, "msg": "识别词组或 TMDB ID 无效"}
+            groups = self.dbhelper.get_custom_word_groups(gid=gid)
+            if not groups:
+                return {"code": 1, "msg": "识别词组不存在"}
+            group = groups[0]
+            duplicates = self.dbhelper.get_custom_word_groups(tmdbid=tmdb_id, gtype=group.TYPE)
+            if any(item.ID != gid for item in duplicates):
+                return {"code": 1, "msg": "识别词组（TMDB ID）已存在"}
+            is_movie = group.TYPE == 1
+            tmdb_info = Media().get_tmdb_info(
+                mtype=MediaType.MOVIE if is_movie else MediaType.TV, tmdbid=tmdb_id)
+            if not tmdb_info:
+                return {"code": 1, "msg": "修改失败，无法查询到 TMDB 信息"}
+            updated = self.dbhelper.update_custom_word_group(
+                gid=gid,
+                title=tmdb_info.get("title" if is_movie else "name") or "",
+                year=(tmdb_info.get("release_date" if is_movie else "first_air_date") or "")[:4],
+                tmdbid=tmdb_id,
+                season_count=0 if is_movie else tmdb_info.get("number_of_seasons") or 0,
+            )
+            if not updated:
+                return {"code": 1, "msg": "修改失败，无法保存识别词组"}
+            return {"code": 0, "msg": ""}
+        except (TypeError, ValueError):
+            return {"code": 1, "msg": "请填写有效的 TMDB ID"}
+        except Exception as e:
+            ExceptionUtils.exception_traceback(e)
+            return {"code": 1, "msg": str(e)}
+
+    @staticmethod
+    def __test_custom_words(data):
+        from app.media.recognition.preprocessor import preprocess_with_details, snapshot_rules
+
+        title = data.get("title")
+        if not isinstance(title, str) or not title.strip():
+            return {"code": 1, "msg": "请输入用于测试的资源名称"}
+        try:
+            prepared, matched, messages = preprocess_with_details(title, rules=snapshot_rules(WordsHelper()))
+            return {"code": 0, "data": {
+                "original_title": title,
+                "processed_title": prepared.clean_title,
+                "messages": messages,
+                "matched": matched,
+            }}
+        except Exception as e:
+            ExceptionUtils.exception_traceback(e)
+            return {"code": 1, "msg": str(e)}
+
     def __delete_custom_word_group(self, data):
         try:
             gid = data.get("gid")
@@ -4287,11 +4342,12 @@ class WebAction:
                           "enabled": word_info.ENABLED,
                           "regex": word_info.REGEX,
                           "help": word_info.HELP, })
-        groups = [{"id": "-1",
+        groups = [{"id": -1,
                    "name": "通用",
                    "link": "",
-                   "type": "1",
-                   "seasons": "0",
+                   "type": 1,
+                   "tmdbid": None,
+                   "seasons": 0,
                    "image": "",
                    "words": words}]
         groups_info = self.dbhelper.get_custom_word_groups()
@@ -4299,6 +4355,8 @@ class WebAction:
         tmdb_tasks = []
         for group_info in groups_info:
             gid = group_info.ID
+            if gid == -1:
+                continue
             name = "%s (%s)" % (group_info.TITLE, group_info.YEAR)
             gtype = group_info.TYPE
             if gtype == 1:
@@ -4325,6 +4383,7 @@ class WebAction:
                           "image": "",
                           "link": link,
                           "type": group_info.TYPE,
+                          "tmdbid": group_info.TMDBID,
                           "seasons": group_info.SEASON_COUNT,
                           "words": words}
             if group_info.TMDBID:

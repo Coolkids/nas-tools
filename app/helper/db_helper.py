@@ -1931,6 +1931,16 @@ class DbHelper:
         ))
 
     @DbPersist(_db)
+    def update_custom_word_group(self, gid, title, year, tmdbid, season_count):
+        """更新识别词组的媒体信息，保留组内识别词。"""
+        self._db.query(CUSTOMWORDGROUPS).filter(CUSTOMWORDGROUPS.ID == int(gid)).update({
+            "TITLE": title,
+            "YEAR": self._identifier_string(year),
+            "TMDBID": int(tmdbid),
+            "SEASON_COUNT": int(season_count),
+        })
+
+    @DbPersist(_db)
     def delete_custom_word_group(self, gid):
         """
         删除自定义识别词组

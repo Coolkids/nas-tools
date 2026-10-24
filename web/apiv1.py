@@ -1523,6 +1523,29 @@ class WordsGroupAdd(ClientResource):
         return WebAction().api_action(cmd='add_custom_word_group', data=self.parser.parse_args())
 
 
+@words.route('/group/update')
+class WordsGroupUpdate(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('gid', type=int, help='识别词组ID', location='form', required=True)
+    parser.add_argument('tmdb_id', type=int, help='TMDBID', location='form', required=True)
+
+    @words.doc(parser=parser)
+    def post(self):
+        """修改识别词组的 TMDB ID"""
+        return WebAction().api_action(cmd='update_custom_word_group', data=self.parser.parse_args())
+
+
+@words.route('/test')
+class WordsTest(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('title', type=str, help='资源名称', location='form', required=True)
+
+    @words.doc(parser=parser)
+    def post(self):
+        """测试当前已保存并启用的识别词规则"""
+        return WebAction().api_action(cmd='test_custom_words', data=self.parser.parse_args())
+
+
 @words.route('/group/delete')
 class WordsGroupDelete(ClientResource):
     parser = reqparse.RequestParser()
