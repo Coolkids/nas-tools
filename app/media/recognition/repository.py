@@ -1,13 +1,13 @@
 """为 V3 历史记录和运维控制提供简短、可移植的事务。"""
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import re
 import time
 
-from sqlalchemy import delete, func, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy import delete, exists, func, select, update
+from sqlalchemy.orm import Session, aliased
 
 from app.db.manager import DATABASE
 from app.db.models import (
@@ -31,6 +31,15 @@ def encode(value):
     if len(wire.encode()) > 2 * 1024 * 1024:
         raise ValueError("recognition payload exceeds 2 MiB")
     return wire
+
+
+def live_task_reservation(now=None):
+    """幂等预约有效期间保留目标任务，避免重试失去原有任务标识。"""
+    reservation = aliased(TaskRow)
+    return exists(select(reservation.TASK_ID).where(
+        reservation.KIND == "recognition_idempotency",
+        reservation.REQUEST_ID == TaskRow.TASK_ID,
+        reservation.LEASE_UNTIL > (time.time() if now is None else now)))
 
 
 class RecognitionRepository:
@@ -153,7 +162,7 @@ class RecognitionRepository:
                 EXPORT_UNTIL=time.time() + seconds)).rowcount
 
     def task(self, task_id, *, owner, state="QUEUED", kind="recognition", request_id=None,
-             lease_until=0, control=None):
+             lease_until=0, control=None, retain=True):
         allowed = {"scope", "cutoff", "deleted", "skipped", "remaining", "idempotency_hash", "error_code", "retention_cutoff", "max_records"}
         if control is not None and (not isinstance(control, dict) or set(control) - allowed):
             raise ValueError("task metadata cannot contain recognition input/result")
@@ -183,6 +192,9 @@ class RecognitionRepository:
             row.STATE, row.LEASE_UNTIL = state, lease_until
             if control is not None:
                 row.CONTROL = encode(control)
+            if not retain and state not in ACTIVE_TASKS and lease_until <= time.time():
+                session.flush()
+                session.delete(row)
         return task_id
 
     def get_task(self, task_id, owner):
@@ -199,13 +211,33 @@ class RecognitionRepository:
                 TaskRow.STATE.in_(ACTIVE_TASKS), TaskRow.LEASE_UNTIL > time.time()).limit(1)).first() is not None
 
     def prune_tasks(self):
-        from datetime import timedelta
-        cutoff = (datetime.now(timezone.utc)-timedelta(days=1)).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        now = time.time()
+        current = datetime.fromtimestamp(now, timezone.utc)
+        cutoff = (current-timedelta(days=1)).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        volatile_cutoff = (current-timedelta(seconds=60)).isoformat(timespec="microseconds").replace("+00:00", "Z")
         with self.transaction() as (session, _state):
             session.execute(update(TaskRow).where(TaskRow.STATE.in_(ACTIVE_TASKS),
-                TaskRow.LEASE_UNTIL <= time.time(), TaskRow.KIND.not_in({"cleanup", "recognition_async"})).values(STATE="INTERRUPTED"))
-            ids = session.execute(select(TaskRow.TASK_ID).where(TaskRow.STATE.not_in(ACTIVE_TASKS),
-                TaskRow.LEASE_UNTIL <= time.time(), TaskRow.CREATED_AT < cutoff).limit(2000)).scalars().all()
+                TaskRow.LEASE_UNTIL <= now, TaskRow.KIND.not_in({"cleanup", "recognition_async"})).values(STATE="INTERRUPTED"))
+            saved = exists(select(TraceRow.REQUEST_ID).where(TraceRow.REQUEST_ID == TaskRow.REQUEST_ID))
+            rows = session.execute(select(TaskRow).where(TaskRow.STATE.not_in(ACTIVE_TASKS),
+                TaskRow.LEASE_UNTIL <= now, ~live_task_reservation(now),
+                (TaskRow.CREATED_AT < cutoff) | (
+                    TaskRow.KIND.in_({"recognition", "recognition_async"}) & ~saved)
+            ).order_by(TaskRow.CREATED_AT, TaskRow.TASK_ID).limit(2000)).scalars().all()
+            ids = []
+            for row in rows:
+                # 异步任务结束后留出与临时轨迹相同的轮询窗口；有效幂等预约另行保护。
+                if row.KIND == "recognition_async":
+                    control = json.loads(row.CONTROL or "{}")
+                    released = control.get("resource_released_at") or control.get("updated_at") or row.CREATED_AT
+                    if released > volatile_cutoff:
+                        continue
+                    mode = control.get("record_mode", "failed")
+                    retained = mode == "all" or mode == "failed" and row.STATE in {"FAILED", "INTERRUPTED"}
+                    if row.CREATED_AT >= cutoff and retained:
+                        # 应保留的轨迹可能仍在等待暂存恢复，不能提前移除恢复所需的任务栅栏。
+                        continue
+                ids.append(row.TASK_ID)
             if ids:
                 session.execute(delete(TaskRow).where(TaskRow.TASK_ID.in_(ids)))
             return len(ids)

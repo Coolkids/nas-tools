@@ -180,12 +180,12 @@ class Trace:
             _active.add(self.request_id)
         self.emit("request", "request_started", "running", {"input": self.input})
 
-    def _task(self, state, lease_until=0):
+    def _task(self, state, lease_until=0, *, retain=True):
         if self.managed:
             return
         try:
             self.repository.task(self.request_id, owner=self._task_owner, state=state,
-                                 request_id=self.request_id, lease_until=lease_until)
+                                 request_id=self.request_id, lease_until=lease_until, retain=retain)
         except Exception as error:
             self.spool_error = type(error).__name__
 
@@ -331,7 +331,7 @@ class Trace:
                 _heartbeats.pop(self.request_id, None)
             task_state = ("INTERRUPTED" if outcome.failure_code == "service_shutdown" else "CANCELLED") if self.status == "CANCELLED" else (
                 "FAILED" if self.status in FAILED else "SUCCEEDED")
-            self._task(task_state)
+            self._task(task_state, retain=keep)
             if self._hub is not None:
                 self._hub.release(self)
             return outcome

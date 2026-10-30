@@ -7,7 +7,7 @@ import tempfile
 from types import SimpleNamespace
 from enum import Enum
 
-from sqlalchemy import select, func, or_, and_, delete
+from sqlalchemy import select, func, or_, and_
 from sqlalchemy.orm import Session
 
 from app.db.models import RECOGNITIONTRACE as TraceRow, RECOGNITIONEVENT as EventRow, RECOGNITIONCANDIDATE as CandidateRow
@@ -355,6 +355,7 @@ class LegacyHistory:
                 return {"archived_count": 0, "deleted_count": 0, "archive_path": None}
             os.link(temporary, archive_path)
             if delete_archived:
+                from app.media.recognition.cleanup import CleanupService
                 with open(archive_path, encoding="utf-8") as source:
                     for line in source:
                         item = json.loads(line)
@@ -362,9 +363,7 @@ class LegacyHistory:
                             row = session.get(TraceRow, item["request_id"])
                             if row is None or row.STATUS not in TERMINAL or row.VERSION != item["trace"]["version"] or self.repository._protected(session,row):
                                 continue
-                            for model in (CandidateRow, EventRow, TraceRow):
-                                session.execute(delete(model).where(model.REQUEST_ID==row.REQUEST_ID))
-                            deleted += 1
+                            deleted += CleanupService._delete(session, [row.REQUEST_ID])
             return {"archived_count": count, "deleted_count": deleted, "archive_path": archive_path}
         finally:
             os.unlink(temporary)

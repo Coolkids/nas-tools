@@ -18,7 +18,9 @@ from app.db.models import (
     RECOGNITIONTRACE as TraceRow, RECOGNITIONEVENT as EventRow,
     RECOGNITIONCANDIDATE as CandidateRow, RECOGNITIONTASK as TaskRow,
 )
-from app.media.recognition.repository import RecognitionRepository, TERMINAL, ACTIVE_TASKS, utc_now, encode
+from app.media.recognition.repository import (
+    RecognitionRepository, TERMINAL, ACTIVE_TASKS, utc_now, encode, live_task_reservation,
+)
 
 
 class CleanupBusy(RuntimeError):
@@ -187,7 +189,7 @@ class CleanupService:
                         task.CONTROL = encode(metadata)
             state.VERSION += 1
             control = {"scope": scope, "cutoff": payload["cutoff"], "deleted": 0,
-                       "deleted_traces": 0, "deleted_events": 0, "deleted_candidates": 0,
+                       "deleted_traces": 0, "deleted_events": 0, "deleted_candidates": 0, "deleted_tasks": 0,
                        "idempotency_hash": fingerprint, "skipped": 0, "remaining": 0}
             if scope == "expired":
                 control.update(retention_cutoff=payload["retention_cutoff"], max_records=payload["max_records"])
@@ -226,6 +228,14 @@ class CleanupService:
     def _delete(session, request_ids, counters=None):
         if not request_ids:
             return 0
+        # 同事务回收关联控制记录；仍占用资源或仍用于幂等去重的任务由后续回收处理。
+        tasks = (TaskRow.REQUEST_ID.in_(request_ids), TaskRow.STATE.not_in(ACTIVE_TASKS),
+                 TaskRow.LEASE_UNTIL <= time.time(), ~live_task_reservation())
+        task_ids = session.execute(select(TaskRow.TASK_ID).where(*tasks)).scalars().all()
+        if task_ids:
+            if counters is not None:
+                counters["deleted_tasks"] = counters.get("deleted_tasks", 0)+len(task_ids)
+            session.execute(delete(TaskRow).where(TaskRow.TASK_ID.in_(task_ids)))
         for model, name in ((CandidateRow, "deleted_candidates"), (EventRow, "deleted_events"), (TraceRow, "deleted_traces")):
             if counters is not None:
                 count = session.execute(select(func.count()).select_from(model).where(model.REQUEST_ID.in_(request_ids))).scalar_one()
