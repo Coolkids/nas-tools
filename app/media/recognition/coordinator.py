@@ -328,7 +328,8 @@ class RecognitionCoordinator:
             source = "override"
         else:
             lease_context = self.identities.singleflight(key, budget) if cache else nullcontext(None)
-            lease = work_scope.enter_context(lease_context)
+            identity_work_scope = work_scope.enter_context(ExitStack())
+            lease = identity_work_scope.enter_context(lease_context)
             budget.check()
             current = self.overrides.get(scope)
             if current["version"] != override["version"]:
@@ -343,7 +344,20 @@ class RecognitionCoordinator:
                 identity_miss_reason = "continue_parsing"
                 if identity is not None:
                     attempts_before = client.http_attempt_count
-                    detail = client.detail(identity.media_type, identity.tmdb_id, language, cache=cache)
+                    try:
+                        detail = client.detail(identity.media_type, identity.tmdb_id, language, cache=cache)
+                    except TMDBRequestError as error:
+                        if error.status != 404:
+                            raise
+                        invalidated = self.identities.invalidate(key, identity)
+                        trace.emit("identity", "identity_cache_invalidated", "success", {
+                            "tmdb_id": identity.tmdb_id, "media_type": identity.media_type,
+                            "reason": error.code, "deleted": invalidated})
+                        # 删除缓存会使当前租约失效，重新取得租约才能回填新身份。
+                        identity_work_scope.close()
+                        lease = identity_work_scope.enter_context(self.identities.singleflight(key, budget))
+                        identity, identity_miss_reason = None, error.code
+                if identity is not None:
                     trace.emit("identity", "identity_detail_loaded", "success", {
                         "tmdb_id": identity.tmdb_id, "media_type": identity.media_type,
                         "cache_source": "tmdb" if client.http_attempt_count > attempts_before else "cache"})
@@ -380,7 +394,9 @@ class RecognitionCoordinator:
                         "cache_source": "bypassed" if not cache or state.get("bypass_identity_cache") else "miss",
                         "reason": identity_miss_reason})
                     previous_identity = self.cache.get("identity", key, hit=False) if cache else None
-                    revalidate = previous_identity is not None and previous_identity.needs_revalidation
+                    # 旧搜索缓存可能仍包含已删除的 ID，此次识别必须重新请求 TMDB。
+                    revalidate = identity_miss_reason == "tmdb_http_404" or (
+                        previous_identity is not None and previous_identity.needs_revalidation)
                     overrides = {"name": name} if name is not None else {}
                     if scope.year is not None:
                         overrides["year"] = scope.year

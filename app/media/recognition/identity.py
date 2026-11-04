@@ -234,6 +234,14 @@ class IdentityService:
         current = self.cache.get("identity", key, hit=hit)
         return value if current is not None and not current.needs_revalidation and current.cycle_id == envelope.cycle_id and current.payload_version == envelope.payload_version else None
 
+    def invalidate(self, key, value):
+        """仅删除仍指向失效作品的标题映射，避免误删并发更新。"""
+        envelope = self.cache.get("identity", key, hit=False, allow_stale=True)
+        if (envelope is None or envelope.payload.get("media_type") != value.media_type or
+                envelope.payload.get("tmdb_id") != value.tmdb_id):
+            return False
+        return self.cache.store.envelope_delete(self.cache.namespace("identity"), key, expected=asdict(envelope))
+
     @contextmanager
     def singleflight(self, key, budget):
         import uuid
