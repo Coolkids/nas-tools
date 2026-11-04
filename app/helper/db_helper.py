@@ -391,6 +391,25 @@ class DbHelper:
         self._search_task_query(keyword).delete()
 
     @DbPersist(_db)
+    def clear_search_history(self, active_keywords):
+        """清理搜索任务和结果，保留运行中或排队中的任务及其结果。"""
+        active_keywords = set(active_keywords)
+        active_keywords.update(row[0] for row in self._db.query(SEARCHTASK.KEYWORD).filter(
+            SEARCHTASK.STATUS.in_(['pending', 'running']),
+            SEARCHTASK.KEYWORD.isnot(None)).all())
+        results = self._db.query(SEARCHRESULTINFO)
+        tasks = self._db.query(SEARCHTASK)
+        if active_keywords:
+            results = results.filter(or_(SEARCHRESULTINFO.KEYWORD.is_(None),
+                                         SEARCHRESULTINFO.KEYWORD.notin_(active_keywords)))
+            tasks = tasks.filter(or_(SEARCHTASK.KEYWORD.is_(None),
+                                     SEARCHTASK.KEYWORD.notin_(active_keywords)))
+        result_count = results.delete(synchronize_session=False)
+        task_count = tasks.delete(synchronize_session=False)
+        return {"deleted_tasks": task_count, "deleted_results": result_count,
+                "skipped_tasks": len(active_keywords)}
+
+    @DbPersist(_db)
     def insert_rss_torrents(self, media_info):
         """
         将RSS的记录插入数据库

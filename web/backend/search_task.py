@@ -256,6 +256,25 @@ class SearchTaskPool:
             return {"code": 0, "msg": "任务已删除"}
 
     @classmethod
+    def clear_history(cls):
+        """与任务提交互斥，避免清理时删除新提交任务的记录。"""
+        db = DbHelper()
+        try:
+            with cls._lock:
+                active_keywords = set(cls._running) | {q[0] for q in cls._queue}
+                counts = db.clear_search_history(active_keywords)
+            if counts is False:
+                return {"code": -1, "msg": "资源搜索记录清理失败，请稍后重试"}
+            message = (f"已清理 {counts['deleted_tasks']} 条搜索任务、"
+                       f"{counts['deleted_results']} 条搜索结果")
+            if counts['skipped_tasks']:
+                message += f"，保留 {counts['skipped_tasks']} 个运行中或排队中的任务"
+            log.info(f"【资源搜索】{message}")
+            return {"code": 0, "msg": message, **counts}
+        finally:
+            db.release_session()
+
+    @classmethod
     def recover_crashed_tasks(cls):
         db = DbHelper()
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")

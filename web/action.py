@@ -208,6 +208,7 @@ class WebAction:
             "search_task_list": self.__search_task_list,
             "search_task_result": self.__search_task_result,
             "search_task_delete": self.__search_task_delete,
+            "clear_search_history": self.__clear_search_history,
             "search_media_infos": self.search_media_infos,
             "get_movie_rss_list": self.get_movie_rss_list,
             "get_tv_rss_list": self.get_tv_rss_list,
@@ -555,6 +556,11 @@ class WebAction:
         if not keyword:
             return {"code": -1, "msg": "缺少关键词参数"}
         return SearchTaskPool.delete_task(keyword)
+
+    @staticmethod
+    def __clear_search_history(data=None):
+        """手动清理资源搜索历史及其结果。"""
+        return SearchTaskPool.clear_history()
 
     def __download(self, data):
         """
